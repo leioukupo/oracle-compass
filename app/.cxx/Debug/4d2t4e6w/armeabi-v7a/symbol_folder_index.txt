@@ -1,0 +1,1 @@
+/root/oracle-compass/app/build/intermediates/cxx/Debug/4d2t4e6w/obj/armeabi-v7a

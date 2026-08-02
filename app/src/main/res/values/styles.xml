@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Bagua" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowBackground">#0A0A0A</item>
+        <item name="android:colorAccent">#D4AF37</item>
+        <item name="android:statusBarColor">#0A0A0A</item>
+        <item name="android:navigationBarColor">#0A0A0A</item>
+        <item name="android:dialogTheme">@style/Theme.Bagua.Dialog</item>
+    </style>
+
+    <style name="Theme.Bagua.Dialog" parent="android:Theme.Material.Dialog">
+        <item name="android:windowBackground">@drawable/bg_dialog_oval</item>
+        <item name="android:windowFrame">@null</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:windowMinWidthMajor">70%</item>
+        <item name="android:windowMinWidthMinor">70%</item>
+        <item name="android:colorAccent">#D4AF37</item>
+    </style>
+</resources>

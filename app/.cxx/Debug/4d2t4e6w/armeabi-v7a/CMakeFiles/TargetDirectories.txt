@@ -1,0 +1,4 @@
+/root/oracle-compass/app/.cxx/Debug/4d2t4e6w/armeabi-v7a/CMakeFiles/bagua_tts.dir
+/root/oracle-compass/app/.cxx/Debug/4d2t4e6w/armeabi-v7a/CMakeFiles/truthyuv.dir
+/root/oracle-compass/app/.cxx/Debug/4d2t4e6w/armeabi-v7a/CMakeFiles/edit_cache.dir
+/root/oracle-compass/app/.cxx/Debug/4d2t4e6w/armeabi-v7a/CMakeFiles/rebuild_cache.dir
