@@ -122,6 +122,8 @@ public class SettingsWebServer {
             else if (path.equals("/h264fast")) { serveH264Fast(s); return; }
             else if (path.equals("/stream_state")) serveStreamState(out);
             else if (path.equals("/system_status")) serveSystemStatus(out);
+            else if (path.equals("/key")) { serveKey(out, parts[1]); return; }
+            else if (path.equals("/touch")) { serveTouch(out, parts[1]); return; }
             else if (path.equals("/save")) serveSave(out, body);
             else serve404(out);
             out.flush();
@@ -139,6 +141,8 @@ public class SettingsWebServer {
                 + "legend{color:#d4af37}.row{margin:6px 0}label{display:inline-block;width:110px;color:#d4af37;font-size:13px}"
                 + "input[type=text]{width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px}"
                 + "button{background:#d4af37;color:#0d0b08;border:none;border-radius:8px;padding:8px 14px;margin:4px}"
+                + ".navbtn{width:74px;height:42px;border-radius:21px;background:#171512;color:#d4af37;border:1px solid #6b5a2e;font-size:13px;margin:0 5px;cursor:pointer}"
+                + ".navbtn:active{background:#d4af37;color:#0d0b08}"
                 + ".ok{color:#8fbf6a}</style></head><body>"
                 + "<h1>☯ 真理罗盘 · 网页设置</h1>"
                 + "<form id='f' onsubmit='save();return false'>"
@@ -182,12 +186,21 @@ public class SettingsWebServer {
                 + "<option value='2'>半尺寸(400×400)</option><option value='1'>原始(800×800)</option></select></div>"
                 + "<div style='text-align:center'><button type='button' onclick='toggleStream()' id='sbtn'>开始推流</button>"
                 + "<span id='sstate' style='font-size:12px;color:#8fbf6a'></span></div>"
-                + "<div style='display:flex;justify-content:center;gap:12px;flex-wrap:wrap;align-items:center'>"
-                + "<div style='text-align:center'><video id='h264v' muted autoplay playsinline style='width:340px;height:340px;"
+                + "<div style='display:flex;justify-content:center;gap:20px;flex-wrap:wrap;align-items:center'>"
+                + "<div style='text-align:center'>"
+                + "<div style='position:relative;width:92mm;height:92mm'>"
+                + "<video id='h264v' muted autoplay playsinline style='width:100%;height:100%;"
                 + "border-radius:50%;border:1px solid #6b5a2e;display:none;object-fit:cover;filter:brightness(1.55) contrast(1.15)'></video>"
-                + "<img id='screen' style='width:340px;height:340px;border-radius:50%;"
-                + "border:1px solid #6b5a2e;display:none;object-fit:cover;filter:brightness(1.55) contrast(1.15)'></div>"
-                + "<div style='width:340px;height:340px;border-radius:50%;border:1px solid #6b5a2e;background:#171512;position:relative;box-sizing:border-box'>"
+                + "<img id='screen' style='width:100%;height:100%;border-radius:50%;"
+                + "border:1px solid #6b5a2e;display:none;object-fit:cover;filter:brightness(1.55) contrast(1.15)'>"
+                + "<div id='touchpad' style='position:absolute;inset:0;border-radius:50%;cursor:crosshair;touch-action:none;user-select:none'></div></div>"
+                + "<div style='margin-top:8px;color:#8a8272;font-size:11px'>点击/长按/拖动圆面 → 远程操作设备屏幕</div>"
+                + "<div style='margin-top:4px'>"
+                + "<button type='button' class='navbtn' onclick='keyEvent(4)'>◀ 返回</button>"
+                + "<button type='button' class='navbtn' onclick='keyEvent(3)'>● 桌面</button>"
+                + "<button type='button' class='navbtn' onclick='keyEvent(187)'>▢ 最近</button>"
+                + "<div id='tstat' style='color:#8fbf6a;font-size:11px;margin-top:4px;min-height:14px'></div></div></div>"
+                + "<div style='width:92mm;height:92mm;border-radius:50%;border:1px solid #6b5a2e;background:#171512;position:relative;box-sizing:border-box'>"
                 + "<div style='position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center'>"
                 + "<div id='statTime' style='font-size:34px;color:#d4af37;font-weight:bold;font-family:monospace'></div>"
                 + "<div id='statDate' style='font-size:12px;color:#e8dcc0;margin-top:2px'></div>"
@@ -227,7 +240,7 @@ public class SettingsWebServer {
                 + "v.innerHTML=convHtml(d);v.scrollTop=v.scrollHeight;});}"
                 + "function clearConv(){var x=new XMLHttpRequest();x.open('POST','/clear_conv',true);"
                 + "x.onload=function(){document.getElementById('convMsg').textContent='已清空';loadConv();};x.send();}"
-                + "var streamOn=false;var mse=null,sb=null,abortCtl=null,watchdog=null,sess=0;"
+                + "var streamOn=false,streamEnded=false;var mse=null,sb=null,abortCtl=null,watchdog=null,sess=0;"
                 + "var boxBuf=new Uint8Array(0),boxOff=0,initDone=false,appending=false,pending=[],gotData=false;"
                 + "function currentMode(){var e=document.querySelector('[name=streamMode]');return e?e.value:'h264';}"
                 + "function boxAt(pos){if(pos+8>boxBuf.length)return null;"
@@ -249,7 +262,7 @@ public class SettingsWebServer {
                 + "if(e.name!=='InvalidStateError'){var st=document.getElementById('sstate');st.textContent='MSE 追加失败：'+e;}}}"
                 + "function startH264(){var video=document.getElementById('h264v');var st=document.getElementById('sstate');"
                 + "if(!window.MediaSource){st.textContent='浏览器不支持 MSE';return;}"
-                + "var my=++sess;boxBuf=new Uint8Array(0);boxOff=0;initDone=false;appending=false;pending=[];gotData=false;"
+                + "var my=++sess;boxBuf=new Uint8Array(0);boxOff=0;initDone=false;appending=false;pending=[];gotData=false;streamEnded=false;"
                 + "mse=new MediaSource();video.src=URL.createObjectURL(mse);"
                 + "mse.addEventListener('sourceopen',function(){"
                 + "if(my!==sess){return;}"
@@ -267,7 +280,7 @@ public class SettingsWebServer {
                 + "var reader=r.body.getReader();"
                 + "function step(){reader.read().then(function(res){"
                 + "if(my!==sess){return;}"
-                + "if(res.done){st.textContent='推流已结束';return;}"
+                + "if(res.done){st.textContent='推流已结束（保持最后一帧）';try{video.pause();}catch(e){}streamEnded=true;return;}"
                 + "var nb=new Uint8Array(boxBuf.length+res.value.length);nb.set(boxBuf,0);nb.set(res.value,boxBuf.length);boxBuf=nb;"
                 + "flushBoxes(my);gotData=true;"
                 + "if(watchdog){clearTimeout(watchdog);watchdog=null;}"
@@ -289,7 +302,7 @@ public class SettingsWebServer {
                 + "if(vv&&currentMode()==='h264'&&gotData){"
                 + "if(vv.videoWidth>0){if(st2.textContent.indexOf('已解码')<0)st2.textContent='推流中 · 画面已解码 '+vv.videoWidth+'x'+vv.videoHeight+'（持续更新）';}"
                 + "else if(st2.textContent.indexOf('未解码')<0&&st2.textContent.indexOf('推流中')>=0){st2.textContent='推流中 · 浏览器尚未解码出视频轨道（readyState='+vv.readyState+'）';}"
-                + "if(vv.paused&&gotData)vv.play().catch(function(){});}"
+                + "if(!streamEnded&&vv.paused&&gotData)vv.play().catch(function(){});}"
                 + "get('/stream_state',function(d){if(!d)return;"
                 + "var st3=document.getElementById('sstate');"
                 + "if(d.mode==='mjpeg'&&st3.textContent.indexOf('推流中')<0)st3.textContent='推流中 · MJPEG '+d.fps+'fps';"
@@ -301,20 +314,40 @@ public class SettingsWebServer {
                 + "if(m==='h264'||m==='h264fast'){img.style.display='none';video.style.display='inline-block';startH264();}"
                 + "else{video.style.display='none';img.src='/stream';img.style.display='inline-block';}"
                 + "btn.textContent='停止推流';}"
-                + "else{stopH264();img.src='';img.style.display='none';video.style.display='none';"
+                + "else{streamEnded=true;stopH264();img.src='';img.style.display='none';video.style.display='none';"
                 + "btn.textContent='开始推流';st.textContent='';}}"
                 + "function renderSystem(d){if(!d)return;"
                 + "document.getElementById('statTime').textContent=d.time||'--:--';"
                 + "document.getElementById('statDate').textContent=d.date||'';"
                 + "document.getElementById('statCore').textContent='CPU '+(d.cpu>=0?d.cpu+'%':'--')+' · 内存 '+(d.memPct>=0?d.memPct+'%':'--')+' · GPU '+(d.gpu>=0?d.gpu+'%':'--');"
                 + "var temps=d.temps||[];var ring=document.getElementById('ring');ring.innerHTML='';"
-                + "var n=Math.max(1,temps.length),cx=170,cy=170,r=140;"
+                + "var n=Math.max(1,temps.length),cw=ring.clientWidth||346,cx=cw/2,cy=cw/2,r=cw*0.42;"
                 + "for(var i=0;i<temps.length;i++){var ang=(-90+i*(360/n))*Math.PI/180;"
                 + "var x=cx+r*Math.cos(ang),y=cy+r*Math.sin(ang);"
                 + "var el=document.createElement('div');el.style.cssText='position:absolute;left:'+x+'px;top:'+y+'px;transform:translate(-50%,-50%);text-align:center;pointer-events:none';"
                 + "el.innerHTML='<div style=\"font-size:9px;color:#8a8272\">'+temps[i].name+'</div><div style=\"font-size:13px;color:#d4af37\">'+temps[i].c.toFixed(0)+'°</div>';"
                 + "ring.appendChild(el);}"
                 + "if(temps.length===0){var e=document.createElement('div');e.style.cssText='position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#8a8272;font-size:11px';e.textContent='无温度数据';ring.appendChild(e);}}"
+                + "function keyEvent(code){var x=new XMLHttpRequest();x.open('GET','/key?code='+code,true);x.send();"
+                + "var nm={4:'返回',3:'桌面',187:'最近'},ts=document.getElementById('tstat');if(ts){ts.textContent='已发送：'+nm[code];setTimeout(function(){ts.textContent='';},1200);}}"
+                + "var tp=document.getElementById('touchpad');var td={on:false,moved:false,long:false,timer:null,x:0,y:0,lx:0,ly:0,last:0};"
+                + "function tPos(ev){if(!tp)return null;var r=tp.getBoundingClientRect();var cx=(ev.clientX-r.left)/r.width,cy=(ev.clientY-r.top)/r.height;"
+                + "var dx=cx-0.5,dy=cy-0.5;if(dx*dx+dy*dy>0.25)return null;"
+                + "return {x:Math.max(0,Math.min(800,Math.round(cx*800))),y:Math.max(0,Math.min(800,Math.round(cy*800)))};}"
+                + "function tSend(q){var x=new XMLHttpRequest();x.open('GET','/touch?'+q,true);x.send();}"
+                + "function tMsg(m){var s=document.getElementById('tstat');if(s){s.textContent=m;if(m)setTimeout(function(){if(s.textContent===m)s.textContent='';},1200);}}"
+                + "if(tp){tp.addEventListener('pointerdown',function(ev){ev.preventDefault();if(td.on)return;var p=tPos(ev);if(!p)return;"
+                + "try{tp.setPointerCapture(ev.pointerId);}catch(e){}"
+                + "td.on=true;td.moved=false;td.long=false;td.x=p.x;td.y=p.y;td.lx=p.x;td.ly=p.y;td.last=0;"
+                + "td.timer=setTimeout(function(){if(td.on&&!td.moved){td.long=true;tSend('act=long&x='+td.x+'&y='+td.y);tMsg('长按 '+td.x+','+td.y);}},650);});"
+                + "tp.addEventListener('pointermove',function(ev){ev.preventDefault();if(!td.on)return;var p=tPos(ev);if(!p)return;"
+                + "if(!td.moved&&Math.abs(p.x-td.x)+Math.abs(p.y-td.y)<10)return;"
+                + "if(!td.moved){td.moved=true;if(td.timer){clearTimeout(td.timer);td.timer=null;}}"
+                + "var now=Date.now();if(now-td.last>=60){tSend('act=move&x='+p.x+'&y='+p.y+'&px='+td.lx+'&py='+td.ly);td.lx=p.x;td.ly=p.y;td.last=now;tMsg('拖动 '+p.x+','+p.y);}});"
+                + "function tEnd(){if(!td.on)return;td.on=false;if(td.timer){clearTimeout(td.timer);td.timer=null;}"
+                + "if(!td.moved&&!td.long){tSend('act=tap&x='+td.x+'&y='+td.y);tMsg('点击 '+td.x+','+td.y);}}"
+                + "tp.addEventListener('pointerup',tEnd);tp.addEventListener('pointercancel',tEnd);"
+                + "tp.addEventListener('contextmenu',function(ev){ev.preventDefault();});}"
                 + "setInterval(function(){get('/system_status',renderSystem);},2000);"
                 + "loadConv();setInterval(loadConv,3000);setInterval(streamState,3000);"
                 + "</script></body></html>";
@@ -435,6 +468,51 @@ public class SettingsWebServer {
         byte[] b = o.toString().getBytes("UTF-8");
         writeHead(out, "application/json; charset=utf-8", b.length);
         out.write(b);
+    }
+
+    private static String qParam(String qs, String name) {
+        if (qs == null) return null;
+        String[] q = qs.split("\\?", 2);
+        if (q.length < 2) return null;
+        for (String kv : q[1].split("&")) {
+            String[] p = kv.split("=", 2);
+            if (p.length == 2 && p[0].equals(name)) {
+                try { return java.net.URLDecoder.decode(p[1], "UTF-8"); } catch (Exception e) { return p[1]; }
+            }
+        }
+        return null;
+    }
+
+    /** 三大金刚键：返回/桌面/最近任务 */
+    private static void serveKey(OutputStream out, String qs) throws IOException {
+        String code = qParam(qs, "code");
+        byte[] b = "ok".getBytes("UTF-8");
+        writeHead(out, "text/plain; charset=utf-8", b.length);
+        out.write(b);
+        if (code != null && !code.isEmpty()) runRoot("input keyevent " + code);
+    }
+
+    /** 远程触摸：tap=点击 long=长按 move=拖动（px/py 为上一坐标） */
+    private static void serveTouch(OutputStream out, String qs) throws IOException {
+        String act = qParam(qs, "act"), x = qParam(qs, "x"), y = qParam(qs, "y");
+        byte[] b = "ok".getBytes("UTF-8");
+        writeHead(out, "text/plain; charset=utf-8", b.length);
+        out.write(b);
+        if (act == null || x == null || y == null) return;
+        if (act.equals("tap")) runRoot("input tap " + x + " " + y);
+        else if (act.equals("long")) runRoot("input swipe " + x + " " + y + " " + x + " " + y + " 800");
+        else if (act.equals("move")) {
+            String px = qParam(qs, "px"), py = qParam(qs, "py");
+            if (px == null) px = x; if (py == null) py = y;
+            runRoot("input swipe " + px + " " + py + " " + x + " " + y + " 50");
+        }
+    }
+
+    private static void runRoot(String cmd) {
+        try {
+            Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
+            p.waitFor();
+        } catch (Exception ignored) {}
     }
 
     private static long[] prevCpuTicks;

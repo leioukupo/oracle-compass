@@ -51,6 +51,7 @@ public class H264Streamer {
             if (active || ScreenStreamer.isActive() || H264SurfaceStreamer.isActive()) { writeBusy(s, "busy"); return; }
             active = true;
         }
+        ScreenAwake.on(ctx);                           // 推流期间屏幕常亮，防息屏黑屏
         Process shell = null;
         MediaCodec codec = null;
         InputStream in = null;
@@ -83,6 +84,7 @@ public class H264Streamer {
             }
             try { if (in != null) in.close(); } catch (Exception ignored) {}
             FifoCapture.stop(ctx, shell);
+            ScreenAwake.off();                         // 恢复屏幕自动休眠
             try { s.close(); } catch (Exception ignored) {}
         }
     }

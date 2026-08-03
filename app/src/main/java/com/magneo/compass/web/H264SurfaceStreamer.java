@@ -56,6 +56,7 @@ public class H264SurfaceStreamer {
         Process sr = null;
         try {
             cleanupStale();                            // 先清掉历史残留编码器，避免新会话叠加
+            ScreenAwake.on(ctx);                       // 推流期间屏幕常亮，防息屏黑屏
             Fmp4Muxer mux = new Fmp4Muxer();
             dbg(ctx, "serve enter");
             byte[] init = extractConfig(ctx);          // 2 秒短片提取 SPS/PPS -> init
@@ -69,6 +70,7 @@ public class H264SurfaceStreamer {
         } finally {
             active = false;
             stopScreenrecord(sr);
+            ScreenAwake.off();                         // 恢复屏幕自动休眠
             try { s.close(); } catch (Exception ignored) {}
         }
     }
@@ -160,7 +162,7 @@ public class H264SurfaceStreamer {
                 continue;
             }
             if (len <= readPos) {
-                if (++nullReads >= 600) break; // 约 30 秒无数据
+                if (++nullReads >= 12000) break; // 约 10 分钟无数据：静止画面不主动断流，仅兜底清理死连接
                 Thread.sleep(50);
                 continue;
             }
