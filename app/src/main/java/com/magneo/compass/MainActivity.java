@@ -34,13 +34,20 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         if (Prefs.get(this, Prefs.K_PROVIDER, "").isEmpty()) {
             ProviderConfig.apply(this, ProviderConfig.qwen());
         }
-        hub = new SensorHub(this, () -> view.postInvalidate());
+        // 传感器事件触发重绘，限流到 30fps：MT6580 软件渲染全屏重绘很贵，满速会烧掉一个核
+        long[] lastRedraw = {0};
+        hub = new SensorHub(this, () -> {
+            long now = android.os.SystemClock.uptimeMillis();
+            if (now - lastRedraw[0] >= 50) { lastRedraw[0] = now; view.postInvalidate(); }
+        });
         view = new CompassView(this, hub, this);
         setContentView(view);
 
         voice = VoiceController.get(this, view::setStatus);
         LocalTts.ensureInit(this);
         com.magneo.compass.web.SettingsWebServer.start(this);
+        // 兜底：应用每次冷启动清理上次崩溃遗留的推流编码进程，防止 CPU 被占满
+        new Thread(() -> com.magneo.compass.web.H264SurfaceStreamer.cleanupStale(), "stream-cleanup").start();
         ConversationLog.startCleaner(this);
         Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
             try {

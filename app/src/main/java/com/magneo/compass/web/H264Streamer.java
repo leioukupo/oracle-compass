@@ -48,7 +48,7 @@ public class H264Streamer {
     /** 处理 /h264 连接：拉起 root 采集、硬编、推 fMP4；断开即停。 */
     public static void serve(Socket s, Context ctx) {
         synchronized (H264Streamer.class) {
-            if (active || ScreenStreamer.isActive()) { writeBusy(s, "busy"); return; }
+            if (active || ScreenStreamer.isActive() || H264SurfaceStreamer.isActive()) { writeBusy(s, "busy"); return; }
             active = true;
         }
         Process shell = null;

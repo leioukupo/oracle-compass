@@ -35,7 +35,7 @@ public class ScreenStreamer {
     /** 处理一个 /stream 连接：拉起 root 采集循环，持续推帧；断开即停并清理。 */
     public static void serve(Socket s, Context ctx) {
         synchronized (ScreenStreamer.class) {
-            if (active || H264Streamer.isActive()) { writeBusy(s, "BUSY"); return; }
+            if (active || H264Streamer.isActive() || H264SurfaceStreamer.isActive()) { writeBusy(s, "BUSY"); return; }
             active = true;
         }
         Process shell = null;

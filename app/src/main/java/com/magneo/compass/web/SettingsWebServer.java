@@ -30,7 +30,7 @@ public class SettingsWebServer {
         if (server != null) return;
         app = c.getApplicationContext();
         try {
-            server = new ServerSocket(PORT, 8, InetAddress.getByName("0.0.0.0"));
+            server = new ServerSocket(PORT, 32, InetAddress.getByName("0.0.0.0")); // backlog 32，防轮询连接堵死
             thread = new Thread(SettingsWebServer::loop, "web-settings");
             thread.setDaemon(true);
             thread.start();
@@ -119,7 +119,9 @@ public class SettingsWebServer {
             else if (path.equals("/clear_conv")) serveClearConv(out);
             else if (path.equals("/stream")) { serveStream(s); return; }
             else if (path.equals("/h264")) { serveH264(s); return; }
+            else if (path.equals("/h264fast")) { serveH264Fast(s); return; }
             else if (path.equals("/stream_state")) serveStreamState(out);
+            else if (path.equals("/system_status")) serveSystemStatus(out);
             else if (path.equals("/save")) serveSave(out, body);
             else serve404(out);
             out.flush();
@@ -164,23 +166,33 @@ public class SettingsWebServer {
                 + "</fieldset>"
                 + "<fieldset><legend>屏幕推流</legend>"
                 + "<div class='row'><label>推流方式</label><select name='streamMode'>"
-                + "<option value='h264'>H.264 硬编（推荐）</option>"
+                + "<option value='h264'>H.264 硬编（采集慢）</option>"
+                + "<option value='h264fast'>H.264 高速（虚拟显示）</option>"
                 + "<option value='mjpeg'>MJPEG 兼容</option></select></div>"
                 + "<div class='row'><label>帧率(fps)</label><select name='streamFps'>"
                 + "<option>1</option><option>2</option><option>3</option><option>5</option></select></div>"
                 + "<div class='row'><label>码率(Kbps)</label><select name='streamBitrate'>"
                 + "<option value='600'>600</option><option value='1000'>1000</option>"
-                + "<option value='1500'>1500</option><option value='2500'>2500</option></select></div>"
+                + "<option value='1500'>1500</option><option value='2500'>2500</option>"
+                + "<option value='4000'>4000</option><option value='6000'>6000</option>"
+                + "<option value='8000'>8000(最大)</option></select></div>"
                 + "<div class='row'><label>画质(MJPEG)</label><select name='streamQuality'>"
                 + "<option value='30'>低</option><option value='55'>中</option><option value='75'>高</option></select></div>"
                 + "<div class='row'><label>尺寸(MJPEG)</label><select name='streamScale'>"
                 + "<option value='2'>半尺寸(400×400)</option><option value='1'>原始(800×800)</option></select></div>"
                 + "<div style='text-align:center'><button type='button' onclick='toggleStream()' id='sbtn'>开始推流</button>"
                 + "<span id='sstate' style='font-size:12px;color:#8fbf6a'></span></div>"
+                + "<div style='display:flex;justify-content:center;gap:12px;flex-wrap:wrap;align-items:center'>"
                 + "<div style='text-align:center'><video id='h264v' muted autoplay playsinline style='width:340px;height:340px;"
-                + "border-radius:50%;border:1px solid #6b5a2e;display:none;object-fit:cover;filter:brightness(1.55) contrast(1.15)'></video></div>"
-                + "<div style='text-align:center'><img id='screen' style='width:340px;height:340px;border-radius:50%;"
+                + "border-radius:50%;border:1px solid #6b5a2e;display:none;object-fit:cover;filter:brightness(1.55) contrast(1.15)'></video>"
+                + "<img id='screen' style='width:340px;height:340px;border-radius:50%;"
                 + "border:1px solid #6b5a2e;display:none;object-fit:cover;filter:brightness(1.55) contrast(1.15)'></div>"
+                + "<div style='width:340px;height:340px;border-radius:50%;border:1px solid #6b5a2e;background:#171512;position:relative;box-sizing:border-box'>"
+                + "<div style='position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center'>"
+                + "<div id='statTime' style='font-size:34px;color:#d4af37;font-weight:bold;font-family:monospace'></div>"
+                + "<div id='statDate' style='font-size:12px;color:#e8dcc0;margin-top:2px'></div>"
+                + "<div id='statCore' style='font-size:10px;color:#8fbf6a;margin-top:6px'></div></div>"
+                + "<div id='ring' style='position:absolute;inset:0'></div></div></div>"
                 + "<div style='color:#8a8272;font-size:11px'>H.264 走 MT6580 硬件编码器（720×720），省 CPU、省带宽；MJPEG 为兼容模式。改参数先点保存。</div>"
                 + "</fieldset>"
                 + "<fieldset><legend>对话记录</legend>"
@@ -249,7 +261,7 @@ public class SettingsWebServer {
                 + "mySb.addEventListener('updateend',function(){if(my!==sess){appending=false;pending=[];return;}appending=false;pumpSb(my);});"
                 + "mySb.addEventListener('error',function(){if(my===sess)st.textContent='MSE 错误：浏览器拒绝该媒体数据（H.264 封装不兼容）';});"
                 + "abortCtl=new AbortController();"
-                + "fetch('/h264',{signal:abortCtl.signal}).then(function(r){"
+                + "fetch(currentMode()==='h264fast'?'/h264fast':'/h264',{signal:abortCtl.signal}).then(function(r){"
                 + "if(my!==sess){return;}"
                 + "if(!r.ok||!r.body){st.textContent='推流失败 '+r.status+'，请点停止后重试';return;}"
                 + "var reader=r.body.getReader();"
@@ -286,11 +298,24 @@ public class SettingsWebServer {
                 + "var st=document.getElementById('sstate');var img=document.getElementById('screen');"
                 + "var video=document.getElementById('h264v');"
                 + "if(streamOn){var m=currentMode();st.textContent='正在启动推流…';"
-                + "if(m==='h264'){img.style.display='none';video.style.display='inline-block';startH264();}"
+                + "if(m==='h264'||m==='h264fast'){img.style.display='none';video.style.display='inline-block';startH264();}"
                 + "else{video.style.display='none';img.src='/stream';img.style.display='inline-block';}"
                 + "btn.textContent='停止推流';}"
                 + "else{stopH264();img.src='';img.style.display='none';video.style.display='none';"
                 + "btn.textContent='开始推流';st.textContent='';}}"
+                + "function renderSystem(d){if(!d)return;"
+                + "document.getElementById('statTime').textContent=d.time||'--:--';"
+                + "document.getElementById('statDate').textContent=d.date||'';"
+                + "document.getElementById('statCore').textContent='CPU '+(d.cpu>=0?d.cpu+'%':'--')+' · 内存 '+(d.memPct>=0?d.memPct+'%':'--')+' · GPU '+(d.gpu>=0?d.gpu+'%':'--');"
+                + "var temps=d.temps||[];var ring=document.getElementById('ring');ring.innerHTML='';"
+                + "var n=Math.max(1,temps.length),cx=170,cy=170,r=140;"
+                + "for(var i=0;i<temps.length;i++){var ang=(-90+i*(360/n))*Math.PI/180;"
+                + "var x=cx+r*Math.cos(ang),y=cy+r*Math.sin(ang);"
+                + "var el=document.createElement('div');el.style.cssText='position:absolute;left:'+x+'px;top:'+y+'px;transform:translate(-50%,-50%);text-align:center;pointer-events:none';"
+                + "el.innerHTML='<div style=\"font-size:9px;color:#8a8272\">'+temps[i].name+'</div><div style=\"font-size:13px;color:#d4af37\">'+temps[i].c.toFixed(0)+'°</div>';"
+                + "ring.appendChild(el);}"
+                + "if(temps.length===0){var e=document.createElement('div');e.style.cssText='position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#8a8272;font-size:11px';e.textContent='无温度数据';ring.appendChild(e);}}"
+                + "setInterval(function(){get('/system_status',renderSystem);},2000);"
                 + "loadConv();setInterval(loadConv,3000);setInterval(streamState,3000);"
                 + "</script></body></html>";
         byte[] b = html.getBytes("UTF-8");
@@ -322,7 +347,8 @@ public class SettingsWebServer {
             o.put("streamQuality", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_QUALITY, 55)));
             o.put("streamScale", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_SCALE, 2)));
             o.put("streamBitrate", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_BITRATE, 1500)));
-            o.put("mode", H264Streamer.isActive() ? "h264" : (ScreenStreamer.isActive() ? "mjpeg" : "idle"));
+            o.put("mode", H264SurfaceStreamer.isActive() ? "h264fast"
+                    : (H264Streamer.isActive() ? "h264" : (ScreenStreamer.isActive() ? "mjpeg" : "idle")));
             o.put("ip", localIp());
         } catch (Exception ignored) {}
         byte[] b = o.toString().getBytes("UTF-8");
@@ -393,12 +419,144 @@ public class SettingsWebServer {
         out.write(b);
     }
 
+    private static void serveSystemStatus(OutputStream out) throws IOException {
+        JSONObject o = new JSONObject();
+        try {
+            o.put("time", new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(new java.util.Date()));
+            o.put("date", new java.text.SimpleDateFormat("yyyy-MM-dd EEE", java.util.Locale.getDefault()).format(new java.util.Date()));
+            o.put("cpu", readCpuPct());
+            long[] mem = readMem();
+            o.put("memTotalMb", mem[0] / 1024);
+            o.put("memUsedMb", mem[1] / 1024);
+            o.put("memPct", mem[0] > 0 ? (int) Math.round(mem[1] * 100.0 / mem[0]) : -1);
+            o.put("gpu", readGpuPct());
+            o.put("temps", readTemps());
+        } catch (Exception ignored) {}
+        byte[] b = o.toString().getBytes("UTF-8");
+        writeHead(out, "application/json; charset=utf-8", b.length);
+        out.write(b);
+    }
+
+    private static long[] prevCpuTicks;
+    private static int lastCpuPct = 0;
+
+    private static int readCpuPct() {
+        try {
+            long[] cur = readCpuTicks();
+            if (cur == null) return lastCpuPct;
+            if (prevCpuTicks == null) { prevCpuTicks = cur; return 0; }
+            long busy = 0, total = 0;
+            boolean glitch = false;
+            for (int i = 0; i < 7; i++) {
+                long d = cur[i] - prevCpuTicks[i];
+                if (d < 0) glitch = true;   // MTK 热插拔/计数器跳变：本次采样作废
+                total += d;
+                if (i != 3 && i != 4) busy += d;
+            }
+            prevCpuTicks = cur;
+            if (glitch || total <= 0) return lastCpuPct;
+            lastCpuPct = (int) Math.min(100, Math.round(busy * 100.0 / total));
+            return lastCpuPct;
+        } catch (Exception e) { return lastCpuPct; }
+    }
+
+    private static long[] readCpuTicks() throws Exception {
+        java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream("/proc/stat")));
+        String line = r.readLine();
+        r.close();
+        if (line == null || !line.startsWith("cpu ")) return null;
+        String[] p = line.trim().split("\\s+");
+        long[] v = new long[7];
+        for (int i = 1; i < p.length && i <= 7; i++) v[i - 1] = Long.parseLong(p[i]);
+        return v;
+    }
+
+    private static long[] readMem() {
+        long total = 0, free = 0, cached = 0, buffers = 0;
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream("/proc/meminfo")));
+            String line;
+            while ((line = r.readLine()) != null) {
+                if (line.startsWith("MemTotal")) total = kbOf(line);
+                else if (line.startsWith("MemFree")) free = kbOf(line);
+                else if (line.startsWith("Cached")) cached = kbOf(line);
+                else if (line.startsWith("Buffers")) buffers = kbOf(line);
+            }
+            r.close();
+        } catch (Exception ignored) {}
+        long used = Math.max(0, total - free - cached - buffers);
+        return new long[]{total, used};
+    }
+
+    private static long kbOf(String line) {
+        String[] p = line.trim().split("\\s+");
+        try { return Long.parseLong(p[1]); } catch (Exception e) { return 0; }
+    }
+
+    private static int readGpuPct() {
+        try {
+            String s = readFile("/proc/mali/utilization");
+            if (s == null) return -1;
+            if (s.contains("clock off") || s.trim().isEmpty()) return 0;
+            // 实际格式: "GPU/GP/PP: 60/17/59, Frequency: 500500"（GPU 为第一个数字）
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("GPU/GP/PP:\\s*(\\d+)").matcher(s);
+            if (m.find()) return clampPct(Integer.parseInt(m.group(1)));
+            m = java.util.regex.Pattern.compile("\\d+").matcher(s);
+            if (m.find()) return clampPct(Integer.parseInt(m.group()));
+            return 0;
+        } catch (Exception e) { return -1; }
+    }
+
+    private static int clampPct(int v) {
+        return Math.max(0, Math.min(100, v));
+    }
+
+    private static org.json.JSONArray readTemps() {
+        org.json.JSONArray arr = new org.json.JSONArray();
+        try {
+            for (int i = 0; i < 12; i++) {
+                String type = readFile("/sys/class/thermal/thermal_zone" + i + "/type");
+                String t = readFile("/sys/class/thermal/thermal_zone" + i + "/temp");
+                if (type == null || t == null) continue;
+                int milli;
+                try { milli = Integer.parseInt(t.trim()); } catch (Exception e) { continue; }
+                if (milli < -50000 || milli > 200000) continue;
+                arr.put(new JSONObject().put("name", tempName(type.trim())).put("c", milli / 1000.0));
+            }
+        } catch (Exception ignored) {}
+        return arr;
+    }
+
+    private static String tempName(String type) {
+        if (type.contains("cpu")) return "CPU";
+        if (type.contains("battery")) return "电池";
+        if (type.contains("pmi")) return "PMIC";
+        if (type.contains("wmt")) return "WiFi";
+        if (type.contains("AP")) return "AP";
+        if (type.matches("mtkts[0-9]+")) return "热区" + type.substring(5);
+        return type;
+    }
+
+    private static String readFile(String path) {
+        try {
+            java.io.FileInputStream in = new java.io.FileInputStream(path);
+            byte[] b = new byte[128];
+            int n = in.read(b);
+            in.close();
+            return n > 0 ? new String(b, 0, n, "UTF-8").trim() : "";
+        } catch (Exception e) { return null; }
+    }
+
     private static void serveStream(Socket s) {
         ScreenStreamer.serve(s, app);
     }
 
     private static void serveH264(Socket s) {
         H264Streamer.serve(s, app);
+    }
+
+    private static void serveH264Fast(Socket s) {
+        H264SurfaceStreamer.serve(s, app);
     }
 
     private static void serveStreamState(OutputStream out) throws IOException {
@@ -408,7 +566,8 @@ public class SettingsWebServer {
             o.put("fps", Prefs.getI(app, Prefs.K_STREAM_FPS, 1));
             o.put("quality", Prefs.getI(app, Prefs.K_STREAM_QUALITY, 55));
             o.put("scale", Prefs.getI(app, Prefs.K_STREAM_SCALE, 2));
-            o.put("mode", H264Streamer.isActive() ? "h264" : (ScreenStreamer.isActive() ? "mjpeg" : "idle"));
+            o.put("mode", H264SurfaceStreamer.isActive() ? "h264fast"
+                    : (H264Streamer.isActive() ? "h264" : (ScreenStreamer.isActive() ? "mjpeg" : "idle")));
         } catch (Exception ignored) {}
         byte[] b = o.toString().getBytes("UTF-8");
         writeHead(out, "application/json; charset=utf-8", b.length);
