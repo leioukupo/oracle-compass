@@ -36,3 +36,6 @@ captures/
 
 # 第三方源码（espeak-ng 需单独克隆，构建脚本见说明）
 third_party/
+
+# CMake/AGP 构建产物
+app/.cxx/
