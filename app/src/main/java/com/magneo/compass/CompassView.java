@@ -209,7 +209,7 @@ public class CompassView extends View {
             y += 22f * s;
         }
         String gps = Double.isNaN(hub.lat)
-                ? "GPS 未定位"
+                ? "GPS " + hub.gpsStatus          // 无定位时显示真实状态（搜索卫星/定位中 n/m/已关闭）
                 : String.format(Locale.US, "GPS %.5f,%.5f 海拔%.0fm %s", hub.lat, hub.lon, hub.alt, hub.gpsStatus);
         c.drawText(gps, cx - pSmall.measureText(gps) / 2f, y, pSmall);
     }
@@ -233,7 +233,7 @@ public class CompassView extends View {
                 String.format(Locale.US, "方位 %.0f° 俯仰 %.0f° 横滚 %.0f°", hub.azimuth, hub.pitch, hub.roll),
                 String.format(Locale.US, "光 %.0f  距离 %.2f", hub.light, hub.prox),
                 String.format(Locale.US, "电量 %d%%", hub.battery),
-                Double.isNaN(hub.lat) ? "GPS 未定位" :
+                Double.isNaN(hub.lat) ? "GPS " + hub.gpsStatus :
                         String.format(Locale.US, "GPS %.5f,%.5f", hub.lat, hub.lon)
         };
         for (String l : lines) {

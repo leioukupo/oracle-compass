@@ -204,7 +204,8 @@ public class SettingsWebServer {
                 + "<div style='position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center'>"
                 + "<div id='statTime' style='font-size:34px;color:#d4af37;font-weight:bold;font-family:monospace'></div>"
                 + "<div id='statDate' style='font-size:12px;color:#e8dcc0;margin-top:2px'></div>"
-                + "<div id='statCore' style='font-size:10px;color:#8fbf6a;margin-top:6px'></div></div>"
+                + "<div id='statCore' style='font-size:10px;color:#8fbf6a;margin-top:6px'></div>"
+                + "<div id='statGps' style='font-size:10px;color:#d4af37;margin-top:3px'></div></div>"
                 + "<div id='ring' style='position:absolute;inset:0'></div></div></div>"
                 + "<div style='color:#8a8272;font-size:11px'>H.264 走 MT6580 硬件编码器（720×720），省 CPU、省带宽；MJPEG 为兼容模式。改参数先点保存。</div>"
                 + "</fieldset>"
@@ -320,6 +321,7 @@ public class SettingsWebServer {
                 + "document.getElementById('statTime').textContent=d.time||'--:--';"
                 + "document.getElementById('statDate').textContent=d.date||'';"
                 + "document.getElementById('statCore').textContent='CPU '+(d.cpu>=0?d.cpu+'%':'--')+' · 内存 '+(d.memPct>=0?d.memPct+'%':'--')+' · GPU '+(d.gpu>=0?d.gpu+'%':'--');"
+                + "var sg=document.getElementById('statGps');if(sg)sg.textContent=d.gps?'GPS '+d.gps:'';"
                 + "var temps=d.temps||[];var ring=document.getElementById('ring');ring.innerHTML='';"
                 + "var n=Math.max(1,temps.length),cw=ring.clientWidth||346,cx=cw/2,cy=cw/2,r=cw*0.42;"
                 + "for(var i=0;i<temps.length;i++){var ang=(-90+i*(360/n))*Math.PI/180;"
@@ -464,6 +466,8 @@ public class SettingsWebServer {
             o.put("memPct", mem[0] > 0 ? (int) Math.round(mem[1] * 100.0 / mem[0]) : -1);
             o.put("gpu", readGpuPct());
             o.put("temps", readTemps());
+            com.magneo.compass.SensorHub h = com.magneo.compass.SensorHub.instance;
+            o.put("gps", h == null ? "无" : (h.gpsStatus + (Double.isNaN(h.lat) ? "" : " 已定位")));
         } catch (Exception ignored) {}
         byte[] b = o.toString().getBytes("UTF-8");
         writeHead(out, "application/json; charset=utf-8", b.length);

@@ -7,6 +7,8 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.location.GpsSatellite;
+import android.location.GpsStatus;
 import android.location.Location;
 import android.location.LocationProvider;
 import android.location.LocationListener;
@@ -19,6 +21,8 @@ import android.os.Looper;
 /** 统一订阅设备全部传感器与 GPS，提供最新读数与罗盘方位。 */
 public class SensorHub {
     public interface Listener { void onUpdate(); }
+    /** 供网页状态接口读取当前 GPS 状态 */
+    public static volatile SensorHub instance;
 
     private final SensorManager sm;
     private final LocationManager lm;
@@ -32,6 +36,8 @@ public class SensorHub {
     public volatile double lat = Double.NaN, lon = Double.NaN, alt = Double.NaN;
     public volatile int sats = 0;
     public volatile String gpsStatus = "未定位";
+    public volatile long lastSensorMs = 0;
+    private volatile boolean started;
 
     private final float[] rMat = new float[9];
     private final float[] iMat = new float[9];
@@ -39,6 +45,7 @@ public class SensorHub {
     private boolean hasAccel, hasMag;
 
     public SensorHub(Context ctx, Listener l) {
+        instance = this;
         sm = (SensorManager) ctx.getSystemService(Context.SENSOR_SERVICE);
         lm = (LocationManager) ctx.getSystemService(Context.LOCATION_SERVICE);
         listener = l;
@@ -48,6 +55,7 @@ public class SensorHub {
 
     private final SensorEventListener sens = new SensorEventListener() {
         @Override public void onSensorChanged(SensorEvent e) {
+            lastSensorMs = System.currentTimeMillis();
             switch (e.sensor.getType()) {
                 case Sensor.TYPE_ACCELEROMETER:
                     ax = e.values[0]; ay = e.values[1]; az = e.values[2]; hasAccel = true; break;
@@ -62,6 +70,35 @@ public class SensorHub {
             listener.onUpdate();
         }
         @Override public void onAccuracyChanged(Sensor s, int a) {}
+    };
+
+    private final GpsStatus.Listener gpsListener = new GpsStatus.Listener() {
+        @Override public void onGpsStatusChanged(int event) {
+            try {
+                GpsStatus st = lm.getGpsStatus(null);
+                if (st == null) return;
+                int total = 0, used = 0;
+                for (GpsSatellite s : st.getSatellites()) { total++; if (s.usedInFix()) used++; }
+                sats = used;
+                if (event == GpsStatus.GPS_EVENT_FIRST_FIX) gpsStatus = "已定位";
+                else if (event == GpsStatus.GPS_EVENT_SATELLITE_STATUS)
+                    gpsStatus = total > 0 ? ("定位中 " + used + "/" + total) : "搜索卫星…";
+                listener.onUpdate();
+            } catch (Exception ignored) {}
+        }
+    };
+
+    /** 传感器静默自愈：MTK 传感器偶发停摆，3 秒无事件就重挂一次监听 */
+    private final Runnable watchdog = new Runnable() {
+        @Override public void run() {
+            if (!started) return;
+            long now = System.currentTimeMillis();
+            if (now - lastSensorMs > 3000) {
+                try { sm.unregisterListener(sens); } catch (Exception ignored) {}
+                registerAll();
+            }
+            handler.postDelayed(this, 1000);
+        }
     };
 
     private final LocationListener loc = new LocationListener() {
@@ -88,21 +125,33 @@ public class SensorHub {
     }
 
     public void start() {
+        started = true;
+        registerAll();
+        try {
+            gpsStatus = lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ? "搜索卫星…" : "定位已关闭";
+            try { lm.addGpsStatusListener(gpsListener); } catch (Exception ignored) {}
+            Location l = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+            if (l != null) { lat = l.getLatitude(); lon = l.getLongitude(); alt = l.getAltitude(); }
+            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 2000, 1, loc);
+        } catch (Exception ignored) {}
+        handler.removeCallbacks(watchdog);
+        handler.postDelayed(watchdog, 1000);
+    }
+
+    public void stop() {
+        started = false;
+        handler.removeCallbacks(watchdog);
+        sm.unregisterListener(sens);
+        try { lm.removeUpdates(loc); } catch (Exception ignored) {}
+        try { lm.removeGpsStatusListener(gpsListener); } catch (Exception ignored) {}
+    }
+
+    private void registerAll() {
         register(Sensor.TYPE_ACCELEROMETER);
         register(Sensor.TYPE_GYROSCOPE);
         register(Sensor.TYPE_MAGNETIC_FIELD);
         register(Sensor.TYPE_LIGHT);
         register(Sensor.TYPE_PROXIMITY);
-        try {
-            Location l = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-            if (l != null) { lat = l.getLatitude(); lon = l.getLongitude(); alt = l.getAltitude(); }
-            lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 2000, 1, loc);
-        } catch (Exception ignored) {}
-    }
-
-    public void stop() {
-        sm.unregisterListener(sens);
-        try { lm.removeUpdates(loc); } catch (Exception ignored) {}
     }
 
     private void register(int type) {

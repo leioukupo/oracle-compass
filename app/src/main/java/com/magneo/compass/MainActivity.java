@@ -3,6 +3,7 @@ package com.magneo.compass;
 import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.Handler;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.Window;
@@ -22,6 +23,13 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     private CompassView view;
     private SensorHub hub;
     private VoiceController voice;
+    private final Handler uiTicker = new Handler();
+    private final Runnable uiTick = new Runnable() {
+        @Override public void run() {
+            if (view != null) view.postInvalidate();   // 每秒心跳：时钟/读数保证刷新，不依赖传感器事件
+            uiTicker.postDelayed(this, 1000);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -34,11 +42,11 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         if (Prefs.get(this, Prefs.K_PROVIDER, "").isEmpty()) {
             ProviderConfig.apply(this, ProviderConfig.qwen());
         }
-        // 传感器事件触发重绘，限流到 30fps：MT6580 软件渲染全屏重绘很贵，满速会烧掉一个核
-        long[] lastRedraw = {0};
+        // 传感器事件触发重绘，按事件计数粗略限流（不依赖系统时钟，避免时钟异常导致画面冻结）：
+        // MT6580 软件渲染全屏重绘很贵，每 2 个事件重绘一次约为 15-30fps
+        long[] skip = {0};
         hub = new SensorHub(this, () -> {
-            long now = android.os.SystemClock.uptimeMillis();
-            if (now - lastRedraw[0] >= 50) { lastRedraw[0] = now; view.postInvalidate(); }
+            if ((skip[0]++ & 1) == 0) view.postInvalidate();
         });
         view = new CompassView(this, hub, this);
         setContentView(view);
@@ -73,17 +81,21 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     protected void onResume() {
         super.onResume();
         hub.start();
+        uiTicker.removeCallbacks(uiTick);
+        uiTicker.post(uiTick);
         hideSystemUi();
     }
 
     @Override
     protected void onPause() {
         hub.stop();
+        uiTicker.removeCallbacks(uiTick);
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
+        uiTicker.removeCallbacks(uiTick);
         voice.shutdown();
         super.onDestroy();
     }
