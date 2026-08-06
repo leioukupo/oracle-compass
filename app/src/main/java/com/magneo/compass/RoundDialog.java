@@ -12,7 +12,9 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 /** 圆屏自绘对话框：透明窗口 + 椭圆深底金边容器，内容都在圆内。 */
@@ -26,19 +28,36 @@ public class RoundDialog {
         dialog = new Dialog(a);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
         dialog.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-        body = new LinearLayout(a);
-        body.setOrientation(LinearLayout.VERTICAL);
-        body.setGravity(Gravity.CENTER_HORIZONTAL);
-        body.setBackgroundResource(R.drawable.bg_dialog_oval);
-        body.setClipToOutline(true);
-        body.setOutlineProvider(new ViewOutlineProvider() {
+
+        // 圆屏适配：对话框取屏幕短边 92% 的正方形，内容在圆内可滚动
+        int sw = ctx.getResources().getDisplayMetrics().widthPixels;
+        int sh = ctx.getResources().getDisplayMetrics().heightPixels;
+        int size = (int) (Math.min(sw, sh) * 0.92f);
+        int p = dp(26);
+
+        FrameLayout wrap = new FrameLayout(a);
+        wrap.setBackgroundResource(R.drawable.bg_dialog_oval);
+        wrap.setClipToOutline(true);
+        wrap.setOutlineProvider(new ViewOutlineProvider() {
             @Override public void getOutline(View view, Outline outline) {
                 outline.setOval(0, 0, view.getWidth(), view.getHeight());
             }
         });
-        int p = dp(26);
-        body.setPadding(p, p, p, p);
-        dialog.setContentView(body);
+        wrap.setPadding(p, p, p, p);
+
+        ScrollView scv = new ScrollView(a);
+        scv.setFillViewport(true);
+        scv.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        body = new LinearLayout(a);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setGravity(Gravity.CENTER_HORIZONTAL);
+        scv.addView(body, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        wrap.addView(scv, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+
+        dialog.setContentView(wrap);
+        dialog.getWindow().setLayout(size, size);
     }
 
     public RoundDialog title(String t) {
@@ -88,6 +107,15 @@ public class RoundDialog {
         lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
         lp.setMargins(0, dp(4), 0, dp(4));
         body.addView(e, lp);
+        return this;
+    }
+
+    /** 添加任意控件（如下拉选择框），样式同输入框。 */
+    public RoundDialog view(View v) {
+        LinearLayout.LayoutParams lp = lpWrap();
+        lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+        lp.setMargins(0, dp(4), 0, dp(4));
+        body.addView(v, lp);
         return this;
     }
 

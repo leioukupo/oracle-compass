@@ -2,6 +2,7 @@ package com.magneo.compass.netfs;
 
 import android.content.Context;
 
+
 import com.magneo.compass.Prefs;
 
 import org.json.JSONArray;
@@ -83,10 +84,11 @@ public class FsManager {
         Prefs.put(c, Prefs.K_FS_CONNECTIONS, a.toString());
     }
 
-    public static NetFs connect(Conn cn) throws Exception {
+    public static NetFs connect(Context c, Conn cn) throws Exception {
         switch (cn.type) {
-            case "WebDAV": return new WebDavFs(cn);
+            case "WebDAV": return new WebDavFs(c, cn);
             case "SMB": return new SmbFs(cn);
+            case "NFS": return new NfsFs(cn);
             default: return new FtpFs(cn);
         }
     }
@@ -95,6 +97,8 @@ public class FsManager {
         if (cn.port > 0) return cn.port;
         if (cn.type.equals("WebDAV")) return 443;
         if (cn.type.equals("SMB")) return 445;
+        if (cn.type.equals("NFS")) return 2049;
         return 21;
     }
+
 }

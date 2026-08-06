@@ -17,6 +17,9 @@ public class FtpFs implements NetFs {
 
     public FtpFs(FsManager.Conn c) throws Exception {
         ftp = new FTPClient();
+        // 必须在 connect 之前设置控制编码：commons-net 在连接时按当时编码建控制流，
+        // 连接后再 setControlEncoding 不生效，中文路径的 LIST/RETR 会乱码导致目录列空、文件打不开
+        ftp.setControlEncoding("UTF-8");
         int port = FsManager.defaultPort(c);
         ftp.connect(c.host, port);
         int reply = ftp.getReplyCode();
@@ -26,7 +29,6 @@ public class FtpFs implements NetFs {
         }
         ftp.login(c.user, c.pass);
         ftp.enterLocalPassiveMode();
-        ftp.setControlEncoding("UTF-8");
         ftp.setFileType(FTP.BINARY_FILE_TYPE);
         String b = c.root == null ? "" : c.root;
         if (!b.isEmpty() && !b.startsWith("/")) b = "/" + b;

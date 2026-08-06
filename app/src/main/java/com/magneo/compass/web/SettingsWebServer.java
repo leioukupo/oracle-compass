@@ -209,6 +209,12 @@ public class SettingsWebServer {
                 + "<div id='ring' style='position:absolute;inset:0'></div></div></div>"
                 + "<div style='color:#8a8272;font-size:11px'>H.264 走 MT6580 硬件编码器（720×720），省 CPU、省带宽；MJPEG 为兼容模式。改参数先点保存。</div>"
                 + "</fieldset>"
+                + "<fieldset><legend>定位 API</legend>"
+                + "<div class='row'><label>显示定位</label><input type='checkbox' name='showLoc' id='showLoc' style='width:auto;vertical-align:middle'>"
+                + "<span style='font-size:11px;color:#8a8272'>显示 GPS / WiFi 定位信息（关闭后不再请求定位，省电）</span></div>"
+                + "<div class='row'><label>WiFi 定位地址</label><input type='text' name='locWifiUrl'></div>"
+                + "<div class='row'><label>IP 定位地址</label><input type='text' name='locIpUrl'></div>"
+                + "<div style='color:#8a8272;font-size:11px'>WiFi：POST JSON {wifiAccessPoints:[{macAddress,signalStrength}]}，返回 {location:{lat,lng},accuracy}（MLS 格式，可换带自己 key 的地址）；IP：GET 返回 {status:success,lat,lon}。保存后下一轮定位（≤30s）生效。</div>"
                 + "<fieldset><legend>对话记录</legend>"
                 + "<div class='row'><label>大小上限(KB)</label><input type='text' name='convMaxKb'></div>"
                 + "<div class='row'><label>清理间隔(分钟)</label><input type='text' name='convCleanMin'>"
@@ -222,10 +228,12 @@ public class SettingsWebServer {
                 + "function get(url,cb){var x=new XMLHttpRequest();x.open('GET',url,true);"
                 + "x.onload=function(){try{cb(JSON.parse(x.responseText));}catch(e){cb(null);}};"
                 + "x.onerror=function(){cb(null);};x.send();}"
-                + "get('/status',function(d){if(!d)return;for(var k in d){var e=document.querySelector('[name='+k+']');if(e)e.value=d[k];}"
+                + "get('/status',function(d){if(!d)return;for(var k in d){var e=document.querySelector('[name='+k+']');if(!e)continue;"
+                + "if(e.type==='checkbox'){e.checked=(d[k]===true||d[k]==='true');}else{e.value=d[k];}}"
                 + "document.getElementById('provider').value=d.provider;"
                 + "document.getElementById('msg').textContent='已加载设备当前配置';});"
                 + "function save(){var b=new URLSearchParams(new FormData(document.getElementById('f')));"
+                + "var cbs=document.querySelectorAll('input[type=checkbox]');for(var i=0;i<cbs.length;i++){b.set(cbs[i].name,cbs[i].checked?'true':'false');}"
                 + "var x=new XMLHttpRequest();x.open('POST','/save',true);"
                 + "x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');"
                 + "x.onload=function(){document.getElementById('msg').textContent=x.responseText;};x.send(b.toString());}"
@@ -320,7 +328,7 @@ public class SettingsWebServer {
                 + "function renderSystem(d){if(!d)return;"
                 + "document.getElementById('statTime').textContent=d.time||'--:--';"
                 + "document.getElementById('statDate').textContent=d.date||'';"
-                + "document.getElementById('statCore').textContent='CPU '+(d.cpu>=0?d.cpu+'%':'--')+' · 内存 '+(d.memPct>=0?d.memPct+'%':'--')+' · GPU '+(d.gpu>=0?d.gpu+'%':'--');"
+                + "document.getElementById('statCore').textContent='CPU '+(d.cpu>=0?d.cpu+'%':'--')+' · 内存 '+(d.memPct>=0?d.memPct+'%':'--')+' · GPU '+(d.gpu>=0?d.gpu+'%':'--')+' · 电 '+(d.battery>=0?d.battery+'%':'--');"
                 + "var sg=document.getElementById('statGps');if(sg)sg.textContent=d.gps?'GPS '+d.gps:'';"
                 + "var temps=d.temps||[];var ring=document.getElementById('ring');ring.innerHTML='';"
                 + "var n=Math.max(1,temps.length),cw=ring.clientWidth||346,cx=cw/2,cy=cw/2,r=cw*0.42;"
@@ -382,6 +390,9 @@ public class SettingsWebServer {
             o.put("streamQuality", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_QUALITY, 55)));
             o.put("streamScale", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_SCALE, 2)));
             o.put("streamBitrate", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_BITRATE, 1500)));
+            o.put("locWifiUrl", Prefs.get(app, Prefs.K_LOC_WIFI_URL, Prefs.DEFAULT_LOC_WIFI_URL));
+            o.put("locIpUrl", Prefs.get(app, Prefs.K_LOC_IP_URL, Prefs.DEFAULT_LOC_IP_URL));
+            o.put("showLoc", Prefs.getB(app, Prefs.K_SHOW_LOC, true));
             o.put("mode", H264SurfaceStreamer.isActive() ? "h264fast"
                     : (H264Streamer.isActive() ? "h264" : (ScreenStreamer.isActive() ? "mjpeg" : "idle")));
             o.put("ip", localIp());
@@ -431,7 +442,8 @@ public class SettingsWebServer {
 
     private static boolean isBoolKey(String k) {
         return k.equals("localTtsFirst") || k.equals("visionEnabled") || k.equals("vadEnabled")
-                || k.equals("ignoreSsl") || k.equals("uaDesktop") || k.equals("noImages");
+                || k.equals("ignoreSsl") || k.equals("uaDesktop") || k.equals("noImages")
+                || k.equals("showLoc");
     }
 
     private static void serveConversations(OutputStream out) throws IOException {
@@ -467,7 +479,15 @@ public class SettingsWebServer {
             o.put("gpu", readGpuPct());
             o.put("temps", readTemps());
             com.magneo.compass.SensorHub h = com.magneo.compass.SensorHub.instance;
-            o.put("gps", h == null ? "无" : (h.gpsStatus + (Double.isNaN(h.lat) ? "" : " 已定位")));
+            String gpsTxt = Prefs.getB(app, Prefs.K_SHOW_LOC, true) ? "无" : "已关闭";
+            if (Prefs.getB(app, Prefs.K_SHOW_LOC, true) && h != null) {
+                if (!Double.isNaN(h.lat)) gpsTxt = h.gpsStatus + " 已定位";
+                else if (!Double.isNaN(h.netLat))
+                    gpsTxt = "定位(" + h.netSrc + ") " + String.format(java.util.Locale.US, "%.5f,%.5f ±%.0fm", h.netLat, h.netLon, h.netAcc);
+                else gpsTxt = h.gpsStatus;
+            }
+            o.put("gps", gpsTxt);
+            o.put("battery", h == null ? -1 : h.battery);
         } catch (Exception ignored) {}
         byte[] b = o.toString().getBytes("UTF-8");
         writeHead(out, "application/json; charset=utf-8", b.length);

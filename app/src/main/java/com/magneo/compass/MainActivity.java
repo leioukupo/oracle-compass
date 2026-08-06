@@ -23,6 +23,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     private CompassView view;
     private SensorHub hub;
     private VoiceController voice;
+    private WifiLocator locator;
     private final Handler uiTicker = new Handler();
     private final Runnable uiTick = new Runnable() {
         @Override public void run() {
@@ -50,6 +51,8 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         });
         view = new CompassView(this, hub, this);
         setContentView(view);
+        // GPS 硬件不可用时用 WiFi/IP 定位兜底（每 30s 更新一次，onResume 启动）
+        locator = new WifiLocator(this);
 
         voice = VoiceController.get(this, view::setStatus);
         LocalTts.ensureInit(this);
@@ -80,7 +83,19 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     @Override
     protected void onResume() {
         super.onResume();
+        boolean showLoc = Prefs.getB(this, Prefs.K_SHOW_LOC, true);
+        hub.gpsEnabled = showLoc;
         hub.start();
+        if (locator != null) {
+            if (showLoc) {
+                locator.start((lat, lon, acc, src) -> {
+                    hub.netLat = lat; hub.netLon = lon; hub.netAcc = acc; hub.netSrc = src;
+                    view.postInvalidate();
+                });
+            } else {
+                locator.stop();
+            }
+        }
         uiTicker.removeCallbacks(uiTick);
         uiTicker.post(uiTick);
         hideSystemUi();
@@ -89,6 +104,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     @Override
     protected void onPause() {
         hub.stop();
+        if (locator != null) locator.stop();
         uiTicker.removeCallbacks(uiTick);
         super.onPause();
     }
@@ -96,6 +112,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     @Override
     protected void onDestroy() {
         uiTicker.removeCallbacks(uiTick);
+        if (locator != null) locator.stop();
         voice.shutdown();
         super.onDestroy();
     }

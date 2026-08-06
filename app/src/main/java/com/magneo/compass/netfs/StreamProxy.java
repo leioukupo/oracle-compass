@@ -76,7 +76,7 @@ public class StreamProxy {
             String remotePath = new String(Base64.decode(seg[1], Base64.NO_WRAP | Base64.URL_SAFE), StandardCharsets.UTF_8);
             FsManager.Conn conn = FsManager.byId(app, connId);
             if (conn == null) { write404(s); return; }
-            fs = FsManager.connect(conn);
+            fs = FsManager.connect(app, conn);
             InputStream in = fs.open(remotePath);
             if (skip > 0) in.skip(skip);
             OutputStream out = s.getOutputStream();
@@ -89,6 +89,11 @@ public class StreamProxy {
             out.flush();
         } catch (Exception e) {
             Log.w(TAG, "proxy handle", e);
+            try {
+                s.getOutputStream().write(("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .getBytes("ISO-8859-1"));
+                s.getOutputStream().flush();
+            } catch (Exception ignored) {}
         } finally {
             if (fs != null) try { fs.close(); } catch (Exception ignored) {}
             try { s.close(); } catch (IOException ignored) {}

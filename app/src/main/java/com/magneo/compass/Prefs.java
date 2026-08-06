@@ -36,6 +36,11 @@ public class Prefs {
     public static final String K_STREAM_SCALE = "streamScale";
     public static final String K_STREAM_BITRATE = "streamBitrate";
     public static final String K_SYS_PROMPT_VISION = "sysPromptVision";
+    public static final String K_SHOW_LOC = "showLoc";
+    public static final String K_LOC_WIFI_URL = "locWifiUrl";
+    public static final String K_LOC_IP_URL = "locIpUrl";
+    public static final String DEFAULT_LOC_WIFI_URL = "https://location.services.mozilla.com/v1/geolocate?key=test";
+    public static final String DEFAULT_LOC_IP_URL = "http://ip-api.com/json/?lang=zh-CN";
     public static final String DEFAULT_SYS_PROMPT_VOICE = "你是真理罗盘助手，回答简洁，中文回复。";
     public static final String DEFAULT_SYS_PROMPT_VISION = "你是圆屏设备“真理罗盘”的视觉感知模块。看图后用中文简述你看到的环境（物体/人/光线/场景），若与上一帧相比有明显变化，指出变化；若没有变化就说“无明显变化”。一句话即可。";
 

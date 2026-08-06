@@ -16,7 +16,7 @@ import java.util.List;
 /** 音乐后台播放服务（普通 Service + 部分唤醒锁，API 22 无需前台通知）。 */
 public class MusicService extends Service {
     public interface Listener {
-        void onState(String title, boolean playing, int pos, int dur);
+        void onState(String title, boolean playing, int pos, int dur, int idx);
     }
 
     private static MusicService inst;
@@ -30,7 +30,7 @@ public class MusicService extends Service {
         @Override public void run() {
             if (listener != null && mp != null) {
                 try {
-                    listener.onState(title(), mp.isPlaying(), mp.getCurrentPosition(), mp.getDuration());
+                    listener.onState(title(), mp.isPlaying(), mp.getCurrentPosition(), mp.getDuration(), idx);
                 } catch (Exception ignored) {}
             }
             h.postDelayed(this, 500);
@@ -78,6 +78,10 @@ public class MusicService extends Service {
             next();
         }
     }
+
+    public void playAt(int i) { if (i >= 0 && i < urls.size()) playItem(i); }
+    public int currentIndex() { return idx; }
+    public List<String> playlist() { return new ArrayList<>(urls); }
 
     public void toggle() {
         if (mp == null) { if (!urls.isEmpty()) playItem(idx); return; }

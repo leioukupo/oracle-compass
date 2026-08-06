@@ -208,10 +208,17 @@ public class CompassView extends View {
             c.drawText(l, cx - pSmall.measureText(l) / 2f, y, pSmall);
             y += 22f * s;
         }
-        String gps = Double.isNaN(hub.lat)
-                ? "GPS " + hub.gpsStatus          // 无定位时显示真实状态（搜索卫星/定位中 n/m/已关闭）
-                : String.format(Locale.US, "GPS %.5f,%.5f 海拔%.0fm %s", hub.lat, hub.lon, hub.alt, hub.gpsStatus);
-        c.drawText(gps, cx - pSmall.measureText(gps) / 2f, y, pSmall);
+        if (Prefs.getB(getContext(), Prefs.K_SHOW_LOC, true)) {   // 网页开关：显示/隐藏定位
+            String gps;
+            if (!Double.isNaN(hub.lat)) {
+                gps = String.format(Locale.US, "GPS %.5f,%.5f 海拔%.0fm %s", hub.lat, hub.lon, hub.alt, hub.gpsStatus);
+            } else if (!Double.isNaN(hub.netLat)) {
+                gps = String.format(Locale.US, "定位(%s) %.5f,%.5f ±%.0fm", hub.netSrc, hub.netLat, hub.netLon, hub.netAcc);
+            } else {
+                gps = "GPS " + hub.gpsStatus;      // 无定位时显示真实状态（搜索卫星/定位中 n/m/已关闭）
+            }
+            c.drawText(gps, cx - pSmall.measureText(gps) / 2f, y, pSmall);
+        }
     }
 
     private void drawStatus(Canvas c, float cx, float cy, float s) {
@@ -233,10 +240,13 @@ public class CompassView extends View {
                 String.format(Locale.US, "方位 %.0f° 俯仰 %.0f° 横滚 %.0f°", hub.azimuth, hub.pitch, hub.roll),
                 String.format(Locale.US, "光 %.0f  距离 %.2f", hub.light, hub.prox),
                 String.format(Locale.US, "电量 %d%%", hub.battery),
-                Double.isNaN(hub.lat) ? "GPS " + hub.gpsStatus :
-                        String.format(Locale.US, "GPS %.5f,%.5f", hub.lat, hub.lon)
+                !Prefs.getB(getContext(), Prefs.K_SHOW_LOC, true) ? "" :
+                        (!Double.isNaN(hub.lat) ? String.format(Locale.US, "GPS %.5f,%.5f", hub.lat, hub.lon) :
+                                (!Double.isNaN(hub.netLat) ? String.format(Locale.US, "定位(%s) %.5f,%.5f", hub.netSrc, hub.netLat, hub.netLon)
+                                        : "GPS " + hub.gpsStatus))
         };
         for (String l : lines) {
+            if (l.isEmpty()) { y += 26f * s; continue; }   // 定位关闭时空行占位
             c.drawText(l, cx - pText.measureText(l) / 2f, y, pText);
             y += 26f * s;
         }
