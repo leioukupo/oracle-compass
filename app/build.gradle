@@ -42,4 +42,5 @@ dependencies {
     implementation 'commons-net:commons-net:3.11.1'
     implementation 'eu.agno3.jcifs:jcifs-ng:2.1.8'
     implementation 'com.emc.ecs:nfs-client:1.1.0'
+    implementation 'io.github.webrtc-sdk:android:114.5735.06'
 }

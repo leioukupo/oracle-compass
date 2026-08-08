@@ -29,6 +29,15 @@ public class Prefs {
     public static final String K_BOOKMARKS = "bookmarks";
     public static final String K_HISTORY = "history";
     public static final String K_CONV_MAX_KB = "convMaxKb";
+    public static final String K_FRPC_CONFIG = "frpcConfig";
+    public static final String K_CAM_ID = "camId";
+    public static final String K_CAM_WIDTH = "camWidth";
+    public static final String K_CAM_HEIGHT = "camHeight";
+    public static final String K_CAM_FPS = "camFps";
+    public static final String K_CAM_BITRATE = "camBitrate";
+    public static final String K_RTSP_PORT = "rtspPort";
+    public static final String K_RTMP_URL = "rtmpUrl";
+    public static final String K_CAM_AUTO_START = "camAutoStart";
     public static final String K_CONV_CLEAN_MIN = "convCleanMin";
     public static final String K_SYS_PROMPT_VOICE = "sysPromptVoice";
     public static final String K_STREAM_FPS = "streamFps";
@@ -61,6 +70,13 @@ public class Prefs {
         }
     }
     public static void putB(Context c, String k, boolean v) { sp(c).edit().putBoolean(k, v).apply(); }
-    public static int getI(Context c, String k, int def) { return sp(c).getInt(k, def); }
+    public static int getI(Context c, String k, int def) {
+        try {
+            Object v = sp(c).getAll().get(k);
+            if (v instanceof Integer) return (Integer) v;
+            if (v instanceof String) return Integer.parseInt((String) v);
+        } catch (Exception ignored) {}
+        return def;
+    }
     public static void putI(Context c, String k, int v) { sp(c).edit().putInt(k, v).apply(); }
 }

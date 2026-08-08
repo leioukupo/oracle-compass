@@ -29,13 +29,19 @@ public class SettingsWebServer {
     public static synchronized void start(Context c) {
         if (server != null) return;
         app = c.getApplicationContext();
-        try {
-            server = new ServerSocket(PORT, 32, InetAddress.getByName("0.0.0.0")); // backlog 32，防轮询连接堵死
-            thread = new Thread(SettingsWebServer::loop, "web-settings");
-            thread.setDaemon(true);
-            thread.start();
-        } catch (Exception e) {
-            server = null;
+        for (int attempt = 0; attempt < 3 && server == null; attempt++) {
+            try {
+                ServerSocket ss = new ServerSocket();
+                ss.setReuseAddress(true);   // 快速重启时避免 TIME_WAIT 占用
+                ss.bind(new java.net.InetSocketAddress(InetAddress.getByName("0.0.0.0"), PORT), 32);
+                server = ss;
+                thread = new Thread(SettingsWebServer::loop, "web-settings");
+                thread.setDaemon(true);
+                thread.start();
+            } catch (Exception e) {
+                server = null;
+                try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+            }
         }
     }
 
@@ -124,6 +130,16 @@ public class SettingsWebServer {
             else if (path.equals("/system_status")) serveSystemStatus(out);
             else if (path.equals("/key")) { serveKey(out, parts[1]); return; }
             else if (path.equals("/touch")) { serveTouch(out, parts[1]); return; }
+            else if (path.equals("/cam")) { serveCamPage(out); }
+            else if (path.equals("/camhttp")) { com.magneo.compass.cam.CameraHttpStreamer.serve(s); return; }
+            else if (path.equals("/cam/start")) { com.magneo.compass.cam.CameraStreamService.start(app); serveText(out, "正在启动摄像头推流…"); }
+            else if (path.equals("/cam/stop")) { com.magneo.compass.cam.CameraStreamService.stop(app); serveText(out, "已停止"); }
+            else if (path.equals("/cam/status")) serveCamStatus(out);
+            else if (path.equals("/cam/offer")) serveCamOffer(out, body);
+            else if (path.equals("/cam/answer")) serveCamAnswer(out);
+            else if (path.equals("/frpc/status")) serveFrpcStatus(out);
+            else if (path.equals("/frpc/start")) serveText(out, com.magneo.compass.frp.FrpcManager.start(app));
+            else if (path.equals("/frpc/stop")) serveText(out, com.magneo.compass.frp.FrpcManager.stop());
             else if (path.equals("/save")) serveSave(out, body);
             else serve404(out);
             out.flush();
@@ -215,6 +231,37 @@ public class SettingsWebServer {
                 + "<div class='row'><label>WiFi 定位地址</label><input type='text' name='locWifiUrl'></div>"
                 + "<div class='row'><label>IP 定位地址</label><input type='text' name='locIpUrl'></div>"
                 + "<div style='color:#8a8272;font-size:11px'>WiFi：POST JSON {wifiAccessPoints:[{macAddress,signalStrength}]}，返回 {location:{lat,lng},accuracy}（MLS 格式，可换带自己 key 的地址）；IP：GET 返回 {status:success,lat,lon}。保存后下一轮定位（≤30s）生效。</div>"
+                + "<fieldset><legend>摄像头推流</legend>"
+                + "<div class='row'><label>摄像头</label><select name='camId'><option value='0'>后置（默认）</option><option value='1'>前置</option></select></div>"
+                + "<div class='row'><label>分辨率</label><select name='camWidth'><option>640</option><option>800</option><option>1280</option></select> × "
+                + "<select name='camHeight'><option>480</option><option>800</option><option>720</option></select></div>"
+                + "<div style='color:#8a8272;font-size:11px'>相机支持尺寸：640×480（19fps 流畅，默认）、800×800（10fps 圆屏原生）、1280×720（7fps 高清）。选择不匹配时自动取最接近的支持尺寸。</div>"
+                + "<div class='row'><label>帧率</label><select name='camFps'><option>24</option></select>"
+                + "<span style='font-size:11px;color:#8a8272'>设备摄像头实际 16fps（硬件上限）</span></div>"
+                + "<div class='row'><label>码率(Kbps)</label><select name='camBitrate'><option>2000</option><option>4000</option><option>5000</option><option>6000</option><option>8000</option><option>12000</option><option>20000</option></select></div>"
+                + "<div style='color:#8a8272;font-size:11px'>码率影响 720p 帧率：2-5Mbps≈7-8fps（穿透推荐），20Mbps 只有 5fps。要帧率降分辨率，要画质提码率。</div>"
+                + "<div class='row'><label>RTSP 端口</label><input type='text' name='rtspPort'></div>"
+                + "<div class='row'><label>RTMP 地址</label><input type='text' name='rtmpUrl' placeholder='rtmp://VPS:1935/cam/stream（留空=不推）'></div>"
+                + "<div class='row'><label>开机自动推流</label><input type='checkbox' name='camAutoStart' style='width:auto'>"
+                + "<span style='font-size:11px;color:#8a8272'>应用启动时自动开始摄像头推流（默认开）</span></div>"
+                + "<div style='text-align:center'><button type='button' onclick='camToggle()' id='camBtn'>启动推流</button>"
+                + "<span id='camMsg'></span></div>"
+                + "<div style='color:#8a8272;font-size:11px'>状态：<span id='camState'>未知</span>"
+                + "<div id='camUrls' style='margin-top:4px'></div></div>"
+                + "<div style='color:#8a8272;font-size:11px'>RTSP 用 VLC 等播放 <b>rtsp://设备IP:端口/cam</b>（建议选 TCP 传输）；网页播放 <a href='/cam' target='_blank' style='color:#d4af37'>点这里打开摄像头直播页</a>。已实测：720p 可达，摄像头回调硬件上限 16fps（60/30fps 目标自动降级），码率 VBR 最高按设置值。状态区会显示实际帧率。</div>"
+                + "</fieldset>"
+                + "<fieldset><legend>内网穿透 frpc</legend>"
+                + "<div class='row'><label style='width:100%'>frpc.toml 配置（保存后生效）</label></div>"
+                + "<textarea name='frpcConfig' rows='12' style='width:calc(100% - 14px);height:220px;background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px;font-family:monospace;font-size:12px'></textarea>"
+                + "<div style='color:#8a8272;font-size:11px'>示例：serverAddr = '你的服务器IP' / serverPort = 7000 / auth.token = '密钥'，代理用 [[proxies]]：name='web' type='tcp' localIP='127.0.0.1' localPort=18080 remotePort=8080（详细格式见 frp 官方文档，改完先点保存）</div>"
+                + "<div class='row'>状态：<span id='frpcState' style='color:#d4af37'>未知</span>"
+                + "<span style='font-size:11px;color:#8a8272;margin-left:8px'>应用启动时自动运行（配置非空）</span></div>"
+                + "<div style='text-align:center'><button type='button' onclick='frpcStart()'>启动 frpc</button>"
+                + "<button type='button' onclick='frpcStop()'>停止 frpc</button>"
+                + "<span id='frpcMsg'></span></div>"
+                + "<div style='color:#8a8272;font-size:11px'>运行日志（最近部分，自动刷新）：</div>"
+                + "<pre id='frpcLog' style='background:#171512;border:1px solid #6b5a2e;border-radius:10px;padding:8px;max-height:200px;overflow-y:auto;font-size:11px;white-space:pre-wrap;color:#8fbf6a'></pre>"
+                + "</fieldset>"
                 + "<fieldset><legend>对话记录</legend>"
                 + "<div class='row'><label>大小上限(KB)</label><input type='text' name='convMaxKb'></div>"
                 + "<div class='row'><label>清理间隔(分钟)</label><input type='text' name='convCleanMin'>"
@@ -358,11 +405,182 @@ public class SettingsWebServer {
                 + "if(!td.moved&&!td.long){tSend('act=tap&x='+td.x+'&y='+td.y);tMsg('点击 '+td.x+','+td.y);}}"
                 + "tp.addEventListener('pointerup',tEnd);tp.addEventListener('pointercancel',tEnd);"
                 + "tp.addEventListener('contextmenu',function(ev){ev.preventDefault();});}"
+                + "function camRefresh(){get('/cam/status',function(d){if(!d)return;"
+                + "var st=document.getElementById('camState');st.textContent=d.status==='running'?('运行中 · '+d.detail):d.status;"
+                + "var u=document.getElementById('camUrls');u.innerHTML=(d.rtsp?'<div>RTSP: '+esc(d.rtsp)+'</div>':'')"
+                + "+(d.rtmpUrl?'<div>RTMP: '+esc(d.rtmpUrl)+'</div>':'')"
+                + "+(d.webrtc?'<div>WebRTC: '+esc(d.webrtc)+'</div>':'')"
+                + "+(d.realFps?'<div style=\"color:#8fbf6a\">实际帧率: '+esc(d.realFps)+' fps</div>':'');"
+                + "document.getElementById('camBtn').textContent=d.status==='running'?'停止推流':'启动推流';});}"
+                + "function camToggle(){get('/cam/status',function(d){"
+                + "if(d&&d.status==='running'){camStop();}else{camStart();}});}"
+                + "function camStart(){var x=new XMLHttpRequest();x.open('GET','/cam/start',true);"
+                + "x.onload=function(){document.getElementById('camMsg').textContent=x.responseText;setTimeout(camRefresh,1500);};x.send();}"
+                + "function camStop(){var x=new XMLHttpRequest();x.open('GET','/cam/stop',true);"
+                + "x.onload=function(){document.getElementById('camMsg').textContent=x.responseText;setTimeout(camRefresh,500);};x.send();}"
+                + "function frpcRefresh(){get('/frpc/status',function(d){if(!d)return;"
+                + "document.getElementById('frpcState').textContent=d.status==='running'?'运行中':'已停止';"
+                + "var l=document.getElementById('frpcLog');l.textContent=d.log;l.scrollTop=l.scrollHeight;});}"
+                + "function frpcStart(){var x=new XMLHttpRequest();x.open('GET','/frpc/start',true);"
+                + "x.onload=function(){document.getElementById('frpcMsg').textContent=x.responseText;frpcRefresh();};x.send();}"
+                + "function frpcStop(){var x=new XMLHttpRequest();x.open('GET','/frpc/stop',true);"
+                + "x.onload=function(){document.getElementById('frpcMsg').textContent=x.responseText;frpcRefresh();};x.send();}"
                 + "setInterval(function(){get('/system_status',renderSystem);},2000);"
-                + "loadConv();setInterval(loadConv,3000);setInterval(streamState,3000);"
+                + "loadConv();setInterval(loadConv,3000);setInterval(streamState,3000);frpcRefresh();setInterval(frpcRefresh,3000);camRefresh();setInterval(camRefresh,3000);"
                 + "</script></body></html>";
         byte[] b = html.getBytes("UTF-8");
         writeHead(out, "text/html; charset=utf-8", b.length);
+        out.write(b);
+    }
+
+    private static void serveCamStatus(OutputStream out) throws IOException {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("status", com.magneo.compass.cam.CameraStreamService.status());
+            o.put("detail", com.magneo.compass.cam.CameraStreamService.statusDetail());
+            String ip = localIp();
+            int port = Prefs.getI(app, Prefs.K_RTSP_PORT, 8554);
+            o.put("rtsp", "rtsp://" + ip + ":" + port + "/cam");
+            o.put("rtmpUrl", Prefs.get(app, Prefs.K_RTMP_URL, ""));
+            o.put("camAutoStart", Prefs.getB(app, Prefs.K_CAM_AUTO_START, true));
+            o.put("webrtc", com.magneo.compass.cam.WebRtcStreamer.get().state());
+            o.put("webrtcError", com.magneo.compass.cam.WebRtcStreamer.get().error());
+            o.put("realFps", com.magneo.compass.cam.CameraStreamService.realFps());
+            o.put("fpsInfo", com.magneo.compass.cam.CameraStreamService.fpsInfo());
+            o.put("camDiag", com.magneo.compass.cam.CameraStreamService.camDiag());
+            byte[] b = o.toString().getBytes("UTF-8");
+            writeHead(out, "application/json; charset=utf-8", b.length);
+            out.write(b);
+        } catch (Exception e) {
+            byte[] b = ("{\"status\":\"error\",\"err\":\"" + e + "\"}").getBytes("UTF-8");
+            writeHead(out, "application/json; charset=utf-8", b.length);
+            out.write(b);
+        }
+    }
+
+    private static void serveCamOffer(OutputStream out, String body) throws IOException {
+        String ok = "false";
+        try {
+            JSONObject o = new JSONObject(body);
+            String sdp = o.optString("sdp", "");
+            if (!sdp.isEmpty()) {
+                ok = String.valueOf(com.magneo.compass.cam.WebRtcStreamer.get().handleOffer(sdp));
+            }
+        } catch (Exception e) { ok = "false"; }
+        serveText(out, ok);
+    }
+
+    private static void serveCamAnswer(OutputStream out) throws IOException {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("sdp", com.magneo.compass.cam.WebRtcStreamer.get().answer());
+            byte[] b = o.toString().getBytes("UTF-8");
+            writeHead(out, "application/json; charset=utf-8", b.length);
+            out.write(b);
+        } catch (Exception e) {
+            byte[] b = "{\"sdp\":\"\"}".getBytes("UTF-8");
+            writeHead(out, "application/json; charset=utf-8", b.length);
+            out.write(b);
+        }
+    }
+
+    private static void serveCamPage(OutputStream out) throws IOException {
+        String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>真理罗盘 · 摄像头</title>"
+                + "<style>body{background:#0d0b08;color:#e8dcc0;font-family:sans-serif;text-align:center;margin:0;padding:20px}"
+                + "h1{color:#d4af37;font-size:18px}"
+                + "video{width:92mm;height:92mm;border-radius:50%;border:1px solid #6b5a2e;object-fit:cover;background:#000;display:block;margin:0 auto}"
+                + "#st{color:#8fbf6a;margin-top:10px;font-size:13px;min-height:18px}"
+                + "button{background:#d4af37;color:#0d0b08;border:none;border-radius:8px;padding:8px 14px;margin:6px}"
+                + "a{color:#d4af37}</style></head><body>"
+                + "<h1>☯ 摄像头直播</h1>"
+                + "<video id='v' autoplay playsinline muted></video>"
+                + "<div id='st'>连接中…</div>"
+                + "<div><button type='button' onclick='startMse()'>MSE 播放</button>"
+                + "<button type='button' onclick='startWr()'>WebRTC（实验）</button></div>"
+                + "<div style='margin-top:6px;font-size:11px;color:#8a8272'>MSE = H.264 实时流（默认，兼容好）；WebRTC 在这台 MT6580 上硬编兼容性有限，失败时用 MSE 或 RTSP</div>"
+                + "<script>"
+                + "var v=document.getElementById('v'),st=document.getElementById('st');"
+                + "var mse=null,sb=null,abortCtl=null,boxBuf=new Uint8Array(0),boxOff=0,initDone=false,appending=false,pending=[];"
+                + "function boxAt(pos){if(pos+8>boxBuf.length)return null;"
+                + "var size=((boxBuf[pos]<<24)|(boxBuf[pos+1]<<16)|(boxBuf[pos+2]<<8)|boxBuf[pos+3])>>>0;"
+                + "var type=String.fromCharCode(boxBuf[pos+4],boxBuf[pos+5],boxBuf[pos+6],boxBuf[pos+7]);"
+                + "return {size:size,type:type,start:pos};}"
+                + "function pumpSb(){if(!mse||!sb||sb.updating)return;"
+                + "if(pending.length>12){pending=pending.slice(-2);st.textContent='追帧中…';}"
+                + "if(!pending.length)return;"
+                + "try{sb.appendBuffer(pending.shift());}catch(e){st.textContent='MSE 追加失败: '+e;}}"
+                + "function flush(){while(true){"
+                + "if(!initDone){var a=boxAt(boxOff),b=boxAt(boxOff+(a?a.size:0));"
+                + "if(!a||!b||a.type!=='ftyp'||b.type!=='moov'||boxOff+a.size+b.size>boxBuf.length)break;"
+                + "pending.push(boxBuf.slice(boxOff,boxOff+a.size+b.size).buffer);boxOff+=a.size+b.size;initDone=true;}"
+                + "else{var c=boxAt(boxOff),d=boxAt(boxOff+(c?c.size:0));"
+                + "if(!c||!d||c.type!=='moof'||d.type!=='mdat'||boxOff+c.size+d.size>boxBuf.length)break;"
+                + "pending.push(boxBuf.slice(boxOff,boxOff+c.size+d.size).buffer);boxOff+=c.size+d.size;}"
+                + "if(boxOff===boxBuf.length){boxBuf=new Uint8Array(0);boxOff=0;}"
+                + "pumpSb();}}"
+                + "function append(c){var nb=new Uint8Array(boxBuf.length+c.length);nb.set(boxBuf,0);nb.set(c,boxBuf.length);boxBuf=nb;flush();}"
+                + "function startMse(){stopWr();st.textContent='MSE 连接中…';"
+                + "if(!window.MediaSource){st.textContent='浏览器不支持 MSE';return;}"
+                + "mse=new MediaSource();v.src=URL.createObjectURL(mse);boxBuf=new Uint8Array(0);boxOff=0;initDone=false;pending=[];"
+                + "mse.addEventListener('sourceopen',function(){"
+                + "try{sb=mse.addSourceBuffer('video/mp4; codecs=\"avc1.42E01E\"');}"
+                + "catch(e){try{sb=mse.addSourceBuffer('video/mp4; codecs=\"avc1.4D401E\"');}"
+                + "catch(e2){st.textContent='无法创建解码器';return;}}"
+                + "sb.addEventListener('updateend',pumpSb);"
+                + "abortCtl=new AbortController();"
+                + "fetch('/camhttp',{signal:abortCtl.signal}).then(function(r){"
+                + "if(!r.ok||!r.body){st.textContent='连接失败 '+r.status;return;}"
+                + "var reader=r.body.getReader();"
+                + "function step(){reader.read().then(function(res){"
+                + "if(res.done){st.textContent='流结束';try{mse.endOfStream();}catch(e){}return;}"
+                + "append(res.value);v.play().catch(function(){});"
+                + "st.textContent='推流中 · H.264';step();}).catch(function(e){if(e.name!=='AbortError')st.textContent='流中断: '+e;});}"
+                + "step();}).catch(function(e){if(e.name!=='AbortError')st.textContent='连接失败: '+e;});});}"
+                + "function stopWr(){if(abortCtl){try{abortCtl.abort();}catch(e){}abortCtl=null;}"
+                + "if(mse){try{mse.endOfStream();}catch(e){}mse=null;sb=null;}"
+                + "boxBuf=new Uint8Array(0);boxOff=0;initDone=false;pending=[];}"
+                + "function startMse2(){startMse();}"
+                + "async function sleep(ms){return new Promise(r=>setTimeout(r,ms));}"
+                + "function startWr(){stopWr();st.textContent='WebRTC 连接中…';"
+                + "var pc=new RTCPeerConnection();"
+                + "pc.ontrack=function(e){v.srcObject=e.streams[0];st.textContent='WebRTC 已连接';};"
+                + "pc.onconnectionstatechange=function(){if(pc.connectionState==='failed')st.textContent='WebRTC 失败，请用 MSE 播放';};"
+                + "(async function(){try{pc.addTransceiver('video',{direction:'recvonly'});"
+                + "var offer=await pc.createOffer();await pc.setLocalDescription(offer);"
+                + "while(pc.iceGatheringState!=='complete'){await sleep(200);}"
+                + "var r=await fetch('/cam/offer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sdp:pc.localDescription.sdp})});"
+                + "var ok=await r.text();if(ok!=='true'){st.textContent='设备拒绝连接';return;}"
+                + "st.textContent='等待设备应答…';var ans=null;"
+                + "for(var i=0;i<80;i++){var r2=await fetch('/cam/answer');var d=await r2.json();"
+                + "if(d&&d.sdp){ans=d;break;}await sleep(500);}"
+                + "if(!ans){st.textContent='设备无应答（WebRTC 不可用）';return;}"
+                + "await pc.setRemoteDescription(ans);"
+                + "}catch(e){st.textContent='WebRTC 错误: '+e;}})();}"
+                + "startMse();"
+                + "</script></body></html>";
+        byte[] b = html.getBytes("UTF-8");
+        writeHead(out, "text/html; charset=utf-8", b.length);
+        out.write(b);
+    }
+
+    private static void serveFrpcStatus(OutputStream out) throws IOException {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("status", com.magneo.compass.frp.FrpcManager.status());
+            o.put("log", com.magneo.compass.frp.FrpcManager.logTail(4000));
+            byte[] b = o.toString().getBytes("UTF-8");
+            writeHead(out, "application/json; charset=utf-8", b.length);
+            out.write(b);
+        } catch (Exception e) {
+            byte[] b = ("{\"status\":\"error\",\"log\":\"\"}").getBytes("UTF-8");
+            writeHead(out, "application/json; charset=utf-8", b.length);
+            out.write(b);
+        }
+    }
+
+    private static void serveText(OutputStream out, String text) throws IOException {
+        byte[] b = (text == null ? "" : text).getBytes("UTF-8");
+        writeHead(out, "text/plain; charset=utf-8", b.length);
         out.write(b);
     }
 
@@ -393,6 +611,15 @@ public class SettingsWebServer {
             o.put("locWifiUrl", Prefs.get(app, Prefs.K_LOC_WIFI_URL, Prefs.DEFAULT_LOC_WIFI_URL));
             o.put("locIpUrl", Prefs.get(app, Prefs.K_LOC_IP_URL, Prefs.DEFAULT_LOC_IP_URL));
             o.put("showLoc", Prefs.getB(app, Prefs.K_SHOW_LOC, true));
+            o.put("frpcConfig", Prefs.get(app, Prefs.K_FRPC_CONFIG, ""));
+            o.put("camId", String.valueOf(Prefs.getI(app, Prefs.K_CAM_ID, 0)));
+            o.put("camWidth", String.valueOf(Prefs.getI(app, Prefs.K_CAM_WIDTH, 1280)));
+            o.put("camHeight", String.valueOf(Prefs.getI(app, Prefs.K_CAM_HEIGHT, 720)));
+            o.put("camFps", String.valueOf(Prefs.getI(app, Prefs.K_CAM_FPS, 24)));
+            o.put("camBitrate", String.valueOf(Prefs.getI(app, Prefs.K_CAM_BITRATE, 5000)));
+            o.put("rtspPort", String.valueOf(Prefs.getI(app, Prefs.K_RTSP_PORT, 8554)));
+            o.put("rtmpUrl", Prefs.get(app, Prefs.K_RTMP_URL, ""));
+            o.put("camAutoStart", Prefs.getB(app, Prefs.K_CAM_AUTO_START, true));
             o.put("mode", H264SurfaceStreamer.isActive() ? "h264fast"
                     : (H264Streamer.isActive() ? "h264" : (ScreenStreamer.isActive() ? "mjpeg" : "idle")));
             o.put("ip", localIp());

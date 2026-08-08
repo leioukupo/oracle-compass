@@ -57,6 +57,30 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         voice = VoiceController.get(this, view::setStatus);
         LocalTts.ensureInit(this);
         com.magneo.compass.web.SettingsWebServer.start(this);
+        // 自动启动 frpc（配置非空时）与摄像头推流（开关开启时），供穿透/远程使用
+        new Thread(() -> {
+            try {
+                boolean hasCfg = !Prefs.get(MainActivity.this, Prefs.K_FRPC_CONFIG, "").trim().isEmpty();
+                String r1 = "frpc auto: cfg=" + hasCfg + " run=" + com.magneo.compass.frp.FrpcManager.isRunning();
+                if (hasCfg && !com.magneo.compass.frp.FrpcManager.isRunning()) {
+                    r1 += " -> " + com.magneo.compass.frp.FrpcManager.start(getApplicationContext());
+                }
+                logAuto(r1);
+            } catch (Throwable t) {
+                logAuto("frpc auto FAILED: " + t);
+            }
+            try {
+                boolean camOn = Prefs.getB(MainActivity.this, Prefs.K_CAM_AUTO_START, true);
+                String r2 = "cam auto: on=" + camOn;
+                if (camOn) {
+                    com.magneo.compass.cam.CameraStreamService.start(getApplicationContext());
+                    r2 += " -> started";
+                }
+                logAuto(r2);
+            } catch (Throwable t) {
+                logAuto("cam auto FAILED: " + t);
+            }
+        }, "auto-stream").start();
         // 兜底：应用每次冷启动清理上次崩溃遗留的推流编码进程，防止 CPU 被占满；
         // 若上次推流是被强杀/崩溃终止的，屏幕常亮设置会残留，一并恢复自动休眠
         new Thread(() -> {
@@ -115,6 +139,16 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         if (locator != null) locator.stop();
         voice.shutdown();
         super.onDestroy();
+    }
+
+    private void logAuto(String msg) {
+        try {
+            java.io.File f = new java.io.File(getFilesDir(), "auto.log");
+            java.io.FileOutputStream fo = new java.io.FileOutputStream(f, true);
+            java.io.PrintWriter pw = new java.io.PrintWriter(fo);
+            pw.println(new java.util.Date() + " " + msg);
+            pw.close();
+        } catch (Exception ignored) {}
     }
 
     private void hideSystemUi() {

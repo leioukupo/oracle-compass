@@ -59,7 +59,8 @@
         <activity android:name=".netfs.VideoPlayerActivity" android:exported="false" android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden" />
 
         <activity android:name=".voice.TtsTestActivity" android:exported="true" android:screenOrientation="portrait" />
-        <service android:name=".voice.VadService" android:exported="false" />
+        <service android:name="com.magneo.compass.cam.CameraStreamService" android:exported="false" />
+    <service android:name=".voice.VadService" android:exported="false" />
         <service android:name=".netfs.MusicService" android:exported="false" />
 
         <service
