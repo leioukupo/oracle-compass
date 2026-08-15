@@ -2,7 +2,6 @@ package com.magneo.compass.netfs;
 
 import android.app.Activity;
 import android.graphics.Color;
-import android.graphics.Outline;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
@@ -10,7 +9,6 @@ import android.os.Handler;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewOutlineProvider;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.MediaController;
@@ -53,12 +51,7 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
         mc.setAnchorView(vv);
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
-        wrap.setClipToOutline(true);
-        wrap.setOutlineProvider(new ViewOutlineProvider() {
-            @Override public void getOutline(android.view.View view, Outline outline) {
-                outline.setOval(0, 0, view.getWidth(), view.getHeight());
-            }
-        });
+        com.magneo.compass.ui.OutlineUtil.oval(wrap);
         wrap.addView(new com.magneo.compass.BackButton(this));
 
         FrameLayout videoArea = new FrameLayout(this);

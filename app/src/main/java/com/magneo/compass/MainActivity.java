@@ -57,7 +57,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         voice = VoiceController.get(this, view::setStatus);
         LocalTts.ensureInit(this);
         com.magneo.compass.web.SettingsWebServer.start(this);
-        // 自动启动 frpc（配置非空时）与摄像头推流（开关开启时），供穿透/远程使用
+        // 自动启动 frpc（配置非空时）；摄像头推流不再随主屏冷启，改由 Vision 前后 onResume/onPause 或 web /cam/start|stop 按需启停，避免冷启即占 CPU
         new Thread(() -> {
             try {
                 boolean hasCfg = !Prefs.get(MainActivity.this, Prefs.K_FRPC_CONFIG, "").trim().isEmpty();
@@ -68,17 +68,6 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
                 logAuto(r1);
             } catch (Throwable t) {
                 logAuto("frpc auto FAILED: " + t);
-            }
-            try {
-                boolean camOn = Prefs.getB(MainActivity.this, Prefs.K_CAM_AUTO_START, true);
-                String r2 = "cam auto: on=" + camOn;
-                if (camOn) {
-                    com.magneo.compass.cam.CameraStreamService.start(getApplicationContext());
-                    r2 += " -> started";
-                }
-                logAuto(r2);
-            } catch (Throwable t) {
-                logAuto("cam auto FAILED: " + t);
             }
         }, "auto-stream").start();
         // 兜底：应用每次冷启动清理上次崩溃遗留的推流编码进程，防止 CPU 被占满；
@@ -187,6 +176,13 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
             return true;
         }
         return super.onKeyDown(keyCode, event);
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        // 主屏不响应返回键：吞掉，BaseActivity 默认会 finish()，桌面 launcher 不应被关
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) return true;
+        return super.dispatchKeyEvent(event);
     }
 
     @Override

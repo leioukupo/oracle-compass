@@ -1,6 +1,5 @@
 package com.magneo.compass.voice;
 
-import android.app.Activity;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.widget.LinearLayout;
@@ -8,7 +7,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 /** 调试用：验证本地 eSpeak TTS（nativeSpeak 返回采样数并播报）。 */
-public class TtsTestActivity extends Activity {
+public class TtsTestActivity extends com.magneo.compass.BaseActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -17,7 +16,8 @@ public class TtsTestActivity extends Activity {
         TextView tv = new TextView(this);
         tv.setTextColor(Color.rgb(232, 220, 192));
         tv.setTextSize(18);
-        tv.setPadding(24, 24, 24, 24);
+        tv.setPadding(com.magneo.compass.ui.Ui.dp(this, 12), com.magneo.compass.ui.Ui.dp(this, 12),
+                com.magneo.compass.ui.Ui.dp(this, 12), com.magneo.compass.ui.Ui.dp(this, 12));
         root.addView(tv);
         setContentView(root);
 

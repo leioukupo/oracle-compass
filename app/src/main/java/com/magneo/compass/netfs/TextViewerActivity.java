@@ -2,12 +2,10 @@ package com.magneo.compass.netfs;
 
 import android.app.Activity;
 import android.graphics.Color;
-import android.graphics.Outline;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.method.ScrollingMovementMethod;
 import android.view.ViewGroup;
-import android.view.ViewOutlineProvider;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -37,18 +35,14 @@ public class TextViewerActivity extends com.magneo.compass.BaseActivity {
         tv.setTextColor(Color.rgb(232, 220, 192));
         tv.setTextSize(16);
         tv.setMovementMethod(new ScrollingMovementMethod());
-        tv.setPadding(16, 16, 16, 16);
+        tv.setPadding(com.magneo.compass.ui.Ui.dp(this, 8), com.magneo.compass.ui.Ui.dp(this, 8),
+                com.magneo.compass.ui.Ui.dp(this, 8), com.magneo.compass.ui.Ui.dp(this, 8));
         ScrollView sc = new ScrollView(this);
         sc.setBackgroundColor(Color.rgb(10, 10, 10));
         sc.addView(tv);
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
-        wrap.setClipToOutline(true);
-        wrap.setOutlineProvider(new ViewOutlineProvider() {
-            @Override public void getOutline(android.view.View view, Outline outline) {
-                outline.setOval(0, 0, view.getWidth(), view.getHeight());
-            }
-        });
+        com.magneo.compass.ui.OutlineUtil.oval(wrap);
         wrap.addView(new com.magneo.compass.BackButton(this));
         wrap.addView(sc, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         setContentView(wrap);

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 圆屏统一常用尺寸（px 值在代码里直接用 Ui.dp/context 换算） -->
+    <!-- 物理参数：可见半径 R=400px=46mm；四角裁深 ~19mm；1dp≈0.229mm -->
+    <dimen name="round_R_safe_px">392px</dimen>
+    <dimen name="touch_min">44dp</dimen>
+    <dimen name="round_inset_md">22dp</dimen>
+
+    <!-- 字号梯度（与 Ui.TEXT_* 一致） -->
+    <dimen name="text_xl">26sp</dimen>
+    <dimen name="text_lg">19sp</dimen>
+    <dimen name="text_md">17sp</dimen>
+    <dimen name="text_base">16sp</dimen>
+    <dimen name="text_sm">14sp</dimen>
+    <dimen name="text_xs">12sp</dimen>
+
+    <!-- 工具行常用尺寸 -->
+    <dimen name="icon_main">44dp</dimen>
+    <dimen name="touch_target">76dp</dimen>
+</resources>

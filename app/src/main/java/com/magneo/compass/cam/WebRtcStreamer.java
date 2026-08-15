@@ -80,6 +80,21 @@ public class WebRtcStreamer {
         }
     }
 
+    /** 注入一帧原始预览帧（支持 NV21 / YV12 / NV12，内部按需转 NV21）。 */
+    public void feedFrameRaw(byte[] raw, int w, int h, CameraSourceFormat fmt) {
+        if (fmt == CameraSourceFormat.NV21) {
+            feedFrame(raw, w, h);
+            return;
+        }
+        byte[] nv21 = new byte[w * h * 3 / 2];
+        if (fmt == CameraSourceFormat.YV12) {
+            H264Encoder.yv12ToNv21(raw, nv21, w, h);
+        } else {
+            H264Encoder.nv12ToNv21(raw, nv21, w, h);
+        }
+        feedFrame(nv21, w, h);
+    }
+
     /** 网页 POST 来的 offer SDP；返回是否受理。 */
     public synchronized boolean handleOffer(String sdp) {
         try {

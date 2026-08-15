@@ -442,7 +442,7 @@ public class SettingsWebServer {
             int port = Prefs.getI(app, Prefs.K_RTSP_PORT, 8554);
             o.put("rtsp", "rtsp://" + ip + ":" + port + "/cam");
             o.put("rtmpUrl", Prefs.get(app, Prefs.K_RTMP_URL, ""));
-            o.put("camAutoStart", Prefs.getB(app, Prefs.K_CAM_AUTO_START, true));
+            o.put("camAutoStart", Prefs.getB(app, Prefs.K_CAM_AUTO_START, false));
             o.put("webrtc", com.magneo.compass.cam.WebRtcStreamer.get().state());
             o.put("webrtcError", com.magneo.compass.cam.WebRtcStreamer.get().error());
             o.put("realFps", com.magneo.compass.cam.CameraStreamService.realFps());
@@ -619,7 +619,7 @@ public class SettingsWebServer {
             o.put("camBitrate", String.valueOf(Prefs.getI(app, Prefs.K_CAM_BITRATE, 5000)));
             o.put("rtspPort", String.valueOf(Prefs.getI(app, Prefs.K_RTSP_PORT, 8554)));
             o.put("rtmpUrl", Prefs.get(app, Prefs.K_RTMP_URL, ""));
-            o.put("camAutoStart", Prefs.getB(app, Prefs.K_CAM_AUTO_START, true));
+            o.put("camAutoStart", Prefs.getB(app, Prefs.K_CAM_AUTO_START, false));
             o.put("mode", H264SurfaceStreamer.isActive() ? "h264fast"
                     : (H264Streamer.isActive() ? "h264" : (ScreenStreamer.isActive() ? "mjpeg" : "idle")));
             o.put("ip", localIp());

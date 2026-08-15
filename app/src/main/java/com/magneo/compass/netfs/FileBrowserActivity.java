@@ -4,17 +4,16 @@ package com.magneo.compass.netfs;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
-import android.graphics.Outline;
 import android.os.Bundle;
 import android.os.Environment;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewOutlineProvider;
 import android.widget.AdapterView;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
@@ -45,48 +44,87 @@ public class FileBrowserActivity extends com.magneo.compass.BaseActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
+        FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(10, 10, 10));
+        root.addView(new com.magneo.compass.CompassBackground(this), 0);
 
-        connLabel = new TextView(this);
-        connLabel.setTextColor(Color.rgb(212, 175, 55));
-        connLabel.setTextSize(18);
-        connLabel.setGravity(Gravity.CENTER);
-        root.addView(connLabel);
-
-        com.magneo.compass.BackButton bb = new com.magneo.compass.BackButton(this);
-        bb.setOnClickListener(v -> goUp());
-        root.addView(bb);
-
-        LinearLayout row = new LinearLayout(this);
-        row.setGravity(Gravity.CENTER);   // 圆屏适配：按钮行居中，避免被圆边裁掉
-        row.addView(btn("切换", v -> switchConn()));
-        row.addView(btn("添加", v -> addConn()));
-        row.addView(btn("管理", v -> manageConn()));
-        row.addView(btn("本地", v -> browseLocal()));
-        root.addView(row);
-
-        breadcrumb = new TextView(this);
-        breadcrumb.setTextColor(Color.rgb(232, 220, 192));
-        breadcrumb.setPadding(12, 8, 12, 8);
-        root.addView(breadcrumb);
-
+        // 全屏 oval 列表
         list = new ListView(this);
-        list.setBackgroundResource(com.magneo.compass.R.drawable.bg_pill_dark);   // 居中胶囊背景，圆内不裁边
+        com.magneo.compass.ui.OutlineUtil.oval(list);
+        list.setBackgroundResource(com.magneo.compass.R.drawable.bg_dialog_oval);
         list.setDivider(null);
         list.setSelector(new android.graphics.drawable.ColorDrawable(0x226b5a2e));
-        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(0, 0, 1);
-        llp.width = (int) (Math.min(getResources().getDisplayMetrics().widthPixels,
-                getResources().getDisplayMetrics().heightPixels) * 0.74f);
-        llp.gravity = Gravity.CENTER_HORIZONTAL;
-        llp.topMargin = dp2(6);
-        llp.bottomMargin = dp2(18);
+        int minSide = Math.min(getResources().getDisplayMetrics().widthPixels,
+                getResources().getDisplayMetrics().heightPixels);
+        int listSize = (int) (minSide * 0.92f);
+        FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(listSize, listSize, Gravity.CENTER);
         root.addView(list, llp);
         list.post(() -> {
-            int pad = (int) (list.getHeight() * 0.06f);
+            int pad = (int) (list.getHeight() * 0.08f);
             list.setPadding(0, pad, 0, pad);
         });
+
+        // 浮动按钮层
+        int fb = com.magneo.compass.ui.Ui.dp(this, 40);
+
+        // 左上：返回/上级
+        Button backBtn = new Button(this);
+        backBtn.setText("◀");
+        backBtn.setTextColor(Color.rgb(232, 220, 192));
+        backBtn.setBackgroundResource(com.magneo.compass.R.drawable.bg_oval_dark);
+        backBtn.setLayoutParams(new FrameLayout.LayoutParams(fb, fb));
+        backBtn.setOnClickListener(v -> goUp());
+        root.addView(backBtn);
+
+        // 右上：切换连接
+        Button switchBtn = new Button(this);
+        switchBtn.setText("⇄");
+        switchBtn.setTextColor(Color.rgb(232, 220, 192));
+        switchBtn.setBackgroundResource(com.magneo.compass.R.drawable.bg_oval_dark);
+        FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(fb, fb, Gravity.TOP | Gravity.END);
+        switchBtn.setLayoutParams(slp);
+        switchBtn.setOnClickListener(v -> switchConn());
+        root.addView(switchBtn);
+
+        // 右下：⋯ 更多
+        Button moreBtn = new Button(this);
+        moreBtn.setText("⋯");
+        moreBtn.setTextColor(Color.rgb(232, 220, 192));
+        moreBtn.setBackgroundResource(com.magneo.compass.R.drawable.bg_oval_dark);
+        FrameLayout.LayoutParams mlp = new FrameLayout.LayoutParams(fb, fb, Gravity.BOTTOM | Gravity.END);
+        int margin = com.magneo.compass.ui.Ui.dp(this, 8);
+        mlp.setMargins(0, 0, margin, margin);
+        moreBtn.setLayoutParams(mlp);
+        moreBtn.setOnClickListener(v -> {
+            com.magneo.compass.RoundDialog d = new com.magneo.compass.RoundDialog(this).title("网盘");
+            d.item("添加连接", this::addConn);
+            d.item("管理连接", this::manageConn);
+            d.item("本地存储", this::browseLocal);
+            d.cancel().show();
+        });
+        root.addView(moreBtn);
+
+        // 左下：路径面包屑（浮动）
+        breadcrumb = new TextView(this);
+        breadcrumb.setTextColor(Color.rgb(232, 220, 192));
+        breadcrumb.setTextSize(12);
+        FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.START);
+        blp.setMargins(margin, 0, 0, margin);
+        breadcrumb.setLayoutParams(blp);
+        root.addView(breadcrumb);
+
+        // 顶中：连接名（浮动）
+        connLabel = new TextView(this);
+        connLabel.setTextColor(Color.rgb(212, 175, 55));
+        connLabel.setTextSize(14);
+        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        clp.setMargins(0, margin, 0, 0);
+        connLabel.setLayoutParams(clp);
+        root.addView(connLabel);
 
         setContentView(root);
         StreamProxy.ensure(this);
@@ -113,8 +151,6 @@ public class FileBrowserActivity extends com.magneo.compass.BaseActivity {
         }
         return super.dispatchKeyEvent(event);
     }
-
-    private int dp2(int v) { return (int) (v * getResources().getDisplayMetrics().density); }
 
     private Button btn(String s, android.view.View.OnClickListener l) {
         Button b = new Button(this);
@@ -159,7 +195,7 @@ public class FileBrowserActivity extends com.magneo.compass.BaseActivity {
                 tv.setTextColor(Color.rgb(232, 220, 192));
                 tv.setTextSize(16);
                 tv.setGravity(Gravity.CENTER);
-                tv.setPadding(dp2(10), dp2(7), dp2(10), dp2(7));
+                tv.setPadding(com.magneo.compass.ui.Ui.dp(FileBrowserActivity.this, 10), com.magneo.compass.ui.Ui.dp(FileBrowserActivity.this, 7), com.magneo.compass.ui.Ui.dp(FileBrowserActivity.this, 10), com.magneo.compass.ui.Ui.dp(FileBrowserActivity.this, 7));
                 return tv;
             }
         });
@@ -354,7 +390,7 @@ public class FileBrowserActivity extends com.magneo.compass.BaseActivity {
                 domain[0].setVisibility(sel[0].equals("SMB") ? View.VISIBLE : View.GONE);
             });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-            lp.setMargins(dp2(2), 0, dp2(2), 0);
+            lp.setMargins(com.magneo.compass.ui.Ui.dp(this, 2), 0, com.magneo.compass.ui.Ui.dp(this, 2), 0);
             typeRow.addView(b, lp);
             typeBtns[i] = b;
         }

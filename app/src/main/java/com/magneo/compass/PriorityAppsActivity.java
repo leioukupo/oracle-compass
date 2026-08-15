@@ -4,12 +4,10 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Color;
-import android.graphics.Outline;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewOutlineProvider;
 import android.widget.BaseAdapter;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -64,12 +62,7 @@ public class PriorityAppsActivity extends BaseActivity {
         ListView lv = new ListView(this);
         lv.setBackgroundColor(Color.rgb(10, 10, 10));
         lv.setDivider(null);
-        lv.setClipToOutline(true);
-        lv.setOutlineProvider(new ViewOutlineProvider() {
-            @Override public void getOutline(View view, Outline outline) {
-                outline.setOval(0, 0, view.getWidth(), view.getHeight());
-            }
-        });
+        com.magneo.compass.ui.OutlineUtil.oval(lv);
         lv.post(() -> {
             int h = lv.getHeight();
             int side = (int) (lv.getWidth() * 0.12f);
@@ -103,17 +96,17 @@ public class PriorityAppsActivity extends BaseActivity {
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setBackgroundResource(R.drawable.bg_pill_dark);
-            int pad = dp(14);
-            row.setPadding(pad, dp(10), pad, dp(10));
+            int pad = com.magneo.compass.ui.Ui.dp(PriorityAppsActivity.this, 14);
+            row.setPadding(pad, com.magneo.compass.ui.Ui.dp(PriorityAppsActivity.this, 10), pad, com.magneo.compass.ui.Ui.dp(PriorityAppsActivity.this, 10));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.setMargins(0, dp(4), 0, dp(4));
+            lp.setMargins(0, com.magneo.compass.ui.Ui.dp(PriorityAppsActivity.this, 4), 0, com.magneo.compass.ui.Ui.dp(PriorityAppsActivity.this, 4));
             row.setLayoutParams(lp);
 
             ImageView iv = new ImageView(PriorityAppsActivity.this);
             iv.setImageDrawable(a.icon);
             RoundMask.circle(iv, R.drawable.bg_oval_dark);
-            row.addView(iv, new LinearLayout.LayoutParams(dp(40), dp(40)));
+            row.addView(iv, new LinearLayout.LayoutParams(com.magneo.compass.ui.Ui.dp(PriorityAppsActivity.this, 40), com.magneo.compass.ui.Ui.dp(PriorityAppsActivity.this, 40)));
 
             TextView tv = new TextView(PriorityAppsActivity.this);
             tv.setText(a.label + (pinned.contains(a.pkg) ? " ★" : ""));
@@ -124,10 +117,6 @@ public class PriorityAppsActivity extends BaseActivity {
             row.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
             return row;
         }
-    }
-
-    private int dp(int v) {
-        return (int) (v * getResources().getDisplayMetrics().density);
     }
 
     private void loadPinned() {

@@ -97,7 +97,7 @@ public class AppDrawerActivity extends BaseActivity {
         centerBox.setGravity(Gravity.CENTER);
         centerIcon = new ImageView(this);
         RoundMask.circle(centerIcon, R.drawable.bg_oval_gold);
-        int is = dp(84);
+        int is = com.magneo.compass.ui.Ui.dp(this, 84);
         centerIcon.setLayoutParams(new LinearLayout.LayoutParams(is, is));
         centerLabel = new TextView(this);
         centerLabel.setTextColor(Color.rgb(212, 175, 55));
@@ -143,12 +143,21 @@ public class AppDrawerActivity extends BaseActivity {
 
         int w = ring.getWidth(), h = ring.getHeight();
         float cx = w / 2f, cy = h / 2f;
+        float R = com.magneo.compass.ui.RoundScreen.R(w, h);
         float r = Math.min(w, h) * 0.36f;
-        int cellW = dp(150), cellH = dp(160);
+        // 按 RoundScreen.maxCellHalf 自适应每格 cell 尺寸：保证四角不出 R。
+        // 顶/底位（i=0,4）cell 中心在竖轴上，可用半边大；对角位（i=1,3,5,7）最紧。
+        // 设上下限：太小不易点，太大压中圆心；上限 dp80（icon 72 上限 + 边距），下限 dp54（仍 ≥ 触控目标）。
+        int cMax = com.magneo.compass.ui.Ui.dp(this, 74);
+        int cMin = com.magneo.compass.ui.Ui.dp(this, 60);
         for (int i = 0; i < SLOTS; i++) {
             App a = all.get((offset + i) % n);
             View cell = appCell(a);
-            float angle = (float) Math.toRadians(-90 + i * (360f / SLOTS) + visRot);
+            float angDeg = -90 + i * (360f / SLOTS) + visRot;
+            float angle = (float) Math.toRadians(angDeg);
+            float halfR = com.magneo.compass.ui.RoundScreen.maxCellHalf((int) r, angDeg, R);
+            int cs = (int) Math.min(cMax, Math.max(cMin, 2 * halfR));
+            int cellW = cs, cellH = cs;
             int x = (int) (cx + r * Math.cos(angle) - cellW / 2f);
             int y = (int) (cy + r * Math.sin(angle) - cellH / 2f);
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(cellW, cellH);
@@ -170,13 +179,13 @@ public class AppDrawerActivity extends BaseActivity {
         ImageView iv = new ImageView(this);
         iv.setImageDrawable(a.icon);
         RoundMask.circle(iv, iconBg(a.pkg));
-        int s = dp(72);
+        int s = com.magneo.compass.ui.Ui.dp(this, 48);  // 圆屏精修：环格 cell 收为正方形后，icon 留出 label 空间
         iv.setLayoutParams(new LinearLayout.LayoutParams(s, s));
 
         TextView tv = new TextView(this);
         tv.setText(a.label + (pinned.contains(a.pkg) ? " ★" : ""));
         tv.setTextColor(Color.rgb(232, 220, 192));
-        tv.setTextSize(13);
+        tv.setTextSize(12);
         tv.setGravity(Gravity.CENTER);
         tv.setMaxLines(1);
         cell.addView(iv);
@@ -215,10 +224,6 @@ public class AppDrawerActivity extends BaseActivity {
             return R.drawable.bg_oval_light;
         }
         return R.drawable.bg_oval_gold;
-    }
-
-    private int dp(int v) {
-        return (int) (v * getResources().getDisplayMetrics().density);
     }
 
     // ---------- 优先应用（有序）存取 ----------

@@ -3,11 +3,9 @@ package com.magneo.compass;
 import android.app.Activity;
 import android.app.Dialog;
 import android.graphics.Color;
-import android.graphics.Outline;
 import android.graphics.drawable.ColorDrawable;
 import android.view.Gravity;
 import android.view.View;
-import android.view.ViewOutlineProvider;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.widget.Button;
@@ -33,20 +31,11 @@ public class RoundDialog {
         int sw = ctx.getResources().getDisplayMetrics().widthPixels;
         int sh = ctx.getResources().getDisplayMetrics().heightPixels;
         int size = (int) (Math.min(sw, sh) * 0.92f);
-        int p = dp(26);
 
-        FrameLayout wrap = new FrameLayout(a);
-        wrap.setBackgroundResource(R.drawable.bg_dialog_oval);
-        wrap.setClipToOutline(true);
-        wrap.setOutlineProvider(new ViewOutlineProvider() {
-            @Override public void getOutline(View view, Outline outline) {
-                outline.setOval(0, 0, view.getWidth(), view.getHeight());
-            }
-        });
-        wrap.setPadding(p, p, p, p);
+        com.magneo.compass.ui.RoundFrame wrap = new com.magneo.compass.ui.RoundFrame(a, true, true, 26);
 
         ScrollView scv = new ScrollView(a);
-        scv.setFillViewport(true);
+        scv.setFillViewport(false);   // 内容大于视口时按需滚动，不强制铺满导致按钮被压扁
         scv.setOverScrollMode(View.OVER_SCROLL_NEVER);
         body = new LinearLayout(a);
         body.setOrientation(LinearLayout.VERTICAL);
@@ -92,7 +81,7 @@ public class RoundDialog {
         });
         LinearLayout.LayoutParams lp = lpWrap();
         lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
-        lp.setMargins(0, dp(4), 0, dp(4));
+        lp.setMargins(0, com.magneo.compass.ui.Ui.dp(ctx, 4), 0, com.magneo.compass.ui.Ui.dp(ctx, 4));
         body.addView(b, lp);
         return this;
     }
@@ -105,7 +94,7 @@ public class RoundDialog {
         e.setSingleLine(true);
         LinearLayout.LayoutParams lp = lpWrap();
         lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
-        lp.setMargins(0, dp(4), 0, dp(4));
+        lp.setMargins(0, com.magneo.compass.ui.Ui.dp(ctx, 4), 0, com.magneo.compass.ui.Ui.dp(ctx, 4));
         body.addView(e, lp);
         return this;
     }
@@ -114,7 +103,7 @@ public class RoundDialog {
     public RoundDialog view(View v) {
         LinearLayout.LayoutParams lp = lpWrap();
         lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
-        lp.setMargins(0, dp(4), 0, dp(4));
+        lp.setMargins(0, com.magneo.compass.ui.Ui.dp(ctx, 4), 0, com.magneo.compass.ui.Ui.dp(ctx, 4));
         body.addView(v, lp);
         return this;
     }
@@ -134,9 +123,5 @@ public class RoundDialog {
     private LinearLayout.LayoutParams lpWrap() {
         return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
-    }
-
-    private int dp(int v) {
-        return (int) (v * ctx.getResources().getDisplayMetrics().density);
     }
 }

@@ -5,7 +5,7 @@ import android.media.MediaFormat;
 
 import java.nio.ByteBuffer;
 
-/** MediaCodec H.264 硬编码器：喂 NV12 帧，输出裸 NAL（含 SPS/PPS 回调）。 */
+/** MediaCodec H.264 硬编码器：支持 NV21 / YV12 / NV12 输入，内部转换后喂 MediaCodec。 */
 public class H264Encoder {
     public interface Listener {
         void onSpsPps(byte[] sps, byte[] pps);
@@ -17,6 +17,8 @@ public class H264Encoder {
     private final int w, h;
     private final int colorFormat;
     private byte[] conv;
+    private volatile CameraSourceFormat srcFormat = CameraSourceFormat.NV21;
+    private volatile byte[] nv21Src;
     private volatile byte[] sps, pps;
     private static volatile String fmtDiag = "";
 
@@ -81,6 +83,40 @@ public class H264Encoder {
         }
     }
 
+    public void setSourceFormat(CameraSourceFormat fmt) {
+        srcFormat = fmt;
+        if (fmt != CameraSourceFormat.NV21 && nv21Src == null) {
+            nv21Src = new byte[w * h * 3 / 2];
+        }
+    }
+
+    /** 喂一帧原始预览帧（支持 NV21 / YV12 / NV12，内部转 NV21 后入队）。 */
+    public void feedRaw(byte[] raw, long ptsUs) {
+        if (encThread == null) return;
+        CameraSourceFormat fmt = srcFormat;
+        byte[] nv21;
+        if (fmt == CameraSourceFormat.NV21) {
+            nv21 = raw.clone();
+        } else {
+            byte[] out = nv21Src;
+            if (out == null) {
+                out = new byte[w * h * 3 / 2];
+                nv21Src = out;
+                android.util.Log.w("CamStream", "feedRaw: srcFmt=" + fmt + " converting to NV21");
+            }
+            if (fmt == CameraSourceFormat.YV12) {
+                yv12ToNv21(raw, out, w, h);
+            } else {
+                nv12ToNv21(raw, out, w, h);
+            }
+            nv21 = out.clone();
+        }
+        if (!inQueue.offer(new FrameBuf(nv21, ptsUs))) {
+            inQueue.poll();
+            inQueue.offer(new FrameBuf(nv21, ptsUs));
+        }
+    }
+
     private void encodeLoop() {
         try {
             while (encThread != null && !encThread.isInterrupted()) {
@@ -123,6 +159,33 @@ public class H264Encoder {
             // NV21 交错布局为 VU（V 在偶数位，U 在奇数位）；I420 为 U 平面 + V 平面
             dst[ySize + i] = src[ySize + i * 2 + 1];        // U
             dst[ySize + uv + i] = src[ySize + i * 2];        // V
+        }
+    }
+
+    static void nv12ToNv21(byte[] src, byte[] dst, int w, int h) {
+        int ySize = w * h;
+        System.arraycopy(src, 0, dst, 0, ySize);
+        for (int i = 0; i < ySize / 2; i += 2) {
+            dst[ySize + i] = src[ySize + i + 1];
+            dst[ySize + i + 1] = src[ySize + i];
+        }
+    }
+
+    static void yv12ToNv21(byte[] src, byte[] dst, int w, int h) {
+        int ySize = w * h;
+        int rowStride = (w + 31) & ~31;
+        int halfStride = ((w / 2) + 15) & ~15;
+        int vStart = rowStride * h;
+        int uStart = vStart + halfStride * (h / 2);
+        System.arraycopy(src, 0, dst, 0, ySize);
+        for (int row = 0; row < h / 2; row++) {
+            int vRow = vStart + row * halfStride;
+            int uRow = uStart + row * halfStride;
+            int dstOff = ySize + row * w;
+            for (int col = 0; col < w / 2; col++) {
+                dst[dstOff + col * 2] = src[vRow + col];
+                dst[dstOff + col * 2 + 1] = src[uRow + col];
+            }
         }
     }
 

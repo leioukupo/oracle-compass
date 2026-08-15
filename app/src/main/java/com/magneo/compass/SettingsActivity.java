@@ -3,7 +3,6 @@ package com.magneo.compass;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.graphics.Color;
-import android.graphics.Outline;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -13,7 +12,6 @@ import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewOutlineProvider;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -68,23 +66,19 @@ public class SettingsActivity extends BaseActivity {
         root.setBackgroundColor(Color.rgb(10, 10, 10));
         root.addView(new CompassBackground(this), 0);
 
-        centerContent = new FrameLayout(this);
-        centerContent.setBackgroundResource(R.drawable.bg_dialog_oval);
-        centerContent.setClipToOutline(true);
-        centerContent.setOutlineProvider(new ViewOutlineProvider() {
-            @Override public void getOutline(View view, Outline outline) {
-                outline.setOval(0, 0, view.getWidth(), view.getHeight());
-            }
-        });
-        root.addView(centerContent, new FrameLayout.LayoutParams(dp(280), dp(280), Gravity.CENTER));
-
         ring = new RingPanel(this);
         ring.setAngleCallback(new AngleCallback() {
             @Override public void onAngle(float a) { onDragAngle(a); }
             @Override public void onEnd(float a) { onDragEnd(a); }
         });
+        // ring 在 centerContent 下层：手指落在 centerContent 上时优先滚 ScrollView，
+        // 落在外圈空白才走 ring 转动；这样能像应用抽屉一样绕圈滑
         root.addView(ring, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
+
+        centerContent = new com.magneo.compass.ui.RoundFrame(this, true, false, 0);
+        centerContent.setBackgroundColor(Color.argb(200, 10, 10, 10));
+        root.addView(centerContent, new FrameLayout.LayoutParams(com.magneo.compass.ui.Ui.dp(this, 300), com.magneo.compass.ui.Ui.dp(this, 300), Gravity.CENTER));
 
         setContentView(root);
         ring.post(() -> renderRing(0, 0));
@@ -127,8 +121,8 @@ public class SettingsActivity extends BaseActivity {
         offset = off;
         int w = ring.getWidth(), h = ring.getHeight();
         float cx = w / 2f, cy = h / 2f;
-        float r = Math.min(w, h) * 0.425f;
-        int s = dp(44);
+        float r = Math.min(w, h) * 0.44f; // ring: cell 内缘 344-40=304px > centerContent 300px, 外缘 344+40=384px < R=400px
+        int s = com.magneo.compass.ui.Ui.dp(this, 40);
         for (int i = 0; i < CAT_COUNT; i++) {
             int idx = ((off + i) % CAT_COUNT + CAT_COUNT) % CAT_COUNT;
             boolean sel = i == 0; // 顶部槽位=当前分类
@@ -163,14 +157,15 @@ public class SettingsActivity extends BaseActivity {
         saveCurrent();
         cat = i;
         centerContent.removeAllViews();
-        ScrollView sc = new ScrollView(this);
+        CurvedScrollView sc = new CurvedScrollView(this);
         sc.setBackgroundColor(Color.TRANSPARENT);
         sc.setVerticalScrollBarEnabled(false);
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
-        int p = dp(22);
-        body.setPadding(p, dp(10), p, dp(16));
+        int p = com.magneo.compass.ui.Ui.dp(this, 22);
+        body.setPadding(p, com.magneo.compass.ui.Ui.dp(this, 10), p, com.magneo.compass.ui.Ui.dp(this, 16));
         sc.addView(body);
+        sc.setBody(body);
         centerContent.addView(sc, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -216,7 +211,7 @@ public class SettingsActivity extends BaseActivity {
     private void buildLlm(LinearLayout b) {
         spProvider = new Spinner(this);
         spProvider.setBackgroundResource(R.drawable.bg_rect_gold);
-        spProvider.setPadding(dp(10), dp(5), dp(10), dp(5));
+        spProvider.setPadding(com.magneo.compass.ui.Ui.dp(this, 10), com.magneo.compass.ui.Ui.dp(this, 5), com.magneo.compass.ui.Ui.dp(this, 10), com.magneo.compass.ui.Ui.dp(this, 5));
         ArrayAdapter<String> pa = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, names());
         pa.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spProvider.setAdapter(pa);
@@ -318,7 +313,7 @@ public class SettingsActivity extends BaseActivity {
         tip.setText("对话记录会保存识别出的语音和 AI 回答，网页端可实时查看。\n上限 100~20480KB；清理间隔 0=关闭定时清理（超上限仍自动裁剪）。");
         tip.setTextColor(Color.rgb(138, 130, 114));
         tip.setTextSize(11);
-        tip.setLineSpacing(dp(2), 1f);
+        tip.setLineSpacing(com.magneo.compass.ui.Ui.dp(this, 2), 1f);
         b.addView(tip);
         Button view = pill("在网页端查看记录");
         view.setOnClickListener(v -> {
@@ -393,7 +388,7 @@ public class SettingsActivity extends BaseActivity {
         row.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
-        rlp.setMargins(0, dp(4), 0, dp(4));
+        rlp.setMargins(0, com.magneo.compass.ui.Ui.dp(this, 4), 0, com.magneo.compass.ui.Ui.dp(this, 4));
         row.setLayoutParams(rlp);
 
         TextView lab = new TextView(this);
@@ -401,7 +396,7 @@ public class SettingsActivity extends BaseActivity {
         lab.setTextColor(Color.rgb(212, 175, 55));
         lab.setTextSize(12);
         lab.setGravity(Gravity.CENTER_VERTICAL);
-        row.addView(lab, new LinearLayout.LayoutParams(dp(64), ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.addView(lab, new LinearLayout.LayoutParams(com.magneo.compass.ui.Ui.dp(this, 64), ViewGroup.LayoutParams.WRAP_CONTENT));
 
         EditText e = new EditText(this);
         e.setText(value);
@@ -409,8 +404,11 @@ public class SettingsActivity extends BaseActivity {
         e.setHintTextColor(Color.rgb(120, 114, 98));
         e.setSingleLine(true);
         e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        // 圆屏绕圈滑：取消 EditText 对竖向 drag 的文本选区吞拿（点按仍可输入）
+        e.setMovementMethod(null);
+        e.setLongClickable(false);
         e.setBackgroundResource(R.drawable.bg_rect_gold);
-        e.setPadding(dp(10), dp(6), dp(10), dp(6));
+        e.setPadding(com.magneo.compass.ui.Ui.dp(this, 10), com.magneo.compass.ui.Ui.dp(this, 6), com.magneo.compass.ui.Ui.dp(this, 10), com.magneo.compass.ui.Ui.dp(this, 6));
         e.setGravity(Gravity.CENTER);
         row.addView(e, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         b.addView(row);
@@ -424,7 +422,7 @@ public class SettingsActivity extends BaseActivity {
         lab.setTextSize(12);
         LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
-        llp.setMargins(0, dp(8), 0, dp(2));
+        llp.setMargins(0, com.magneo.compass.ui.Ui.dp(this, 8), 0, com.magneo.compass.ui.Ui.dp(this, 2));
         b.addView(lab, llp);
 
         EditText e = new EditText(this);
@@ -438,10 +436,10 @@ public class SettingsActivity extends BaseActivity {
         e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
                 | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         e.setBackgroundResource(R.drawable.bg_rect_gold);
-        e.setPadding(dp(10), dp(6), dp(10), dp(6));
+        e.setPadding(com.magneo.compass.ui.Ui.dp(this, 10), com.magneo.compass.ui.Ui.dp(this, 6), com.magneo.compass.ui.Ui.dp(this, 10), com.magneo.compass.ui.Ui.dp(this, 6));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.setMargins(0, 0, 0, dp(4));
+        lp.setMargins(0, 0, 0, com.magneo.compass.ui.Ui.dp(this, 4));
         e.setLayoutParams(lp);
         b.addView(e);
         return e;
@@ -467,13 +465,9 @@ public class SettingsActivity extends BaseActivity {
         b.setMinHeight(0);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.setMargins(0, dp(5), 0, dp(5));
+        lp.setMargins(0, com.magneo.compass.ui.Ui.dp(this, 5), 0, com.magneo.compass.ui.Ui.dp(this, 5));
         b.setLayoutParams(lp);
         return b;
-    }
-
-    private int dp(int v) {
-        return (int) (v * getResources().getDisplayMetrics().density);
     }
 
     private String[] names() {
@@ -544,7 +538,7 @@ public class SettingsActivity extends BaseActivity {
                     float da = norm(a - lastAng);
                     lastAng = a;
                     accum += da;
-                    if (!intercepting && Math.abs(accum) > 8f) {
+                    if (!intercepting && Math.abs(accum) > 5f) {
                         intercepting = true;
                         return true;
                     }
@@ -556,23 +550,81 @@ public class SettingsActivity extends BaseActivity {
         @Override public boolean onTouchEvent(MotionEvent ev) {
             switch (ev.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
-                    return false;
+                    // 返回 true 拿住事件流（否则 child cell 吃掉后 ring 拿不到 MOVE）
+                    lastAng = ang(ev);
+                    accum = 0;
+                    intercepting = false;
+                    return true;
                 case MotionEvent.ACTION_MOVE:
-                    if (!intercepting) return false;
                     float a = ang(ev);
-                    accum += norm(a - lastAng);
+                    float da = norm(a - lastAng);
                     lastAng = a;
-                    if (cb != null) cb.onAngle(accum);
+                    accum += da;
+                    if (!intercepting && Math.abs(accum) > 5f) {
+                        intercepting = true;
+                    }
+                    if (intercepting && cb != null) cb.onAngle(accum);
                     return true;
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
-                    if (!intercepting) return false;
-                    if (cb != null) cb.onEnd(accum);
+                    if (intercepting && cb != null) cb.onEnd(accum);
+                    else {
+                        // 没触发拖拽 → 判定为点击，找到对应 cell 触发 click
+                        int w = getWidth(), h = getHeight();
+                        float cx2 = w / 2f, cy2 = h / 2f;
+                        float dx = ev.getX() - cx2, dy = ev.getY() - cy2;
+                        float dist = (float) Math.sqrt(dx * dx + dy * dy);
+                        float r2 = Math.min(w, h) * 0.44f;
+                        if (dist > r2 * 0.7f && dist < r2 * 1.4f) {
+                            float deg = (float) Math.toDegrees(Math.atan2(dy, dx));
+                            int idx = sectorIdx(deg);
+                            if (idx >= 0 && idx < getChildCount()) {
+                                View child = getChildAt(idx);
+                                if (child != null) child.performClick();
+                            }
+                        }
+                    }
                     intercepting = false;
                     accum = 0;
                     return true;
             }
-            return false;
+            return true;
+        }
+
+        private int sectorIdx(float deg) {
+            return ((int) Math.floor((deg + 90f) / 45f) + 8) % 8;
+        }
+    }
+
+    /** 曲线缩放 ScrollView：子项按距视口中心距离动态缩放（0.65~1.0）+ 透明度变化。 */
+    private class CurvedScrollView extends ScrollView {
+        private LinearLayout body;
+        CurvedScrollView(android.content.Context c) { super(c); }
+        void setBody(LinearLayout b) { this.body = b; }
+
+        @Override protected void onScrollChanged(int l, int t, int oldl, int oldt) {
+            super.onScrollChanged(l, t, oldl, oldt);
+            applyCurve();
+        }
+
+        void applyCurve() {
+            if (body == null) return;
+            int vpH = getHeight();
+            if (vpH == 0) return;
+            float vpCenter = vpH / 2f;
+            for (int i = 0; i < body.getChildCount(); i++) {
+                View child = body.getChildAt(i);
+                float childCenter = child.getTop() + child.getHeight() / 2f - getScrollY();
+                float dist = Math.abs(childCenter - vpCenter);
+                float norm = Math.min(1f, dist / vpCenter);
+                float scale = 1f - norm * 0.35f;  // 1.0 ~ 0.65
+                float alpha = 1f - norm * 0.45f;   // 1.0 ~ 0.55
+                child.setScaleX(scale);
+                child.setScaleY(scale);
+                child.setAlpha(Math.max(0.3f, alpha));
+                child.setPivotX(child.getWidth() / 2f);
+                child.setPivotY(childCenter < vpCenter ? child.getHeight() : 0);
+            }
         }
     }
 

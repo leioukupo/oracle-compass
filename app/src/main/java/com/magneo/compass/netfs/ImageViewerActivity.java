@@ -4,14 +4,12 @@ import android.app.Activity;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
-import android.graphics.Outline;
 import android.graphics.Matrix;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewOutlineProvider;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -46,12 +44,7 @@ public class ImageViewerActivity extends com.magneo.compass.BaseActivity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.rgb(10, 10, 10));
-        root.setClipToOutline(true);
-        root.setOutlineProvider(new ViewOutlineProvider() {
-            @Override public void getOutline(android.view.View view, Outline outline) {
-                outline.setOval(0, 0, view.getWidth(), view.getHeight());
-            }
-        });
+        com.magneo.compass.ui.OutlineUtil.oval(root);
 
         iv = new ImageView(this);
         iv.setScaleType(ImageView.ScaleType.FIT_CENTER);

@@ -1,27 +1,20 @@
 package com.magneo.compass.browser;
 
 import android.app.Activity;
-
 import android.app.DownloadManager;
 import android.content.Context;
 import android.graphics.Color;
-import android.graphics.Outline;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
-import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewOutlineProvider;
-import android.webkit.DownloadListener;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
-import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.TextView;
+import android.widget.FrameLayout;
 import android.widget.Toast;
 
 import com.magneo.compass.Prefs;
@@ -35,7 +28,7 @@ import java.util.List;
 public class BrowserActivity extends com.magneo.compass.BaseActivity {
 
     private WebView web;
-    private EditText addr;
+    private CircleBrowserLayout circleBar;
     private final List<String> history = new ArrayList<>();
 
     @Override
@@ -43,41 +36,63 @@ public class BrowserActivity extends com.magneo.compass.BaseActivity {
         super.onCreate(savedInstanceState);
         com.magneo.compass.QuitFix.apply(this);
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
+        FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(10, 10, 10));
+        root.addView(new com.magneo.compass.CompassBackground(this), 0);
 
-        LinearLayout bar = new LinearLayout(this);
-        addr = new EditText(this);
-        addr.setSingleLine(true);
-        addr.setTextColor(Color.rgb(232, 220, 192));
-        addr.setHint("输入网址或搜索");
-        addr.setHintTextColor(Color.rgb(120, 114, 98));
-        addr.setBackgroundResource(com.magneo.compass.R.drawable.bg_oval_dark);
-        addr.setPadding(dp(14), dp(6), dp(14), dp(6));
-        addr.setOnEditorActionListener((v, action, ev) -> {
-            load(addr.getText().toString());
-            return true;
-        });
-        Button go = nav("Go"); go.setOnClickListener(v -> load(addr.getText().toString()));
-        bar.addView(addr, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        bar.addView(go);
-        root.addView(bar);
+        int sw = getResources().getDisplayMetrics().widthPixels;
+        int sh = getResources().getDisplayMetrics().heightPixels;
+        int minSide = Math.min(sw, sh);
+        int R = minSide / 2;
 
-        LinearLayout bar2 = new LinearLayout(this);
-        Button bm = nav("☆"); bm.setOnClickListener(v -> toggleBookmark());
-        Button hs = nav("书签"); hs.setOnClickListener(v -> showBookmarks());
-        Button ht = nav("历史"); ht.setOnClickListener(v -> showHistory());
-        bar2.addView(bm); bar2.addView(hs); bar2.addView(ht);
-        root.addView(bar2);
-
+        // WebView 占满中心（圆形遮罩）
         web = new WebView(this);
-        web.setClipToOutline(true);
-        web.setOutlineProvider(new ViewOutlineProvider() {
-            @Override public void getOutline(View view, Outline outline) {
-                outline.setOval(0, 0, view.getWidth(), view.getHeight());
-            }
+        com.magneo.compass.ui.OutlineUtil.oval(web);
+        int webSize = (int) (minSide * 0.82f);
+        root.addView(web, new FrameLayout.LayoutParams(webSize, webSize, android.view.Gravity.CENTER));
+
+        // 圆弧地址栏（覆盖在 WebView 上方顶部弧段）
+        circleBar = new CircleBrowserLayout(this);
+        circleBar.setOnUrlClickListener(() -> showUrlEditDialog());
+        root.addView(circleBar, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // 按钮沿圆周分布
+        int btnSize = com.magneo.compass.ui.Ui.dp(this, 40);
+        float btnR = R * 0.92f;  // 按钮在圆边缘
+
+        // 左上：返回上级 ◀
+        android.widget.Button backBtn = new android.widget.Button(this);
+        backBtn.setText("◀");
+        backBtn.setTextColor(Color.rgb(232, 220, 192));
+        backBtn.setBackgroundResource(com.magneo.compass.R.drawable.bg_oval_dark);
+        float angleBack = (float) Math.toRadians(225);  // 左下
+        FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(btnSize, btnSize);
+        blp.leftMargin = (int) (R + btnR * Math.cos(angleBack)) - btnSize / 2;
+        blp.topMargin = (int) (R + btnR * Math.sin(angleBack)) - btnSize / 2;
+        backBtn.setLayoutParams(blp);
+        backBtn.setOnClickListener(v -> {
+            if (web.canGoBack()) web.goBack();
+            else finish();
         });
+        root.addView(backBtn);
+
+        // 右上：⋯ 菜单
+        android.widget.Button moreBtn = new android.widget.Button(this);
+        moreBtn.setText("⋯");
+        moreBtn.setTextColor(Color.rgb(232, 220, 192));
+        moreBtn.setBackgroundResource(com.magneo.compass.R.drawable.bg_oval_dark);
+        float angleMore = (float) Math.toRadians(315);  // 右下
+        FrameLayout.LayoutParams mlp = new FrameLayout.LayoutParams(btnSize, btnSize);
+        mlp.leftMargin = (int) (R + btnR * Math.cos(angleMore)) - btnSize / 2;
+        mlp.topMargin = (int) (R + btnR * Math.sin(angleMore)) - btnSize / 2;
+        moreBtn.setLayoutParams(mlp);
+        moreBtn.setOnClickListener(v -> showOverflow());
+        root.addView(moreBtn);
+
+        setContentView(root);
+
+        // WebView 配置
         WebSettings ws = web.getSettings();
         ws.setJavaScriptEnabled(true);
         ws.setDomStorageEnabled(true);
@@ -96,44 +111,74 @@ public class BrowserActivity extends com.magneo.compass.BaseActivity {
                 else handler.cancel();
             }
             @Override public void onPageFinished(WebView v, String url) {
-                addr.setText(url);
+                circleBar.setUrlText(url);
                 addHistory(url);
             }
         });
-        web.setDownloadListener(new DownloadListener() {
-            @Override public void onDownloadStart(String url, String ua, String contentDisposition, String mimetype, long len) {
-                try {
-                    DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
-                    DownloadManager.Request r = new DownloadManager.Request(Uri.parse(url));
-                    r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, guessName(contentDisposition, url));
-                    r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-                    dm.enqueue(r);
-                    Toast.makeText(BrowserActivity.this, "开始下载", Toast.LENGTH_SHORT).show();
-                } catch (Exception e) {
-                    Toast.makeText(BrowserActivity.this, "下载失败: " + e.getMessage(), Toast.LENGTH_LONG).show();
-                }
+        web.setDownloadListener((url, ua, contentDisposition, mimetype, len) -> {
+            try {
+                android.app.DownloadManager dm = (android.app.DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+                android.app.DownloadManager.Request r = new android.app.DownloadManager.Request(android.net.Uri.parse(url));
+                r.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, guessName(contentDisposition, url));
+                r.setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                dm.enqueue(r);
+                Toast.makeText(BrowserActivity.this, "开始下载", Toast.LENGTH_SHORT).show();
+            } catch (Exception e) {
+                Toast.makeText(BrowserActivity.this, "下载失败: " + e.getMessage(), Toast.LENGTH_LONG).show();
             }
         });
-        root.addView(web, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
-
-        setContentView(root);
 
         String start = getIntent().getStringExtra("url");
         if (start == null || start.isEmpty()) start = "https://www.bing.com/";
         load(start);
+        circleBar.setUrlText(start);
         history.addAll(loadHistory());
     }
 
-    private Button nav(String s) {
-        Button b = new Button(this);
-        b.setText(s);
-        b.setTextColor(Color.rgb(232, 220, 192));
-        b.setBackgroundResource(com.magneo.compass.R.drawable.bg_oval_dark);
-        return b;
+    /** 点击圆弧地址栏时弹出编辑对话框 */
+    private void showUrlEditDialog() {
+        android.widget.EditText input = new android.widget.EditText(this);
+        input.setText(web.getUrl() != null ? web.getUrl() : "");
+        input.setTextColor(Color.rgb(232, 220, 192));
+        input.setHint("输入网址或搜索");
+        input.setHintTextColor(Color.rgb(120, 114, 98));
+        input.setSingleLine(true);
+        input.setBackgroundResource(com.magneo.compass.R.drawable.bg_oval_dark);
+        input.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);
+        input.setOnEditorActionListener((v, action, ev) -> {
+            if (action == android.view.inputmethod.EditorInfo.IME_ACTION_GO
+                    || (ev != null && ev.getKeyCode() == android.view.KeyEvent.KEYCODE_ENTER)) {
+                load(input.getText().toString());
+                return true;
+            }
+            return false;
+        });
+        new com.magneo.compass.RoundDialog(this)
+                .title("网址")
+                .view(input)
+                .item("前往", () -> load(input.getText().toString()))
+                .cancel()
+                .show();
     }
 
-    private int dp(int v) {
-        return (int) (v * getResources().getDisplayMetrics().density);
+    private void showOverflow() {
+        com.magneo.compass.RoundDialog d = new com.magneo.compass.RoundDialog(this).title("浏览");
+        d.item("★ 添加/取消书签", this::toggleBookmark);
+        d.item("书签", this::showBookmarks);
+        d.item("历史", this::showHistory);
+        d.item(Prefs.getB(this, Prefs.K_NO_IMAGES, false) ? "✓ 无图模式" : "无图模式", () -> {
+            Prefs.putB(this, Prefs.K_NO_IMAGES, !Prefs.getB(this, Prefs.K_NO_IMAGES, false));
+            recreate();
+        });
+        d.item(Prefs.getB(this, Prefs.K_UA_DESKTOP, false) ? "✓ 桌面 UA" : "桌面 UA", () -> {
+            Prefs.putB(this, Prefs.K_UA_DESKTOP, !Prefs.getB(this, Prefs.K_UA_DESKTOP, false));
+            recreate();
+        });
+        d.item(Prefs.getB(this, Prefs.K_IGNORE_SSL, false) ? "✓ 忽略 SSL" : "忽略 SSL", () -> {
+            Prefs.putB(this, Prefs.K_IGNORE_SSL, !Prefs.getB(this, Prefs.K_IGNORE_SSL, false));
+            Toast.makeText(this, "已切换，下次加载生效", Toast.LENGTH_SHORT).show();
+        });
+        d.cancel().show();
     }
 
     private void load(String input) {
@@ -144,7 +189,7 @@ public class BrowserActivity extends com.magneo.compass.BaseActivity {
             else url = String.format(Prefs.get(this, Prefs.K_SEARCH_ENGINE, "https://www.bing.com/search?q=%s"),
                     Uri.encode(url));
         }
-        addr.setText(url);
+        circleBar.setUrlText(url);
         web.loadUrl(url);
     }
 

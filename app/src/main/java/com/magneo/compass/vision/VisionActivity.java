@@ -1,29 +1,21 @@
 package com.magneo.compass.vision;
 
-import android.app.Activity;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.ImageFormat;
-import android.graphics.Outline;
 import android.graphics.Paint;
 import android.graphics.Rect;
-import android.graphics.RectF;
 import android.graphics.YuvImage;
-import android.hardware.Camera;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
 import android.view.Gravity;
-import android.view.SurfaceHolder;
-import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewOutlineProvider;
 import android.widget.Button;
-import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -36,66 +28,66 @@ import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
-/** 灵眼：伪实时视觉——周期抓帧送视觉模型，流式显示描述，保留最近 3 条摘要作上下文。 */
-public class VisionActivity extends com.magneo.compass.BaseActivity implements Camera.PreviewCallback, SurfaceHolder.Callback {
+/**
+ * 灵眼：直接从 CameraStreamService 取 NV21 帧转 Bitmap 显示，绕过 RTSP 回环播放。
+ * 原因：MTK 硬解对 RTP H.264 的 NAL 封装支持不佳（无 start code prefix），导致 MediaPlayer 解码出错、绿屏/黑屏。
+ */
+public class VisionActivity extends com.magneo.compass.BaseActivity {
 
-    private Camera camera;
-    private SurfaceView surface;
     private TextView out;
     private boolean running = true;
-    private volatile byte[] lastFrame;
-    private volatile int frameW, frameH;
-    private final List<String> context = new ArrayList<>(3);
-    private final Handler h = new Handler(Looper.getMainLooper());
     private final List<LlmClient.Msg> history = new ArrayList<>();
+    private final Handler h = new Handler(Looper.getMainLooper());
 
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
+    // 最新 NV21 帧
+    private volatile byte[] lastNv21;
+    private volatile int camW, camH;
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setGravity(Gravity.CENTER_HORIZONTAL);
-        root.setBackgroundColor(Color.rgb(10, 10, 10));
-        root.addView(new com.magneo.compass.BackButton(this));
+    // 直接渲染 View
+    private FrameView frameView;
 
-        surface = new SurfaceView(this);
-        surface.getHolder().addCallback(this);
-        surface.setClipToOutline(true);
-        surface.setOutlineProvider(new ViewOutlineProvider() {
-            @Override public void getOutline(View view, Outline outline) {
-                outline.setOval(0, 0, view.getWidth(), view.getHeight());
+    private final com.magneo.compass.cam.CameraStreamService.FrameListener fl =
+            new com.magneo.compass.cam.CameraStreamService.FrameListener() {
+        @Override public void onFrame(byte[] nv21, int w, int h) {
+            lastNv21 = nv21.clone();
+            camW = w; camH = h;
+            frameView.postInvalidate();
+        }
+    };
+
+    // 渲染线程（NV21 -> Bitmap）
+    private Thread renderThread;
+    private volatile boolean rendering = false;
+
+    /** 自定义 View：画最新一帧 Bitmap */
+    private class FrameView extends View {
+        private Bitmap bmp;
+        private final Paint paint = new Paint();
+        public FrameView(android.content.Context ctx) {
+            super(ctx);
+            paint.setFilterBitmap(true);
+            setBackgroundColor(Color.BLACK);
+        }
+        @Override protected void onDraw(Canvas canvas) {
+            Bitmap b = bmp;
+            if (b != null && !b.isRecycled()) {
+                // 旋转后的竖图 center-crop 填满正方形视图
+                int vw = getWidth(), vh = getHeight();
+                int bw = b.getWidth(), bh = b.getHeight();
+                float scale = Math.max((float)vw / bw, (float)vh / bh);
+                int dw = (int)(bw * scale), dh = (int)(bh * scale);
+                int dx = (vw - dw) / 2, dy = (vh - dh) / 2;
+                canvas.drawColor(Color.BLACK);
+                canvas.drawBitmap(b, null, new Rect(dx, dy, dx + dw, dy + dh), paint);
+            } else {
+                canvas.drawColor(Color.BLACK);
             }
-        });
-        FrameLayout frame = new FrameLayout(this);
-        int size = Math.min(getResources().getDisplayMetrics().widthPixels, 400);
-        frame.addView(surface, new FrameLayout.LayoutParams(size, size, Gravity.CENTER));
-        frame.setClipChildren(true);
-        root.addView(frame, new LinearLayout.LayoutParams(size, size, Gravity.CENTER));
-
-        out = new TextView(this);
-        out.setTextColor(Color.rgb(232, 220, 192));
-        out.setTextSize(14);
-        out.setPadding(16, 8, 16, 8);
-        ScrollView sc = new ScrollView(this);
-        sc.addView(out, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        root.addView(sc, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
-
-        LinearLayout btns = new LinearLayout(this);
-        Button pause = new Button(this); pause.setText("暂停/继续");
-        pause.setBackgroundResource(com.magneo.compass.R.drawable.bg_oval_dark);
-        pause.setTextColor(Color.rgb(232, 220, 192));
-        pause.setOnClickListener(v -> running = !running);
-        Button ask = new Button(this); ask.setText("现在问");
-        ask.setBackgroundResource(com.magneo.compass.R.drawable.bg_oval_dark);
-        ask.setTextColor(Color.rgb(232, 220, 192));
-        ask.setOnClickListener(v -> captureNow());
-        btns.addView(pause);
-        btns.addView(ask);
-        root.addView(btns);
-
-        setContentView(root);
-        h.postDelayed(captureLoop, 1000);
+        }
+        void setBitmap(Bitmap b) {
+            Bitmap old = bmp;
+            bmp = b;
+            if (old != null && !old.isRecycled() && old != b) old.recycle();
+        }
     }
 
     private final Runnable captureLoop = new Runnable() {
@@ -108,22 +100,145 @@ public class VisionActivity extends com.magneo.compass.BaseActivity implements C
         }
     };
 
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(Gravity.CENTER_HORIZONTAL);
+        root.setBackgroundColor(Color.rgb(10, 10, 10));
+        root.addView(new com.magneo.compass.BackButton(this));
+
+        int sw = getResources().getDisplayMetrics().widthPixels;
+        int sh = getResources().getDisplayMetrics().heightPixels;
+        int availH = sh - com.magneo.compass.ui.Ui.dp(this, 96) - com.magneo.compass.ui.Ui.dp(this, 84);
+        int R = (int) com.magneo.compass.ui.RoundScreen.R(sw, sh);
+        int sizeV = Math.min(availH, (int) (R * Math.sqrt(2)));
+        frameView = new FrameView(this);
+        com.magneo.compass.ui.OutlineUtil.oval(frameView);
+        root.addView(frameView, new LinearLayout.LayoutParams(sizeV, sizeV, Gravity.CENTER));
+
+        out = new TextView(this);
+        out.setTextColor(Color.rgb(232, 220, 192));
+        out.setTextSize(14);
+        out.setPadding(com.magneo.compass.ui.Ui.dp(this, 8), com.magneo.compass.ui.Ui.dp(this, 4),
+                com.magneo.compass.ui.Ui.dp(this, 8), com.magneo.compass.ui.Ui.dp(this, 4));
+        ScrollView sc = new ScrollView(this);
+        sc.addView(out, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(sc, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+        // 底带
+        LinearLayout btns = new LinearLayout(this);
+        btns.setGravity(Gravity.CENTER_HORIZONTAL);
+        Button more = new Button(this); more.setText("⋯");
+        more.setBackgroundResource(com.magneo.compass.R.drawable.bg_oval_dark);
+        more.setTextColor(Color.rgb(232, 220, 192));
+        int tb = com.magneo.compass.ui.Ui.dp(this, 44);
+        more.setLayoutParams(new LinearLayout.LayoutParams(tb, tb));
+        more.setOnClickListener(v -> {
+            com.magneo.compass.RoundDialog d = new com.magneo.compass.RoundDialog(this).title("灵眼");
+            d.item(running ? "暂停" : "继续", () -> running = !running);
+            d.item("现在问", this::captureNow);
+            d.cancel().show();
+        });
+        btns.addView(more);
+        root.addView(btns);
+
+        setContentView(root);
+        h.postDelayed(captureLoop, 2500);
+
+        startRenderThread();
+    }
+
+    /** 启动渲染线程：循环把最新 NV21 转 Bitmap 刷新到 FrameView。 */
+    private void startRenderThread() {
+        rendering = true;
+        renderThread = new Thread(() -> {
+            while (rendering) {
+                try {
+                    byte[] nv21 = lastNv21;
+                    int w = camW, hh = camH;
+                    if (nv21 != null && w > 0 && hh > 0) {
+                        // 整帧 NV21 -> JPEG -> Bitmap
+                        YuvImage yuv = new YuvImage(nv21, ImageFormat.NV21, w, hh, null);
+                        ByteArrayOutputStream jpg = new ByteArrayOutputStream();
+                        yuv.compressToJpeg(new Rect(0, 0, w, hh), 50, jpg);
+                        byte[] jpgBytes = jpg.toByteArray();
+                        Bitmap b = BitmapFactory.decodeByteArray(jpgBytes, 0, jpgBytes.length);
+                        if (b != null) {
+                            // 顺时针旋转90度修正传感器方向
+                            android.graphics.Matrix m = new android.graphics.Matrix();
+                            m.postRotate(90);
+                            Bitmap rotated = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
+                            if (rotated != b) b.recycle();
+                            final Bitmap fb = rotated;
+                            runOnUiThread(() -> {
+                                if (!rendering) return;
+                                frameView.setBitmap(fb);
+                                frameView.invalidate();
+                            });
+                        }
+                    }
+                    Thread.sleep(40); // ~25fps
+                } catch (Throwable ignored) {
+                    try { Thread.sleep(100); } catch (Exception ignored2) {}
+                }
+            }
+        }, "vision-render");
+        renderThread.setDaemon(true);
+        renderThread.start();
+    }
+
     private int getBatteryLevel() {
-        android.content.Intent i = registerReceiver(null, new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
+        android.content.Intent i = registerReceiver(null,
+                new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
         return i == null ? -1 : i.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1);
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        running = true;
+        com.magneo.compass.cam.CameraStreamService.start(getApplicationContext());
+        com.magneo.compass.cam.CameraStreamService.setFrameListener(fl);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        running = false;
+        com.magneo.compass.cam.CameraStreamService.setFrameListener(null);
+        com.magneo.compass.cam.CameraStreamService.stop(getApplicationContext());
+    }
+
+    @Override
+    protected void onDestroy() {
+        rendering = false;
+        h.removeCallbacksAndMessages(null);
+        if (renderThread != null) renderThread.interrupt();
+        super.onDestroy();
+    }
+
+    /** 抓当前帧送 LLM。 */
     private void captureNow() {
-        if (camera == null || lastFrame == null) return;
+        if (!running) return;
+        byte[] nv21 = lastNv21;
+        int w = camW, hh = camH;
+        if (nv21 == null || w <= 0 || hh <= 0) return;
         try {
-            byte[] frame = lastFrame;
-            int w = frameW, hh = frameH;
-            Bitmap bmp = yuvToBitmap(frame, w, hh);
-            if (bmp == null) return;
-            Bitmap scaled = scaleDown(bmp, 640);
+            // 中心裁切正方形（视觉模型偏好正方形）
+            int size = Math.min(w, hh);
+            int sx = (w - size) / 2, sy = (hh - size) / 2;
+            YuvImage yuv = new YuvImage(nv21, ImageFormat.NV21, w, hh, null);
             ByteArrayOutputStream jpg = new ByteArrayOutputStream();
-            scaled.compress(Bitmap.CompressFormat.JPEG, 60, jpg);
-            String b64 = Base64.encodeToString(jpg.toByteArray(), Base64.NO_WRAP);
+            yuv.compressToJpeg(new Rect(sx, sy, sx + size, sy + size), 60, jpg);
+            Bitmap full = BitmapFactory.decodeByteArray(jpg.toByteArray(), 0, jpg.size());
+            if (full == null) return;
+            Bitmap scaled = scaleDown(full, 640);
+            ByteArrayOutputStream jpgOut = new ByteArrayOutputStream();
+            scaled.compress(Bitmap.CompressFormat.JPEG, 60, jpgOut);
+            String b64 = Base64.encodeToString(jpgOut.toByteArray(), Base64.NO_WRAP);
             sendToLlm(b64);
         } catch (Exception e) {
             toast("视觉错误: " + e.getMessage());
@@ -131,9 +246,7 @@ public class VisionActivity extends com.magneo.compass.BaseActivity implements C
     }
 
     private void sendToLlm(String b64) {
-        if (history.size() >= 3) {
-            history.remove(0);
-        }
+        if (history.size() >= 3) history.remove(0);
         List<LlmClient.Msg> msgs = new ArrayList<>();
         msgs.add(new LlmClient.Msg("system",
                 Prefs.get(this, Prefs.K_SYS_PROMPT_VISION, Prefs.DEFAULT_SYS_PROMPT_VISION)));
@@ -145,9 +258,7 @@ public class VisionActivity extends com.magneo.compass.BaseActivity implements C
         }
         out.setText("灵眼凝视中…\n");
         new LlmClient(this).chat(msgs, true, new LlmClient.StreamCallback() {
-            @Override public void onDelta(String s) {
-                runOnUiThread(() -> out.append(s));
-            }
+            @Override public void onDelta(String s) { runOnUiThread(() -> out.append(s)); }
             @Override public void onDone(String full) {
                 runOnUiThread(() -> {
                     history.add(new LlmClient.Msg("assistant", full));
@@ -160,14 +271,6 @@ public class VisionActivity extends com.magneo.compass.BaseActivity implements C
         });
     }
 
-    private Bitmap yuvToBitmap(byte[] nv21, int w, int h) {
-        YuvImage yuv = new YuvImage(nv21, ImageFormat.NV21, w, h, null);
-        ByteArrayOutputStream jpg = new ByteArrayOutputStream();
-        if (!yuv.compressToJpeg(new Rect(0, 0, w, h), 80, jpg)) return null;
-        byte[] j = jpg.toByteArray();
-        return BitmapFactory.decodeByteArray(j, 0, j.length);
-    }
-
     private Bitmap scaleDown(Bitmap b, int max) {
         int w = b.getWidth(), h = b.getHeight();
         float scale = Math.min(1f, (float) max / Math.max(w, h));
@@ -177,78 +280,5 @@ public class VisionActivity extends com.magneo.compass.BaseActivity implements C
 
     private void toast(String s) {
         runOnUiThread(() -> Toast.makeText(this, s, Toast.LENGTH_SHORT).show());
-    }
-
-    @Override
-    public void onPreviewFrame(byte[] data, Camera cam) {
-        if (data != null) {
-            lastFrame = data;
-            Camera.Size s = cam.getParameters().getPreviewSize();
-            frameW = s.width;
-            frameH = s.height;
-        }
-        if (camera != null) camera.addCallbackBuffer(data);
-    }
-
-    @Override public void surfaceCreated(SurfaceHolder holder) {}
-    @Override public void surfaceChanged(SurfaceHolder holder, int fmt, int w, int h) { openCamera(); }
-    @Override public void surfaceDestroyed(SurfaceHolder holder) { releaseCamera(); }
-
-    private void openCamera() {
-        releaseCamera();
-        try {
-            camera = Camera.open(0);
-            Camera.Parameters p = camera.getParameters();
-            Camera.Size ps = bestPreviewSize(p);
-            p.setPreviewSize(ps.width, ps.height);
-            p.setPreviewFormat(ImageFormat.NV21);
-            p.setJpegQuality(60);
-            camera.setParameters(p);
-            camera.setPreviewDisplay(surface.getHolder());
-            camera.setPreviewCallbackWithBuffer(this);
-            int bufSize = ps.width * ps.height * ImageFormat.getBitsPerPixel(ImageFormat.NV21) / 8;
-            camera.addCallbackBuffer(new byte[bufSize]);
-            camera.addCallbackBuffer(new byte[bufSize]);
-            camera.startPreview();
-        } catch (Exception e) {
-            toast("相机打开失败: " + e.getMessage());
-        }
-    }
-
-    private Camera.Size bestPreviewSize(Camera.Parameters p) {
-        Camera.Size best = p.getPreviewSize();
-        int bestScore = Integer.MAX_VALUE;
-        for (Camera.Size s : p.getSupportedPreviewSizes()) {
-            int score = Math.abs(s.width * s.height - 640 * 480);
-            if (score < bestScore && s.width <= 1280) { bestScore = score; best = s; }
-        }
-        return best;
-    }
-
-    private void releaseCamera() {
-        if (camera != null) {
-            try { camera.stopPreview(); } catch (Throwable ignored) {}
-            camera.setPreviewCallbackWithBuffer(null);
-            camera.release();
-            camera = null;
-        }
-    }
-
-    @Override protected void onPause() {
-        releaseCamera();
-        running = false;
-        super.onPause();
-    }
-
-    @Override protected void onResume() {
-        super.onResume();
-        running = true;
-        if (surface != null && surface.getHolder() != null && surface.getHolder().getSurface().isValid()) openCamera();
-    }
-
-    @Override protected void onDestroy() {
-        h.removeCallbacksAndMessages(null);
-        releaseCamera();
-        super.onDestroy();
     }
 }

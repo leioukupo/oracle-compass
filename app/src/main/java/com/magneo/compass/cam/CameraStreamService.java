@@ -28,6 +28,12 @@ public class CameraStreamService extends Service {
     private int w, h;
     private volatile boolean running = false;
 
+    /** NV21 帧监听器（供灵眼等界面直接抓帧用，不走 RTSP 回环）。 */
+    public interface FrameListener {
+        void onFrame(byte[] nv21, int w, int h);
+    }
+    private volatile FrameListener frameListener;
+
     public static String status() { return status; }
     public static String statusDetail() { return statusDetail; }
     public static String realFps() { return realFps; }
@@ -43,9 +49,17 @@ public class CameraStreamService extends Service {
         c.stopService(new Intent(c, CameraStreamService.class));
     }
 
+    public static void setFrameListener(FrameListener l) {
+        CameraStreamService s = inst;
+        if (s != null) s.frameListener = l;
+        else pendingListener = l;
+    }
+    private static volatile FrameListener pendingListener;
+
     @Override public void onCreate() {
         super.onCreate();
         inst = this;
+        if (pendingListener != null) frameListener = pendingListener;
     }
 
     @Override public int onStartCommand(Intent i, int flags, int startId) {
@@ -103,7 +117,17 @@ public class CameraStreamService extends Service {
             if (allSizes != null) for (Camera.Size cs : allSizes) szl.append(cs.width).append("x").append(cs.height).append(",");
             fpsInfo = szl.toString();
             p.setPreviewSize(w, h);
-            // setPreviewFormat 不强制：MTK 后摄在 NV21 请求下实测输出极暗，用默认格式（可能是 YV12/NV12）
+            // MTK 后摄 NV21 可能偏暗，这里优先尝试 NV21，失败则回退默认格式（通常是 YV12）
+            try { p.setPreviewFormat(android.graphics.ImageFormat.NV21); } catch (Throwable ignored) {}
+            try { camera.setParameters(p); } catch (Throwable ignored) {}
+            final int camFmt = p.getPreviewFormat();
+            final int yv12Align = (((w + 31) & ~31) * h) + ((((w / 2) + 15) & ~15) * (h / 2) * 2);
+            final int frameSize = camFmt == android.graphics.ImageFormat.NV21
+                    ? w * h * 3 / 2
+                    : yv12Align;
+            final CameraSourceFormat camSrcFmt = camFmt == android.graphics.ImageFormat.NV21
+                    ? CameraSourceFormat.NV21
+                    : CameraSourceFormat.YV12;
             // 曝光保持自动（AE），不手动干预
 
             final int[] encFrames = {0};
@@ -124,6 +148,7 @@ public class CameraStreamService extends Service {
                     CameraHttpStreamer.get().feed(nal, ptsUs, keyframe);
                 }
             });
+            encoder.setSourceFormat(camSrcFmt);
             int setFps = negotiateFps(p, fps);
             String fpsDiag = "fps=" + setFps + " camFmt=" + p.getPreviewFormat();
             boolean ok = false;
@@ -172,7 +197,7 @@ public class CameraStreamService extends Service {
                     int yMid = (data[ySize / 2] & 0xFF) + (data[ySize / 4] & 0xFF);
                     int uvA = (data[ySize + 100] & 0xFF) + (data[ySize + 1000] & 0xFF);
                     int uvB = (data[ySize + ySize / 4 + 100] & 0xFF) + (data[ySize + ySize / 4 + 1000] & 0xFF);
-                    camDiag = "Ymid=" + yMid + " UVa=" + uvA + " UVb=" + uvB + " " + H264Encoder.fmtDiag();
+                    camDiag = "Ymid=" + yMid + " UVa=" + uvA + " UVb=" + uvB + " cam=" + camSrcFmt + " " + H264Encoder.fmtDiag();
                 }
                 if (fpsCount[0] >= 10) {
                     long dt = System.currentTimeMillis() - fpsT0[0];
@@ -190,18 +215,22 @@ public class CameraStreamService extends Service {
                 }
                 try {
                     long pts = System.nanoTime() / 1000;
-                    if (encoder != null) encoder.feed(data, pts);
+                    if (encoder != null) encoder.feedRaw(data, pts);
                     WebRtcStreamer wr2 = WebRtcStreamer.get();
-                    if (wr2 != null) wr2.feedFrame(data, w, h);
+                    if (wr2 != null) wr2.feedFrameRaw(data, w, h, camSrcFmt);
                 } catch (Exception e) {
                     Log.w(TAG, "frame failed", e);
                 }
+                try {
+                    FrameListener fl = frameListener;
+                    if (fl != null) fl.onFrame(data, w, h);
+                } catch (Exception ignored) {}
                 cam.addCallbackBuffer(data);
             });
-            camera.addCallbackBuffer(new byte[w * h * 3 / 2]);
-            camera.addCallbackBuffer(new byte[w * h * 3 / 2]);
-            camera.addCallbackBuffer(new byte[w * h * 3 / 2]);
-            camera.addCallbackBuffer(new byte[w * h * 3 / 2]);
+            camera.addCallbackBuffer(new byte[frameSize]);
+            camera.addCallbackBuffer(new byte[frameSize]);
+            camera.addCallbackBuffer(new byte[frameSize]);
+            camera.addCallbackBuffer(new byte[frameSize]);
             // MTK 后摄纯回调模式传感器输出暗：GL 线程消费 SurfaceTexture，让 HAL 进入正常预览模式
             try {
                 final android.graphics.SurfaceTexture st = new android.graphics.SurfaceTexture(0);
