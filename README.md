@@ -60,7 +60,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
   - 顶/底带只放单个居中主键 + 居中 "⋯" overflow 圆键（弹 `RoundDialog` 收纳次键），不横排多键。
   - 中带用大圆形主内容（Music 式 300×300 圆封面）或 ListView 沿圆中带滚动（Settings 范式，靠物理玻璃自然裁）。
   - 真圆屏通常不需在 app 内再套 oval mask（物理玻璃已裁），仅在 ListView/GridView 触控防误命中角点时套 `OutlineUtil.oval(v)`。
-- 工具：`com.magneo.compass.ui.RoundScreen`（`R`、`safeHalfWidthAt(y)`、`maxCellHalf(r, angle, R)`）、`RoundFrame`、`OutlineUtil`、`Ui.dp`。详见 [设备说明.md](设备说明.md)。
+- 主屏视觉：以玄学黑金、八卦、太极为主，青蓝微光只做扫描线/反馈等弱科幻强调；外圈导航优先，天干地支等术数信息保持低亮辅助层。
+- 按钮规范：避免固定在方屏四角；边缘操作优先放在圆周可见区或顶/底居中，次级操作收进 `RoundDialog`。
+- 工具：`com.magneo.compass.ui.RoundScreen`（`R`、`safeHalfWidthAt(y)`、`maxCellHalf(r, angle, R)`）、`RoundFrame`、`OutlineUtil`、`Ui.dp`/共享色板/控件样式 helper。详见 [设备说明.md](设备说明.md)。
 
 ## 已知限制
 

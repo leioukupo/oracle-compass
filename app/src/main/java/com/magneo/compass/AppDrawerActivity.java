@@ -62,6 +62,7 @@ public class AppDrawerActivity extends BaseActivity {
         Intent main = new Intent(Intent.ACTION_MAIN);
         main.addCategory(Intent.CATEGORY_LAUNCHER);
         List<ResolveInfo> list = pm.queryIntentActivities(main, 0);
+        List<App> found = new ArrayList<>();
         List<App> rest = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (ResolveInfo ri : list) {
@@ -75,7 +76,18 @@ public class AppDrawerActivity extends BaseActivity {
             i.addCategory(Intent.CATEGORY_LAUNCHER);
             i.setClassName(a.pkg, ri.activityInfo.name);
             a.launch = i;
-            if (pinned.contains(a.pkg)) all.add(a); else rest.add(a);
+            found.add(a);
+        }
+        for (String pkg : pinned) {
+            for (App a : found) {
+                if (a.pkg.equals(pkg)) {
+                    all.add(a);
+                    break;
+                }
+            }
+        }
+        for (App a : found) {
+            if (!pinned.contains(a.pkg)) rest.add(a);
         }
         Collections.sort(rest, Comparator.comparing(a -> a.label));
         all.addAll(rest);
@@ -201,7 +213,14 @@ public class AppDrawerActivity extends BaseActivity {
             new RoundDialog(this)
                     .title(a.label)
                     .item(p ? "取消优先" : "设为优先（前 8 位）", () -> {
-                        if (p) pinned.remove(a.pkg); else pinned.add(a.pkg);
+                        if (p) {
+                            pinned.remove(a.pkg);
+                        } else if (pinned.size() >= 8) {
+                            Toast.makeText(this, "优先位已满，请先取消一个", Toast.LENGTH_SHORT).show();
+                            return;
+                        } else {
+                            pinned.add(a.pkg);
+                        }
                         savePinned();
                         recreate();
                     })
@@ -232,7 +251,10 @@ public class AppDrawerActivity extends BaseActivity {
         pinned.clear();
         try {
             JSONArray a = new JSONArray(Prefs.get(this, Prefs.K_PINNED_APPS, "[]"));
-            for (int i = 0; i < a.length(); i++) pinned.add(a.getString(i));
+            for (int i = 0; i < a.length() && pinned.size() < 8; i++) {
+                String pkg = a.getString(i);
+                if (!pinned.contains(pkg)) pinned.add(pkg);
+            }
         } catch (Exception ignored) {}
     }
 
