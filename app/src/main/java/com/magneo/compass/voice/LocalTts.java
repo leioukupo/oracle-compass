@@ -18,6 +18,7 @@ import java.util.Locale;
 public class LocalTts {
     private static final String TAG = "LocalTts";
     private static volatile boolean inited = false;
+    private static volatile long playingUntilMs = 0;
     private static AudioTrack track;
     private static TextToSpeech sysTts;
 
@@ -76,6 +77,7 @@ public class LocalTts {
     private static void playPcm(short[] pcm) {
         int rate = 22050;
         int bytes = pcm.length * 2;
+        playingUntilMs = System.currentTimeMillis() + Math.max(400, pcm.length * 1000L / rate) + 300;
         if (bytes > 4 * 1024 * 1024) {
             track = new AudioTrack(AudioManager.STREAM_MUSIC, rate,
                     AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT,
@@ -96,6 +98,7 @@ public class LocalTts {
     }
 
     private static void playSystem(Context c, String text) {
+        playingUntilMs = System.currentTimeMillis() + Math.max(1200, text.length() * 90L);
         if (sysTts == null) {
             sysTts = new TextToSpeech(c, status -> {
                 sysTts.setLanguage(Locale.ENGLISH);
@@ -106,12 +109,27 @@ public class LocalTts {
     }
 
     public static synchronized void stopPlayback() {
+        playingUntilMs = 0;
         if (track != null) {
             try { track.stop(); track.release(); } catch (Throwable ignored) {}
             track = null;
         }
+        if (sysTts != null) {
+            try { sysTts.stop(); } catch (Throwable ignored) {}
+        }
         if (NativeTts.available) {
             try { NativeTts.nativeStop(); } catch (Throwable ignored) {}
+        }
+    }
+
+    public static boolean isPlaying() {
+        return System.currentTimeMillis() < playingUntilMs;
+    }
+
+    public static void waitUntilIdle(long maxMs) {
+        long deadline = System.currentTimeMillis() + Math.max(0, maxMs);
+        while (isPlaying() && System.currentTimeMillis() < deadline) {
+            try { Thread.sleep(80); } catch (InterruptedException ignored) { break; }
         }
     }
 }

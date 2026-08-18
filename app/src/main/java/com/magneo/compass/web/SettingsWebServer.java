@@ -169,16 +169,22 @@ public class SettingsWebServer {
                 + "<div class='row'><label>文本模型</label><input type='text' name='textModel'></div>"
                 + "<div class='row'><label>视觉模型</label><input type='text' name='visionModel'></div></fieldset>"
                 + "<fieldset><legend>语音</legend>"
+                + "<div class='row'><label>语音 API Key</label><input type='text' name='voiceApiKey' placeholder='留空=复用大模型 API Key'></div>"
                 + "<div class='row'><label>ASR 地址</label><input type='text' name='asrUrl'></div>"
                 + "<div class='row'><label>ASR 模型</label><input type='text' name='asrModel'></div>"
                 + "<div class='row'><label>TTS 地址</label><input type='text' name='ttsUrl'></div>"
                 + "<div class='row'><label>TTS 模型</label><input type='text' name='ttsModel'></div>"
                 + "<div class='row'><label>TTS 音色</label><input type='text' name='ttsVoice'></div>"
+                + "<div class='row'><label>本地优先</label><input type='checkbox' name='localTtsFirst' style='width:auto;vertical-align:middle'>"
+                + "<span style='font-size:11px;color:#8a8272'>关闭时固定优先云端 TTS，云端失败不会偷偷换本地声音</span></div>"
+                + "<div style='color:#8a8272;font-size:11px;margin:4px 0 8px 114px'>FunASR/FRP 建议填 ws://地址:端口；填 http://主机根地址也会自动转 WebSocket。OpenAI 兼容 ASR 才填写 /v1 或 /audio/transcriptions。</div>"
                 + "<div class='row' style='margin-top:10px'><label style='width:100%'>语音系统提示词</label></div>"
                 + "<textarea name='sysPromptVoice' style='width:calc(100% - 14px);height:64px;background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'></textarea>"
                 + "</fieldset>"
                 + "<fieldset><legend>视觉 / 监听 / 浏览器</legend>"
                 + "<div class='row'><label>视觉间隔秒</label><input type='text' name='visionInterval'></div>"
+                + "<div class='row'><label>常驻监听</label><input type='checkbox' name='vadEnabled' style='width:auto;vertical-align:middle'>"
+                + "<span style='font-size:11px;color:#8a8272'>持续识别外部语音，由 AI 判断是否需要回复</span></div>"
                 + "<div class='row'><label>VAD 灵敏度</label><input type='text' name='vadSensitivity'></div>"
                 + "<div class='row'><label>搜索引擎</label><input type='text' name='searchEngine'></div>"
                 + "<div class='row' style='margin-top:10px'><label style='width:100%'>视觉系统提示词</label></div>"
@@ -287,8 +293,8 @@ public class SettingsWebServer {
                 + "function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}"
                 + "function convHtml(d){var h='';var arr=d.entries||[];"
                 + "for(var i=Math.max(0,arr.length-200);i<arr.length;i++){var e=arr[i];"
-                + "var who=e.role==='user'?'你':(e.role==='assistant'?'AI':'系统');"
-                + "var color=e.role==='error'?'#e74c3c':(e.role==='user'?'#d4af37':'#8fbf6a');"
+                + "var who=e.role==='user'?'你':(e.role==='assistant'?'AI':(e.role==='heard'?'听见':'系统'));"
+                + "var color=e.role==='error'?'#e74c3c':(e.role==='user'?'#d4af37':(e.role==='heard'?'#8a8272':'#8fbf6a'));"
                 + "h+=\"<div style='margin:4px 0'><span style='color:#6b6b6b;font-size:10px'>\"+esc(e.ts)+'</span> <b style=\"color:'+color+'\">'+who+':</b> '+esc(e.text)+'</div>';}"
                 + "if(arr.length===0)h='<div style=\"color:#8a8272\">暂无对话记录，用语音和罗盘对话后会显示在这里</div>';"
                 + "h+=\"<div style='color:#6b6b6b;font-size:10px;margin-top:6px'>共 \"+arr.length+\" 条 · 文件 \"+d.sizeKb+\" KB / 上限 \"+d.maxKb+\" KB</div>\";return h;}"
@@ -589,6 +595,7 @@ public class SettingsWebServer {
         try {
             o.put("provider", Prefs.get(app, Prefs.K_PROVIDER, ""));
             o.put("apiKey", Prefs.get(app, Prefs.K_API_KEY, ""));
+            o.put("voiceApiKey", Prefs.get(app, Prefs.K_VOICE_API_KEY, ""));
             o.put("baseUrl", Prefs.get(app, Prefs.K_BASE_URL, ""));
             o.put("textModel", Prefs.get(app, Prefs.K_TEXT_MODEL, ""));
             o.put("visionModel", Prefs.get(app, Prefs.K_VISION_MODEL, ""));
@@ -597,7 +604,9 @@ public class SettingsWebServer {
             o.put("ttsUrl", Prefs.get(app, Prefs.K_TTS_URL, ""));
             o.put("ttsModel", Prefs.get(app, Prefs.K_TTS_MODEL, ""));
             o.put("ttsVoice", Prefs.get(app, Prefs.K_TTS_VOICE, ""));
+            o.put("localTtsFirst", Prefs.getB(app, Prefs.K_LOCAL_TTS_FIRST, false));
             o.put("visionInterval", String.valueOf(Prefs.getI(app, Prefs.K_VISION_INTERVAL, 2)));
+            o.put("vadEnabled", Prefs.getB(app, Prefs.K_VAD_ENABLED, false));
             o.put("vadSensitivity", String.valueOf(Prefs.getI(app, Prefs.K_VAD_SENSITIVITY, 600)));
             o.put("searchEngine", Prefs.get(app, Prefs.K_SEARCH_ENGINE, "https://www.bing.com/search?q=%s"));
             o.put("convMaxKb", String.valueOf(Prefs.getI(app, Prefs.K_CONV_MAX_KB, 1024)));
@@ -652,7 +661,14 @@ public class SettingsWebServer {
                 } else if (k.equals("streamBitrate")) {
                     try { Prefs.putI(app, k, Math.max(300, Math.min(8000, Integer.parseInt(v)))); } catch (Exception ignored) {}
                 } else if (isBoolKey(k)) {
-                    Prefs.putB(app, k, "true".equalsIgnoreCase(v) || "1".equals(v));
+                    boolean on = "true".equalsIgnoreCase(v) || "1".equals(v);
+                    Prefs.putB(app, k, on);
+                    if (k.equals(Prefs.K_VAD_ENABLED)) {
+                        android.content.Intent i = new android.content.Intent(app,
+                                com.magneo.compass.voice.VadService.class);
+                        if (on) app.startService(i);
+                        else app.stopService(i);
+                    }
                 } else {
                     Prefs.put(app, k, v);
                 }

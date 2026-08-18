@@ -25,8 +25,11 @@ public class VadService extends Service {
     private void loop() {
         while (running) {
             try {
-                VoiceController vc = VoiceController.get(this, s -> {});
-                if (!vc.isBusy()) {
+                VoiceController vc = VoiceController.get(this, null);
+                if (vc.usesStreamingAsr()) {
+                    vc.ensureContinuousListening();
+                    Thread.sleep(2000);
+                } else if (!vc.isBusy()) {
                     // 阻塞式 VAD 对话：听到说话→自动结束→处理；处理完继续监听
                     vc.startListening(true);
                     while (vc.isBusy() || vc.isListening()) Thread.sleep(200);
@@ -43,6 +46,7 @@ public class VadService extends Service {
     @Override public void onDestroy() {
         running = false;
         if (thread != null) thread.interrupt();
+        try { VoiceController.get(this, null).stopContinuousListening(); } catch (Throwable ignored) {}
         super.onDestroy();
     }
 }

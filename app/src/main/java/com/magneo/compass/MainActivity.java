@@ -43,11 +43,14 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         if (Prefs.get(this, Prefs.K_PROVIDER, "").isEmpty()) {
             ProviderConfig.apply(this, ProviderConfig.qwen());
         }
-        // 传感器事件触发重绘，按事件计数粗略限流（不依赖系统时钟，避免时钟异常导致画面冻结）：
-        // MT6580 软件渲染全屏重绘很贵，每 2 个事件重绘一次约为 15-30fps
-        long[] skip = {0};
+        // MT6580 软件渲染全屏罗盘较贵，传感器重绘限到约 8fps；语音状态仍由 View 自己即时刷新。
+        long[] lastDraw = {0};
         hub = new SensorHub(this, () -> {
-            if ((skip[0]++ & 1) == 0) view.postInvalidate();
+            long now = System.currentTimeMillis();
+            if (now - lastDraw[0] >= 120) {
+                lastDraw[0] = now;
+                view.postInvalidate();
+            }
         });
         view = new CompassView(this, hub, this);
         setContentView(view);
@@ -111,6 +114,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         }
         uiTicker.removeCallbacks(uiTick);
         uiTicker.post(uiTick);
+        if (voice != null) voice = VoiceController.get(this, view::setStatus);
         hideSystemUi();
     }
 

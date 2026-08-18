@@ -8,6 +8,7 @@ public class Prefs {
     public static final String K_PROVIDER = "provider";
     public static final String K_BASE_URL = "baseUrl";
     public static final String K_API_KEY = "apiKey";
+    public static final String K_VOICE_API_KEY = "voiceApiKey";
     public static final String K_TEXT_MODEL = "textModel";
     public static final String K_VISION_MODEL = "visionModel";
     public static final String K_ASR_URL = "asrUrl";

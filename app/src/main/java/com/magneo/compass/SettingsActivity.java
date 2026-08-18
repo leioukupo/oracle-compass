@@ -27,6 +27,7 @@ import android.widget.Toast;
 import com.magneo.compass.llm.LlmClient;
 import com.magneo.compass.ui.RoundFrame;
 import com.magneo.compass.ui.Ui;
+import com.magneo.compass.voice.VadService;
 import com.magneo.compass.web.SettingsWebServer;
 
 import java.util.ArrayList;
@@ -217,6 +218,9 @@ public class SettingsActivity extends BaseActivity {
 
     private void buildVoice(LinearLayout b) {
         section(b, "语音识别");
+        summaryRow(b, "语音 API Key", voiceKeySummary(),
+                () -> editString("语音 API Key（留空复用大模型）",
+                        Prefs.K_VOICE_API_KEY, "", false, true, null));
         summaryRow(b, "ASR 地址", compact(Prefs.get(this, Prefs.K_ASR_URL, "")),
                 () -> editString("ASR 地址", Prefs.K_ASR_URL, "", false, false, null));
         summaryRow(b, "ASR 模型", compact(Prefs.get(this, Prefs.K_ASR_MODEL, "")),
@@ -228,10 +232,16 @@ public class SettingsActivity extends BaseActivity {
                 () -> editString("TTS 模型", Prefs.K_TTS_MODEL, "", false, false, null));
         summaryRow(b, "TTS 音色", compact(Prefs.get(this, Prefs.K_TTS_VOICE, "")),
                 () -> editString("TTS 音色", Prefs.K_TTS_VOICE, "", false, false, null));
-        toggleRow(b, "本地优先", Prefs.K_LOCAL_TTS_FIRST, true);
+        toggleRow(b, "本地优先", Prefs.K_LOCAL_TTS_FIRST, false);
         summaryRow(b, "语音 Prompt", promptSummary(Prefs.get(this, Prefs.K_SYS_PROMPT_VOICE,
                 Prefs.DEFAULT_SYS_PROMPT_VOICE)), () -> editString("语音系统提示词",
                 Prefs.K_SYS_PROMPT_VOICE, Prefs.DEFAULT_SYS_PROMPT_VOICE, true, false, null));
+    }
+
+    private String voiceKeySummary() {
+        String key = Prefs.get(this, Prefs.K_VOICE_API_KEY, "");
+        if (!key.isEmpty()) return maskSecret(key);
+        return "复用大模型";
     }
 
     private void buildVision(LinearLayout b) {
@@ -247,13 +257,13 @@ public class SettingsActivity extends BaseActivity {
 
     private void buildVad(LinearLayout b) {
         boolean enabled = Prefs.getB(this, Prefs.K_VAD_ENABLED, false);
-        toggleRow(b, "持续监听 VAD", Prefs.K_VAD_ENABLED, false);
+        toggleRow(b, "常驻语音监听", Prefs.K_VAD_ENABLED, false);
         int cur = Prefs.getI(this, Prefs.K_VAD_SENSITIVITY, 600);
         segmentedInt(b, "监听灵敏度", Prefs.K_VAD_SENSITIVITY, cur,
                 new int[]{900, 600, 350}, new String[]{"低", "中", "高"},
                 () -> editInt("自定义灵敏度", Prefs.K_VAD_SENSITIVITY, 600, 1, 3000, ""));
         if (enabled) {
-            TextView warn = subtle("持续监听会增加耗电，低电量时建议关闭");
+            TextView warn = subtle("会持续识别外部语音，并由 AI 判断是否需要回复");
             warn.setTextColor(Color.rgb(180, 76, 54));
             b.addView(warn, fullLp(3));
         }
@@ -380,7 +390,12 @@ public class SettingsActivity extends BaseActivity {
         row.setPadding(Ui.dp(this, 13), Ui.dp(this, 5), Ui.dp(this, 8), Ui.dp(this, 5));
         row.setBackground(rowBg(on, false));
         row.setOnClickListener(v -> {
-            Prefs.putB(this, key, !Prefs.getB(this, key, def));
+            boolean next = !Prefs.getB(this, key, def);
+            Prefs.putB(this, key, next);
+            if (Prefs.K_VAD_ENABLED.equals(key)) {
+                if (next) startService(new Intent(this, VadService.class));
+                else stopService(new Intent(this, VadService.class));
+            }
             selectCategory(cat);
         });
 

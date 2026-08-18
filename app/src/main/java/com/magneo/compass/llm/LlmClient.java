@@ -29,7 +29,7 @@ public class LlmClient {
     private static final MediaType AUDIO = MediaType.parse("audio/wav");
 
     private final OkHttpClient client;
-    public final String baseUrl, apiKey, textModel, visionModel, asrUrl, asrModel, ttsUrl, ttsModel, ttsVoice;
+    public final String baseUrl, apiKey, voiceApiKey, textModel, visionModel, asrUrl, asrModel, ttsUrl, ttsModel, ttsVoice;
 
     public LlmClient(Context ctx) {
         OkHttpClient.Builder b = com.magneo.compass.netfs.Tls.builder(ctx)
@@ -39,6 +39,7 @@ public class LlmClient {
         client = b.build();
         baseUrl = strip(Prefs.get(ctx, Prefs.K_BASE_URL, "https://dashscope.aliyuncs.com/compatible-mode/v1"));
         apiKey = Prefs.get(ctx, Prefs.K_API_KEY, "");
+        voiceApiKey = Prefs.get(ctx, Prefs.K_VOICE_API_KEY, "");
         textModel = Prefs.get(ctx, Prefs.K_TEXT_MODEL, "qwen-plus");
         visionModel = Prefs.get(ctx, Prefs.K_VISION_MODEL, "qwen-vl-max");
         String asr = Prefs.get(ctx, Prefs.K_ASR_URL, "");
@@ -56,6 +57,25 @@ public class LlmClient {
         if (s == null) return "";
         while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
         return s;
+    }
+
+    private static String endpoint(String baseOrEndpoint, String suffix) {
+        String s = strip(baseOrEndpoint);
+        if (s.endsWith(suffix)) return s;
+        if (s.endsWith("/v1")) return s + suffix;
+        if (looksHostRoot(s)) return s + "/v1" + suffix;
+        return s + suffix;
+    }
+
+    private static boolean looksHostRoot(String s) {
+        int scheme = s.indexOf("://");
+        if (scheme < 0) return false;
+        int path = s.indexOf('/', scheme + 3);
+        return path < 0 || path == s.length() - 1;
+    }
+
+    private String audioApiKey() {
+        return voiceApiKey.isEmpty() ? apiKey : voiceApiKey;
     }
 
     public static class Msg {
@@ -95,7 +115,7 @@ public class LlmClient {
         void onError(String msg);
     }
 
-    public void chat(java.util.List<Msg> msgs, boolean useVisionModel, StreamCallback cb) {
+    public Call chat(java.util.List<Msg> msgs, boolean useVisionModel, StreamCallback cb) {
         try {
             JSONArray arr = new JSONArray();
             for (Msg m : msgs) arr.put(msgToJson(m, useVisionModel));
@@ -108,7 +128,8 @@ public class LlmClient {
                     .addHeader("Authorization", "Bearer " + apiKey)
                     .post(RequestBody.create(JSON, body.toString()))
                     .build();
-            client.newCall(req).enqueue(new Callback() {
+            Call call = client.newCall(req);
+            call.enqueue(new Callback() {
                 @Override public void onFailure(Call call, java.io.IOException e) { cb.onError(e.getMessage()); }
                 @Override public void onResponse(Call call, Response resp) throws java.io.IOException {
                     try {
@@ -130,7 +151,8 @@ public class LlmClient {
                                 if (choices == null || choices.length() == 0) continue;
                                 JSONObject delta = choices.optJSONObject(0).optJSONObject("delta");
                                 if (delta == null) continue;
-                                String d = delta.optString("content", null);
+                                String d = delta.has("content") && !delta.isNull("content")
+                                        ? delta.optString("content", "") : "";
                                 if (d != null && !d.isEmpty()) { full.append(d); cb.onDelta(d); }
                             } catch (Exception ignored) {}
                         }
@@ -140,7 +162,9 @@ public class LlmClient {
                     }
                 }
             });
+            return call;
         } catch (Exception e) { cb.onError(e.getMessage()); }
+        return null;
     }
 
     public interface TextCallback { void onResult(String text); void onError(String msg); }
@@ -153,8 +177,8 @@ public class LlmClient {
                 .addFormDataPart("model", asrModel)
                 .addFormDataPart("file", "input.wav", file)
                 .build();
-        Request req = new Request.Builder().url(strip(asrUrl) + "/audio/transcriptions")
-                .addHeader("Authorization", "Bearer " + apiKey).post(body).build();
+        Request req = new Request.Builder().url(endpoint(asrUrl, "/audio/transcriptions"))
+                .addHeader("Authorization", "Bearer " + audioApiKey()).post(body).build();
         client.newCall(req).enqueue(new Callback() {
             @Override public void onFailure(Call call, java.io.IOException e) { cb.onError(e.getMessage()); }
             @Override public void onResponse(Call call, Response resp) throws java.io.IOException {
@@ -168,18 +192,26 @@ public class LlmClient {
         });
     }
 
-    public interface BytesCallback { void onResult(byte[] audio); void onError(String msg); }
+    public interface BytesCallback {
+        void onResult(byte[] audio);
+        default void onResult(byte[] audio, String contentType) { onResult(audio); }
+        void onError(String msg);
+    }
 
     /** TTS：OpenAI 兼容 /audio/speech，返回音频字节。 */
-    public void synthesize(String text, BytesCallback cb) {
-        if (ttsUrl.isEmpty()) { cb.onError("未配置 TTS 语音 API"); return; }
+    public Call synthesize(String text, BytesCallback cb) {
+        if (ttsUrl.isEmpty()) { cb.onError("未配置 TTS 语音 API"); return null; }
         try {
             JSONObject body = new JSONObject()
-                    .put("model", ttsModel).put("voice", ttsVoice).put("input", text);
-            Request req = new Request.Builder().url(strip(ttsUrl) + "/audio/speech")
-                    .addHeader("Authorization", "Bearer " + apiKey)
+                    .put("model", ttsModel)
+                    .put("voice", ttsVoice)
+                    .put("input", text)
+                    .put("response_format", "mp3");
+            Request req = new Request.Builder().url(endpoint(ttsUrl, "/audio/speech"))
+                    .addHeader("Authorization", "Bearer " + audioApiKey())
                     .post(RequestBody.create(JSON, body.toString())).build();
-            client.newCall(req).enqueue(new Callback() {
+            Call call = client.newCall(req);
+            call.enqueue(new Callback() {
                 @Override public void onFailure(Call call, java.io.IOException e) { cb.onError(e.getMessage()); }
                 @Override public void onResponse(Call call, Response resp) throws java.io.IOException {
                     try {
@@ -188,10 +220,12 @@ public class LlmClient {
                             cb.onError("HTTP " + resp.code() + " " + s);
                             return;
                         }
-                        cb.onResult(resp.body().bytes());
+                        cb.onResult(resp.body().bytes(), resp.header("Content-Type", ""));
                     } finally { if (resp.body() != null) resp.body().close(); }
                 }
             });
+            return call;
         } catch (Exception e) { cb.onError(e.getMessage()); }
+        return null;
     }
 }
