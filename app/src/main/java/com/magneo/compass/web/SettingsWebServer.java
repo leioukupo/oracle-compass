@@ -168,17 +168,26 @@ public class SettingsWebServer {
                 + "<div class='row'><label>API Key</label><input type='text' name='apiKey'></div>"
                 + "<div class='row'><label>Base URL</label><input type='text' name='baseUrl'></div>"
                 + "<div class='row'><label>文本模型</label><input type='text' name='textModel'></div>"
-                + "<div class='row'><label>视觉模型</label><input type='text' name='visionModel'></div></fieldset>"
+                + "<div class='row'><label>视觉模型</label><input type='text' name='visionModel'></div>"
+                + "<div class='row'><label>思考强度</label><select name='reasoningEffort'>"
+                + "<option value='auto'>自动</option>"
+                + "<option value='none'>禁止思考</option>"
+                + "<option value='low'>低</option>"
+                + "<option value='medium'>中</option>"
+                + "<option value='high'>高</option>"
+                + "<option value='max'>最大</option></select></div>"
+                + "<div style='color:#8a8272;font-size:11px'>自动=沿用服务默认；DeepSeek 会额外带上 thinking 开关，OpenAI 兼容格式则直接写 reasoning_effort。</div></fieldset>"
                 + "<fieldset><legend>语音</legend>"
                 + "<div class='row'><label>语音 API Key</label><input type='text' name='voiceApiKey' placeholder='留空=复用大模型 API Key'></div>"
                 + "<div class='row'><label>ASR 地址</label><input type='text' name='asrUrl'></div>"
+                + "<div class='row'><label>最终 ASR</label><input type='text' name='asrFinalUrl' placeholder='http://192.168.31.5:50000/ 或 /api/v1/asr'></div>"
                 + "<div class='row'><label>ASR 模型</label><input type='text' name='asrModel'></div>"
                 + "<div class='row'><label>TTS 地址</label><input type='text' name='ttsUrl'></div>"
                 + "<div class='row'><label>TTS 模型</label><input type='text' name='ttsModel'></div>"
                 + "<div class='row'><label>TTS 音色</label><input type='text' name='ttsVoice'></div>"
                 + "<div class='row'><label>本地优先</label><input type='checkbox' name='localTtsFirst' style='width:auto;vertical-align:middle'>"
                 + "<span style='font-size:11px;color:#8a8272'>关闭时固定优先云端 TTS，云端失败不会偷偷换本地声音</span></div>"
-                + "<div style='color:#8a8272;font-size:11px;margin:4px 0 8px 114px'>FunASR/FRP 建议填 ws://地址:端口；填 http://主机根地址也会自动转 WebSocket。OpenAI 兼容 ASR 才填写 /v1 或 /audio/transcriptions。</div>"
+                + "<div style='color:#8a8272;font-size:11px;margin:4px 0 8px 114px'>流式 ASR 填 ws://地址:端口 或 http://主机根地址；最终 ASR 这里填 SenseVoice 根地址或 /api/v1/asr，OpenAI 兼容则直接填 /v1/audio/transcriptions。</div>"
                 + "<div class='row' style='margin-top:10px'><label style='width:100%'>语音系统提示词</label></div>"
                 + "<textarea name='sysPromptVoice' style='width:calc(100% - 14px);height:64px;background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'></textarea>"
                 + "</fieldset>"
@@ -260,8 +269,9 @@ public class SettingsWebServer {
                 + "<fieldset><legend>内网穿透 frpc</legend>"
                 + "<div class='row'><label style='width:100%'>frpc.toml 配置（保存后生效）</label></div>"
                 + "<textarea name='frpcConfig' rows='12' style='width:calc(100% - 14px);height:220px;background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px;font-family:monospace;font-size:12px'></textarea>"
-                + "<div style='color:#8a8272;font-size:11px'>示例：serverAddr = '你的服务器IP' / serverPort = 7000 / auth.token = '密钥'，代理用 [[proxies]]：name='web' type='tcp' localIP='127.0.0.1' localPort=18080 remotePort=8080（详细格式见 frp 官方文档，改完先点保存）</div>"
+                + "<div style='color:#8a8272;font-size:11px'>示例：serverAddr = '你的服务器IP' / serverPort = 7000 / auth.token = '密钥'，代理用 [[proxies]]：name='web' type='tcp' localIP='127.0.0.1' localPort=8080 remotePort=11608（远程端口按你的 VPS 规划填写，改完先点保存）</div>"
                 + "<div class='row'>状态：<span id='frpcState' style='color:#d4af37'>未知</span>"
+                + "<span id='frpcStateDetail' style='font-size:11px;color:#8a8272;margin-left:8px'></span>"
                 + "<span style='font-size:11px;color:#8a8272;margin-left:8px'>应用启动时自动运行（配置非空）</span></div>"
                 + "<div style='text-align:center'><button type='button' onclick='frpcStart()'>启动 frpc</button>"
                 + "<button type='button' onclick='frpcStop()'>停止 frpc</button>"
@@ -426,7 +436,8 @@ public class SettingsWebServer {
                 + "function camStop(){var x=new XMLHttpRequest();x.open('GET','/cam/stop',true);"
                 + "x.onload=function(){document.getElementById('camMsg').textContent=x.responseText;setTimeout(camRefresh,500);};x.send();}"
                 + "function frpcRefresh(){get('/frpc/status',function(d){if(!d)return;"
-                + "document.getElementById('frpcState').textContent=d.status==='running'?'运行中':'已停止';"
+                + "document.getElementById('frpcState').textContent=d.status==='running'?'运行中':(d.status==='error'?'异常':'已停止');"
+                + "document.getElementById('frpcStateDetail').textContent=d.detail?(' · '+d.detail):'';"
                 + "var l=document.getElementById('frpcLog');l.textContent=d.log;l.scrollTop=l.scrollHeight;});}"
                 + "function frpcStart(){var x=new XMLHttpRequest();x.open('GET','/frpc/start',true);"
                 + "x.onload=function(){document.getElementById('frpcMsg').textContent=x.responseText;frpcRefresh();};x.send();}"
@@ -571,8 +582,10 @@ public class SettingsWebServer {
 
     private static void serveFrpcStatus(OutputStream out) throws IOException {
         try {
+            com.magneo.compass.frp.FrpcManager.Snapshot s = com.magneo.compass.frp.FrpcManager.snapshot();
             JSONObject o = new JSONObject();
-            o.put("status", com.magneo.compass.frp.FrpcManager.status());
+            o.put("status", s.status);
+            o.put("detail", s.detail);
             o.put("log", com.magneo.compass.frp.FrpcManager.logTail(4000));
             byte[] b = o.toString().getBytes("UTF-8");
             writeHead(out, "application/json; charset=utf-8", b.length);
@@ -596,10 +609,12 @@ public class SettingsWebServer {
             o.put("provider", Prefs.get(app, Prefs.K_PROVIDER, ""));
             o.put("apiKey", Prefs.get(app, Prefs.K_API_KEY, ""));
             o.put("voiceApiKey", Prefs.get(app, Prefs.K_VOICE_API_KEY, ""));
+            o.put("reasoningEffort", Prefs.get(app, Prefs.K_REASONING_EFFORT, Prefs.DEFAULT_REASONING_EFFORT));
             o.put("baseUrl", Prefs.get(app, Prefs.K_BASE_URL, ""));
             o.put("textModel", Prefs.get(app, Prefs.K_TEXT_MODEL, ""));
             o.put("visionModel", Prefs.get(app, Prefs.K_VISION_MODEL, ""));
             o.put("asrUrl", Prefs.get(app, Prefs.K_ASR_URL, ""));
+            o.put("asrFinalUrl", Prefs.get(app, Prefs.K_ASR_FINAL_URL, ""));
             o.put("asrModel", Prefs.get(app, Prefs.K_ASR_MODEL, ""));
             o.put("ttsUrl", Prefs.get(app, Prefs.K_TTS_URL, ""));
             o.put("ttsModel", Prefs.get(app, Prefs.K_TTS_MODEL, ""));

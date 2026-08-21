@@ -213,6 +213,8 @@ public class SettingsActivity extends BaseActivity {
                 () -> editString("文本模型", Prefs.K_TEXT_MODEL, "", false, false, null));
         summaryRow(b, "视觉模型", compact(Prefs.get(this, Prefs.K_VISION_MODEL, "")),
                 () -> editString("视觉模型", Prefs.K_VISION_MODEL, "", false, false, null));
+        summaryRow(b, "思考强度", reasoningSummary(),
+                this::chooseReasoningEffort);
         actionButton(b, "测试对话", this::testChat, false);
     }
 
@@ -223,6 +225,9 @@ public class SettingsActivity extends BaseActivity {
                         Prefs.K_VOICE_API_KEY, "", false, true, null));
         summaryRow(b, "ASR 地址", compact(Prefs.get(this, Prefs.K_ASR_URL, "")),
                 () -> editString("ASR 地址", Prefs.K_ASR_URL, "", false, false, null));
+        summaryRow(b, "最终 ASR", compact(Prefs.get(this, Prefs.K_ASR_FINAL_URL, "")),
+                () -> editString("最终 ASR 地址（SenseVoice 根地址或 /api/v1/asr）",
+                        Prefs.K_ASR_FINAL_URL, "", false, false, null));
         summaryRow(b, "ASR 模型", compact(Prefs.get(this, Prefs.K_ASR_MODEL, "")),
                 () -> editString("ASR 模型", Prefs.K_ASR_MODEL, "", false, false, null));
         section(b, "语音合成");
@@ -242,6 +247,17 @@ public class SettingsActivity extends BaseActivity {
         String key = Prefs.get(this, Prefs.K_VOICE_API_KEY, "");
         if (!key.isEmpty()) return maskSecret(key);
         return "复用大模型";
+    }
+
+    private String reasoningSummary() {
+        String v = Prefs.get(this, Prefs.K_REASONING_EFFORT, Prefs.DEFAULT_REASONING_EFFORT);
+        if (v == null || v.trim().isEmpty() || "auto".equalsIgnoreCase(v)) return "自动";
+        if ("none".equalsIgnoreCase(v)) return "禁止思考";
+        if ("low".equalsIgnoreCase(v)) return "低";
+        if ("medium".equalsIgnoreCase(v)) return "中";
+        if ("high".equalsIgnoreCase(v)) return "高";
+        if ("max".equalsIgnoreCase(v)) return "最大";
+        return "自动";
     }
 
     private void buildVision(LinearLayout b) {
@@ -650,6 +666,38 @@ public class SettingsActivity extends BaseActivity {
                 })
                 .item("自定义", () -> editString("搜索 URL", Prefs.K_SEARCH_ENGINE,
                         "https://www.bing.com/search?q=%s", false, false, null))
+                .cancel()
+                .show();
+    }
+
+    private void chooseReasoningEffort() {
+        String cur = Prefs.get(this, Prefs.K_REASONING_EFFORT, Prefs.DEFAULT_REASONING_EFFORT);
+        new RoundDialog(this)
+                .title("思考强度")
+                .item((cur.equals("auto") ? "✓ " : "") + "自动", () -> {
+                    Prefs.put(this, Prefs.K_REASONING_EFFORT, "auto");
+                    selectCategory(cat);
+                })
+                .item((cur.equals("none") ? "✓ " : "") + "禁止思考", () -> {
+                    Prefs.put(this, Prefs.K_REASONING_EFFORT, "none");
+                    selectCategory(cat);
+                })
+                .item((cur.equals("low") ? "✓ " : "") + "低", () -> {
+                    Prefs.put(this, Prefs.K_REASONING_EFFORT, "low");
+                    selectCategory(cat);
+                })
+                .item((cur.equals("medium") ? "✓ " : "") + "中", () -> {
+                    Prefs.put(this, Prefs.K_REASONING_EFFORT, "medium");
+                    selectCategory(cat);
+                })
+                .item((cur.equals("high") ? "✓ " : "") + "高", () -> {
+                    Prefs.put(this, Prefs.K_REASONING_EFFORT, "high");
+                    selectCategory(cat);
+                })
+                .item((cur.equals("max") ? "✓ " : "") + "最大", () -> {
+                    Prefs.put(this, Prefs.K_REASONING_EFFORT, "max");
+                    selectCategory(cat);
+                })
                 .cancel()
                 .show();
     }

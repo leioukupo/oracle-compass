@@ -9,9 +9,11 @@ public class Prefs {
     public static final String K_BASE_URL = "baseUrl";
     public static final String K_API_KEY = "apiKey";
     public static final String K_VOICE_API_KEY = "voiceApiKey";
+    public static final String K_REASONING_EFFORT = "reasoningEffort";
     public static final String K_TEXT_MODEL = "textModel";
     public static final String K_VISION_MODEL = "visionModel";
     public static final String K_ASR_URL = "asrUrl";
+    public static final String K_ASR_FINAL_URL = "asrFinalUrl";
     public static final String K_ASR_MODEL = "asrModel";
     public static final String K_TTS_URL = "ttsUrl";
     public static final String K_TTS_MODEL = "ttsModel";
@@ -53,6 +55,7 @@ public class Prefs {
     public static final String DEFAULT_LOC_IP_URL = "http://ip-api.com/json/?lang=zh-CN";
     public static final String DEFAULT_SYS_PROMPT_VOICE = "你是真理罗盘助手，回答简洁，中文回复。";
     public static final String DEFAULT_SYS_PROMPT_VISION = "你是圆屏设备“真理罗盘”的视觉感知模块。看图后用中文简述你看到的环境（物体/人/光线/场景），若与上一帧相比有明显变化，指出变化；若没有变化就说“无明显变化”。一句话即可。";
+    public static final String DEFAULT_REASONING_EFFORT = "auto";
 
     private static SharedPreferences sp(Context c) {
         return c.getSharedPreferences("bagua", Context.MODE_PRIVATE);

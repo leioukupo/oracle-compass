@@ -489,14 +489,6 @@ public class CompassView extends View {
             c.drawArc(arc, -90f, sweep, false, pStroke);
             pStroke.setStrokeCap(Paint.Cap.BUTT);
         }
-
-        if (hub.battery >= 0 && status.isEmpty() && !detailMode) {
-            pSmall.setStyle(Paint.Style.FILL);
-            pSmall.setTextSize(11.5f * s);
-            pSmall.setColor(hub.battery < 20 ? a(remainColor, 235) : a(C_DIM, 230));
-            String b = hub.battery + "%";
-            drawTextCentered(c, b, cx, cy + mid + 14f * s, pSmall);
-        }
     }
 
     private void drawNeedle(Canvas c, float cx, float cy, float r, float az, float s) {

@@ -927,7 +927,7 @@ public class VoiceController {
     private void processLegacyWav(byte[] wav, boolean autoMode) {
         turnExec.execute(() -> {
             LlmClient llm = new LlmClient(ctx);
-            if (llm.asrUrl.isEmpty()) {
+            if (llm.asrFinalUrl.isEmpty()) {
                 setStatus("未配置 ASR，请在设置填写语音 API");
                 return;
             }

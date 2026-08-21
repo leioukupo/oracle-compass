@@ -12,6 +12,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
 
@@ -33,7 +34,8 @@ public class LlmClient {
     private static final ConnectionPool SHARED_POOL = new ConnectionPool(8, 5, TimeUnit.MINUTES);
 
     private final OkHttpClient client;
-    public final String baseUrl, apiKey, voiceApiKey, textModel, visionModel, asrUrl, asrModel, ttsUrl, ttsModel, ttsVoice;
+    public final String provider, baseUrl, apiKey, voiceApiKey, reasoningEffort, textModel, visionModel,
+            asrUrl, asrFinalUrl, asrModel, ttsUrl, ttsModel, ttsVoice;
 
     public LlmClient(Context ctx) {
         OkHttpClient.Builder b = com.magneo.compass.netfs.Tls.builder(ctx)
@@ -42,14 +44,19 @@ public class LlmClient {
                 .readTimeout(120, TimeUnit.SECONDS)
                 .writeTimeout(90, TimeUnit.SECONDS);
         client = b.build();
+        provider = Prefs.get(ctx, Prefs.K_PROVIDER, "");
         baseUrl = strip(Prefs.get(ctx, Prefs.K_BASE_URL, "https://dashscope.aliyuncs.com/compatible-mode/v1"));
         apiKey = Prefs.get(ctx, Prefs.K_API_KEY, "");
         voiceApiKey = Prefs.get(ctx, Prefs.K_VOICE_API_KEY, "");
+        reasoningEffort = normalizeReasoningEffort(Prefs.get(ctx, Prefs.K_REASONING_EFFORT, Prefs.DEFAULT_REASONING_EFFORT));
         textModel = Prefs.get(ctx, Prefs.K_TEXT_MODEL, "qwen-plus");
         visionModel = Prefs.get(ctx, Prefs.K_VISION_MODEL, "qwen-vl-max");
         String asr = Prefs.get(ctx, Prefs.K_ASR_URL, "");
         if (asr.isEmpty() && !baseUrl.isEmpty()) asr = baseUrl; // 未单独配置时复用 Base URL
         asrUrl = asr;
+        String asrFinal = Prefs.get(ctx, Prefs.K_ASR_FINAL_URL, "");
+        if (asrFinal.isEmpty()) asrFinal = asr;
+        asrFinalUrl = asrFinal;
         asrModel = Prefs.get(ctx, Prefs.K_ASR_MODEL, "whisper-1");
         String tts = Prefs.get(ctx, Prefs.K_TTS_URL, "");
         if (tts.isEmpty() && !baseUrl.isEmpty()) tts = baseUrl; // 未单独配置时复用 Base URL
@@ -85,6 +92,32 @@ public class LlmClient {
         return s + "/voices";
     }
 
+    private static String transcribeEndpoint(String baseOrEndpoint) {
+        if (baseOrEndpoint == null || baseOrEndpoint.trim().isEmpty()) return "";
+        String s = strip(baseOrEndpoint);
+        if (s.startsWith("ws://")) s = "http://" + s.substring("ws://".length());
+        else if (s.startsWith("wss://")) s = "https://" + s.substring("wss://".length());
+        String lower = s.toLowerCase(Locale.US);
+        if (lower.endsWith("/audio/transcriptions") || lower.endsWith("/api/v1/asr")) return s;
+        if (lower.endsWith("/v1")) return s + "/audio/transcriptions";
+        if (lower.endsWith("/api/v1")) return s + "/asr";
+        if (looksHostRoot(s)) {
+            if (lower.contains("openai.com") || lower.contains("dashscope") || lower.contains("deepseek")) {
+                return s + "/v1/audio/transcriptions";
+            }
+            return s + "/api/v1/asr";
+        }
+        if (lower.contains("openai.com") || lower.contains("dashscope") || lower.contains("deepseek")) {
+            return s + "/audio/transcriptions";
+        }
+        return s + "/api/v1/asr";
+    }
+
+    private static boolean isSenseVoiceTranscribe(String url) {
+        String lower = strip(url).toLowerCase(Locale.US);
+        return lower.contains("/api/v1/asr");
+    }
+
     private static boolean looksHostRoot(String s) {
         int scheme = s.indexOf("://");
         if (scheme < 0) return false;
@@ -94,6 +127,29 @@ public class LlmClient {
 
     private String audioApiKey() {
         return voiceApiKey.isEmpty() ? apiKey : voiceApiKey;
+    }
+
+    private boolean isDeepSeekLike() {
+        String p = provider == null ? "" : provider.toLowerCase(Locale.US);
+        String u = baseUrl == null ? "" : baseUrl.toLowerCase(Locale.US);
+        return p.contains("deepseek") || u.contains("deepseek");
+    }
+
+    private boolean isOpenAiLike() {
+        String p = provider == null ? "" : provider.toLowerCase(Locale.US);
+        String u = baseUrl == null ? "" : baseUrl.toLowerCase(Locale.US);
+        return p.contains("openai") || u.contains("openai.com") || u.contains("api.openai.com");
+    }
+
+    private static String normalizeReasoningEffort(String effort) {
+        if (effort == null) return Prefs.DEFAULT_REASONING_EFFORT;
+        String s = effort.trim().toLowerCase(Locale.US);
+        if (s.isEmpty()) return Prefs.DEFAULT_REASONING_EFFORT;
+        if ("auto".equals(s) || "none".equals(s) || "low".equals(s) || "medium".equals(s)
+                || "high".equals(s) || "max".equals(s)) {
+            return s;
+        }
+        return Prefs.DEFAULT_REASONING_EFFORT;
     }
 
     public static class Msg {
@@ -174,6 +230,19 @@ public class LlmClient {
                     body.put("max_tokens", opts.maxTokens.intValue());
                 }
             }
+            String effort = reasoningEffort;
+            if (!"auto".equals(effort)) {
+                if (isDeepSeekLike()) {
+                    if ("none".equals(effort)) {
+                        body.put("thinking", new JSONObject().put("type", "disabled"));
+                    } else {
+                        body.put("thinking", new JSONObject().put("type", "enabled"));
+                        body.put("reasoning_effort", effort);
+                    }
+                } else if (isOpenAiLike()) {
+                    body.put("reasoning_effort", effort);
+                }
+            }
             Request req = new Request.Builder()
                     .url(baseUrl + "/chat/completions")
                     .addHeader("Authorization", "Bearer " + apiKey)
@@ -222,15 +291,30 @@ public class LlmClient {
 
     /** ASR：OpenAI 兼容 /audio/transcriptions（multipart）。 */
     public Call transcribe(byte[] wav, TextCallback cb) {
-        if (asrUrl.isEmpty()) { cb.onError("未配置 ASR 语音 API"); return null; }
+        String endpoint = transcribeEndpoint(asrFinalUrl);
+        if (endpoint.isEmpty()) { cb.onError("未配置 ASR 语音 API"); return null; }
         try {
-            RequestBody file = RequestBody.create(AUDIO, wav);
-            RequestBody body = new MultipartBody.Builder().setType(MultipartBody.FORM)
-                    .addFormDataPart("model", asrModel)
-                    .addFormDataPart("file", "input.wav", file)
-                    .build();
-            Request req = new Request.Builder().url(endpoint(asrUrl, "/audio/transcriptions"))
-                    .addHeader("Authorization", "Bearer " + audioApiKey()).post(body).build();
+            Request req;
+            if (isSenseVoiceTranscribe(endpoint)) {
+                RequestBody file = RequestBody.create(AUDIO, wav);
+                RequestBody body = new MultipartBody.Builder().setType(MultipartBody.FORM)
+                        .addFormDataPart("files", "input.wav", file)
+                        .addFormDataPart("lang", "auto")
+                        .addFormDataPart("use_itn", "true")
+                        .build();
+                req = new Request.Builder().url(endpoint)
+                        .addHeader("Authorization", "Bearer " + audioApiKey())
+                        .post(body).build();
+            } else {
+                RequestBody file = RequestBody.create(AUDIO, wav);
+                RequestBody body = new MultipartBody.Builder().setType(MultipartBody.FORM)
+                        .addFormDataPart("model", asrModel)
+                        .addFormDataPart("file", "input.wav", file)
+                        .build();
+                req = new Request.Builder().url(endpoint)
+                        .addHeader("Authorization", "Bearer " + audioApiKey())
+                        .post(body).build();
+            }
             Call call = client.newCall(req);
             call.enqueue(new Callback() {
                 @Override public void onFailure(Call call, java.io.IOException e) {
@@ -241,7 +325,7 @@ public class LlmClient {
                     try {
                         String s = resp.body() != null ? resp.body().string() : "";
                         if (!resp.isSuccessful()) { cb.onError("HTTP " + resp.code() + " " + s); return; }
-                        try { cb.onResult(new JSONObject(s).optString("text", "")); }
+                        try { cb.onResult(parseTranscribeText(s)); }
                         catch (Exception e) { cb.onError("解析失败"); }
                     } finally { if (resp.body() != null) resp.body().close(); }
                 }
@@ -369,5 +453,55 @@ public class LlmClient {
         String v = voice == null ? "" : voice.trim();
         if (v.isEmpty() || out.contains(v)) return;
         out.add(v);
+    }
+
+    private static String parseTranscribeText(String json) {
+        try {
+            Object root = new org.json.JSONTokener(json).nextValue();
+            if (root instanceof JSONObject) {
+                JSONObject o = (JSONObject) root;
+                String text = o.optString("text", "").trim();
+                if (!text.isEmpty()) return text;
+                Object result = o.opt("result");
+                if (result instanceof JSONArray) {
+                    JSONArray arr = (JSONArray) result;
+                    for (int i = 0; i < arr.length(); i++) {
+                        Object item = arr.opt(i);
+                        if (!(item instanceof JSONObject)) continue;
+                        JSONObject j = (JSONObject) item;
+                        String[] keys = {"text", "clean_text", "raw_text", "sentence", "transcript"};
+                        for (String k : keys) {
+                            String v = j.optString(k, "").trim();
+                            if (!v.isEmpty()) return v;
+                        }
+                    }
+                } else if (result != null) {
+                    String v = String.valueOf(result).trim();
+                    if (!v.isEmpty() && !"null".equalsIgnoreCase(v)) return v;
+                }
+                String[] keys = {"clean_text", "raw_text", "result", "sentence", "transcript"};
+                for (String k : keys) {
+                    String v = o.optString(k, "").trim();
+                    if (!v.isEmpty()) return v;
+                }
+            } else if (root instanceof JSONArray) {
+                JSONArray arr = (JSONArray) root;
+                if (arr.length() > 0) {
+                    Object item = arr.opt(0);
+                    if (item instanceof JSONObject) {
+                        JSONObject j = (JSONObject) item;
+                        String[] keys = {"text", "clean_text", "raw_text", "sentence", "transcript"};
+                        for (String k : keys) {
+                            String v = j.optString(k, "").trim();
+                            if (!v.isEmpty()) return v;
+                        }
+                    } else if (item != null) {
+                        String v = String.valueOf(item).trim();
+                        if (!v.isEmpty()) return v;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return "";
     }
 }

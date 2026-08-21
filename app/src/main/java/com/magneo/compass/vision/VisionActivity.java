@@ -133,7 +133,7 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
             h.postDelayed(() -> clearOverlayIf("未配置 API Key"), 3500);
             return false;
         }
-        if (llm.asrUrl.isEmpty()) {
+        if (llm.asrUrl.isEmpty() && llm.asrFinalUrl.isEmpty()) {
             showOverlay("未配置 ASR");
             h.postDelayed(() -> clearOverlayIf("未配置 ASR"), 3500);
             return false;
