@@ -19,9 +19,10 @@ import java.net.Socket;
 import java.net.URLDecoder;
 import java.util.Enumeration;
 
-/** 局域网网页设置服务：其他设备浏览器打开 http://<IP>:8080 可配置应用（不含推流）。 */
+/** 本机网页设置服务：设备浏览器打开 http://127.0.0.1:8080 可配置应用（不含推流）。 */
 public class SettingsWebServer {
     public static final int PORT = 8080;
+    private static final String LOOPBACK_HOST = "127.0.0.1";
     private static volatile ServerSocket server;
     private static volatile Thread thread;
     private static volatile Context app;
@@ -48,7 +49,7 @@ public class SettingsWebServer {
     public static android.content.Context getAppContext() { return app; }
 
     public static String url() {
-        return "http://" + localIp() + ":" + PORT + "/";
+        return "http://" + LOOPBACK_HOST + ":" + PORT + "/";
     }
 
     public static String localIp() {
@@ -254,7 +255,7 @@ public class SettingsWebServer {
                 + "<span id='camMsg'></span></div>"
                 + "<div style='color:#8a8272;font-size:11px'>状态：<span id='camState'>未知</span>"
                 + "<div id='camUrls' style='margin-top:4px'></div></div>"
-                + "<div style='color:#8a8272;font-size:11px'>RTSP 用 VLC 等播放 <b>rtsp://设备IP:端口/cam</b>（建议选 TCP 传输）；网页播放 <a href='/cam' target='_blank' style='color:#d4af37'>点这里打开摄像头直播页</a>。已实测：720p 可达，摄像头回调硬件上限 16fps（60/30fps 目标自动降级），码率 VBR 最高按设置值。状态区会显示实际帧率。</div>"
+                + "<div style='color:#8a8272;font-size:11px'>RTSP 用 VLC 等播放 <b>rtsp://127.0.0.1:端口/cam</b>（本机可直接访问；远程访问请走 frpc）；网页播放 <a href='/cam' target='_blank' style='color:#d4af37'>点这里打开摄像头直播页</a>。已实测：720p 可达，摄像头回调硬件上限 16fps（60/30fps 目标自动降级），码率 VBR 最高按设置值。状态区会显示实际帧率。</div>"
                 + "</fieldset>"
                 + "<fieldset><legend>内网穿透 frpc</legend>"
                 + "<div class='row'><label style='width:100%'>frpc.toml 配置（保存后生效）</label></div>"
@@ -444,9 +445,8 @@ public class SettingsWebServer {
             JSONObject o = new JSONObject();
             o.put("status", com.magneo.compass.cam.CameraStreamService.status());
             o.put("detail", com.magneo.compass.cam.CameraStreamService.statusDetail());
-            String ip = localIp();
             int port = Prefs.getI(app, Prefs.K_RTSP_PORT, 8554);
-            o.put("rtsp", "rtsp://" + ip + ":" + port + "/cam");
+            o.put("rtsp", "rtsp://" + LOOPBACK_HOST + ":" + port + "/cam");
             o.put("rtmpUrl", Prefs.get(app, Prefs.K_RTMP_URL, ""));
             o.put("camAutoStart", Prefs.getB(app, Prefs.K_CAM_AUTO_START, false));
             o.put("webrtc", com.magneo.compass.cam.WebRtcStreamer.get().state());
@@ -631,7 +631,7 @@ public class SettingsWebServer {
             o.put("camAutoStart", Prefs.getB(app, Prefs.K_CAM_AUTO_START, false));
             o.put("mode", H264SurfaceStreamer.isActive() ? "h264fast"
                     : (H264Streamer.isActive() ? "h264" : (ScreenStreamer.isActive() ? "mjpeg" : "idle")));
-            o.put("ip", localIp());
+            o.put("ip", LOOPBACK_HOST);
         } catch (Exception ignored) {}
         byte[] b = o.toString().getBytes("UTF-8");
         writeHead(out, "application/json; charset=utf-8", b.length);

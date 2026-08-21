@@ -24,7 +24,9 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -43,8 +45,11 @@ public class VoiceController {
     private static final long STREAM_MAX_UTTERANCE_MS = 15_000;
     private static final int BARGE_PREROLL_FRAMES = 6; // 360ms, avoid feeding a long TTS tail.
     private static final int BARGE_THRESHOLD_MARGIN = 140;
-    private static final long ASR_RETRY_DELAY_MS = 6_500;
-    private static final long ASR_RETRY_TIMEOUT_MS = 7_000;
+    private static final long ASR_RETRY_DELAY_MS = 3_000;
+    private static final long ASR_RETRY_TIMEOUT_MS = 4_500;
+    private static final long FINAL_ASR_WAIT_MS = 800;
+    private static final long GATE_LLM_TIMEOUT_MS = 800;
+    private static final long FIRST_SENTENCE_IDLE_CUT_MS = 500;
     private static final long TTS_START_HOLDOFF_MS = 350;
     private static final long TTS_END_HOLDOFF_MS = 900;
     private static final long FOLLOWUP_WINDOW_MS = 22_000;
@@ -58,6 +63,7 @@ public class VoiceController {
     private volatile StatusListener status;
     private final ExecutorService fallbackExec = Executors.newSingleThreadExecutor();
     private final ExecutorService turnExec = Executors.newCachedThreadPool();
+    private final ScheduledExecutorService asrRetryExec = Executors.newSingleThreadScheduledExecutor();
     private final AtomicBoolean listening = new AtomicBoolean(false);
     private final AtomicBoolean busy = new AtomicBoolean(false);
     private final AtomicBoolean continuousRunning = new AtomicBoolean(false);
@@ -68,17 +74,20 @@ public class VoiceController {
     private final AtomicInteger turnSerial = new AtomicInteger();
     private final AtomicInteger asrSessionSerial = new AtomicInteger();
     private final AtomicInteger asrFinalSerial = new AtomicInteger();
+    private final AtomicInteger asrTerminalSerial = new AtomicInteger();
     private final AtomicInteger latestUtteranceAsrSession = new AtomicInteger();
     private final AtomicBoolean manualBoundaryRequested = new AtomicBoolean(false);
     private final Object standbyAsrLock = new Object();
     private final Set<Call> activeCalls = Collections.synchronizedSet(new HashSet<Call>());
     private final Set<FunAsrStreamingClient> asrSessions =
             Collections.synchronizedSet(new HashSet<FunAsrStreamingClient>());
-    private final LinkedBlockingQueue<TtsJob> ttsQueue = new LinkedBlockingQueue<>(8);
+    private final LinkedBlockingQueue<TtsJob> ttsQueue = new LinkedBlockingQueue<>();
     private final LinkedBlockingQueue<PreparedTts> readyTtsQueue =
-            new LinkedBlockingQueue<>(3);
+            new LinkedBlockingQueue<>();
     private final List<LlmClient.Msg> dialogHistory = new ArrayList<>();
     private final StringBuilder streamPartial = new StringBuilder();
+    private final ConcurrentHashMap<Integer, AsrTurn> asrTurns = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Integer, VoiceTrace> turnTraces = new ConcurrentHashMap<>();
 
     private volatile AudioRecord recorder;
     private volatile boolean keepRecording;
@@ -96,6 +105,7 @@ public class VoiceController {
     private volatile String lastFinalNorm = "";
     private volatile long lastFinalAt;
     private volatile byte[] lastBoundaryPcm;
+    private final AtomicInteger firstTtsQueuedTurn = new AtomicInteger();
     private AudioEffect aec;
     private AudioEffect ns;
     private AudioEffect agc;
@@ -109,6 +119,60 @@ public class VoiceController {
         AsrSessionRef(int id, FunAsrStreamingClient client) {
             this.id = id;
             this.client = client;
+        }
+    }
+
+    private static final class AsrTurn {
+        final int sessionId;
+        final byte[] pcm;
+        final long boundaryAt;
+
+        AsrTurn(int sessionId, byte[] pcm, long boundaryAt) {
+            this.sessionId = sessionId;
+            this.pcm = pcm;
+            this.boundaryAt = boundaryAt;
+        }
+    }
+
+    private static final class VoiceTrace {
+        final int sessionId;
+        final long asrBoundaryAt;
+        volatile int turnId;
+        volatile long fastFinalAt;
+        volatile long finalAsrMs = -1;
+        volatile long gateMs = -1;
+        volatile long llmStartAt;
+        volatile long firstDeltaAt;
+        volatile long firstTtsEnqueueAt;
+        volatile long firstTtsAudioAt;
+        volatile long firstPlayStartAt;
+
+        VoiceTrace(int sessionId, long asrBoundaryAt) {
+            this.sessionId = sessionId;
+            this.asrBoundaryAt = asrBoundaryAt;
+        }
+
+        long fastAsrMs() {
+            return fastFinalAt > 0 && asrBoundaryAt > 0 ? fastFinalAt - asrBoundaryAt : -1;
+        }
+
+        long llmFirstDeltaMs() {
+            return firstDeltaAt > 0 && llmStartAt > 0 ? firstDeltaAt - llmStartAt : -1;
+        }
+
+        long firstTtsEnqueueMs() {
+            return firstTtsEnqueueAt > 0 && firstDeltaAt > 0
+                    ? firstTtsEnqueueAt - firstDeltaAt : -1;
+        }
+
+        long firstTtsAudioMs() {
+            return firstTtsAudioAt > 0 && firstTtsEnqueueAt > 0
+                    ? firstTtsAudioAt - firstTtsEnqueueAt : -1;
+        }
+
+        long playStartMs() {
+            return firstPlayStartAt > 0 && firstTtsAudioAt > 0
+                    ? firstPlayStartAt - firstTtsAudioAt : -1;
         }
     }
 
@@ -253,6 +317,7 @@ public class VoiceController {
         stopContinuousListening();
         stopTtsPlayback();
         fallbackExec.shutdownNow();
+        asrRetryExec.shutdownNow();
         turnExec.shutdownNow();
         cancelActiveCalls();
         synchronized (VoiceController.class) {
@@ -397,6 +462,10 @@ public class VoiceController {
                 if (forceBoundary || endBySilence || endByLength) {
                     byte[] boundaryPcm = utterancePcm.toByteArray();
                     if (boundaryPcm.length > 0) lastBoundaryPcm = boundaryPcm;
+                    if (boundaryPcm.length > SAMPLE_RATE) {
+                        asrTurns.put(sessionId, new AsrTurn(sessionId, boundaryPcm,
+                                System.currentTimeMillis()));
+                    }
                     saveLastVoiceForDebug(boundaryPcm);
                     if (currentSession != null) currentSession.finishUtterance();
                     scheduleAsrRetry(sessionId, boundaryPcm);
@@ -453,6 +522,7 @@ public class VoiceController {
 
             @Override public void onFinal(String text) {
                 if (sessionId <= asrFinalSerial.get()) return;
+                asrTerminalSerial.set(sessionId);
                 String clean = cleanupAsrText(text);
                 if (!clean.isEmpty()) asrFinalSerial.set(sessionId);
                 handleStreamingFinal(text, sessionId);
@@ -517,17 +587,28 @@ public class VoiceController {
             ConversationLog.append(ctx, "system", "忽略过期 ASR final[" + sessionId + "]");
             return;
         }
-        String text = cleanupAsrText(rawText);
+        AsrTurn asrTurn = asrTurns.remove(sessionId);
+        VoiceTrace trace = new VoiceTrace(sessionId,
+                asrTurn == null ? System.currentTimeMillis() : asrTurn.boundaryAt);
+        trace.fastFinalAt = System.currentTimeMillis();
+        String text = applyHotwordCorrections(cleanupAsrText(rawText));
         if (text.isEmpty()) {
             ConversationLog.append(ctx, "system", "ASR final[" + sessionId + "]: empty");
             if (sessionId == latestUtteranceAsrSession.get()) setStatus("常驻聆听中...");
             return;
         }
-        if (isDuplicateFinal(text)) return;
         synchronized (streamPartial) { streamPartial.setLength(0); }
         asrFinalSerial.set(sessionId);
         Log.i(TAG, "ASR final[" + sessionId + "]: " + compact(text, 120));
-        ConversationLog.append(ctx, "system", "ASR final[" + sessionId + "]: " + compact(text, 120));
+        ConversationLog.append(ctx, "system", "ASR final[" + sessionId + "] fast_ms="
+                + trace.fastAsrMs() + ": " + compact(text, 120));
+        String refined = refineAsrFinal(text, asrTurn, trace);
+        if (!refined.equals(text)) {
+            ConversationLog.append(ctx, "system", "ASR final corrected[" + sessionId + "]: "
+                    + compact(text, 60) + " -> " + compact(refined, 80));
+            text = refined;
+        }
+        if (isDuplicateFinal(text)) return;
         if (isLikelyEcho(text)) {
             ConversationLog.append(ctx, "heard", "[回声过滤] " + text);
             setStatus("回声已过滤");
@@ -541,20 +622,24 @@ public class VoiceController {
                 Log.w(TAG, "speech consumer", t);
             }
         }
-        submitFinalText(text, true);
+        submitFinalText(text, true, trace);
     }
 
     private void scheduleAsrRetry(final int sessionId, final byte[] pcm) {
         if (pcm == null || pcm.length <= SAMPLE_RATE) return;
-        new Thread(() -> {
-            try { Thread.sleep(ASR_RETRY_DELAY_MS); } catch (InterruptedException ignored) {}
-            if (!continuousRunning.get()) return;
-            if (asrFinalSerial.get() >= sessionId) return;
-            if (sessionId != latestUtteranceAsrSession.get()) return;
-            ConversationLog.append(ctx, "system", "ASR offline final timeout, retry session "
-                    + sessionId);
-            recognizeBufferedWithFreshFunAsr(pcm, sessionId);
-        }, "funasr-retry").start();
+        try {
+            asrRetryExec.schedule(() -> {
+                if (!continuousRunning.get() || shuttingDown.get()) return;
+                if (asrTerminalSerial.get() >= sessionId) return;
+                if (asrFinalSerial.get() >= sessionId) return;
+                if (sessionId != latestUtteranceAsrSession.get()) return;
+                ConversationLog.append(ctx, "system", "ASR offline final timeout, retry session "
+                        + sessionId);
+                recognizeBufferedWithFreshFunAsr(pcm, sessionId);
+            }, ASR_RETRY_DELAY_MS, TimeUnit.MILLISECONDS);
+        } catch (Throwable t) {
+            Log.w(TAG, "schedule asr retry", t);
+        }
         setStatus("识别中...");
     }
 
@@ -589,6 +674,7 @@ public class VoiceController {
 
             @Override public void onFinal(String text) {
                 String clean = cleanupAsrText(text);
+                asrTerminalSerial.set(sessionId);
                 if (!clean.isEmpty() && asrFinalSerial.get() < sessionId) {
                     asrFinalSerial.set(sessionId);
                     ConversationLog.append(ctx, "system", "ASR retry final[" + sessionId + "]");
@@ -638,17 +724,58 @@ public class VoiceController {
         }
     }
 
-    private void submitFinalText(String text, boolean autoMode) {
-        turnExec.execute(() -> processFinalText(text, autoMode));
+    private String refineAsrFinal(String fastText, AsrTurn asrTurn, VoiceTrace trace) {
+        if (asrTurn == null || asrTurn.pcm == null || asrTurn.pcm.length <= SAMPLE_RATE) {
+            return fastText;
+        }
+        long started = System.currentTimeMillis();
+        String refined = transcribeBlocking(new LlmClient(ctx), toWav(asrTurn.pcm), FINAL_ASR_WAIT_MS);
+        trace.finalAsrMs = System.currentTimeMillis() - started;
+        if (refined == null || refined.trim().isEmpty()) {
+            ConversationLog.append(ctx, "system", "ASR final refine empty ms=" + trace.finalAsrMs);
+            return fastText;
+        }
+        if (refined.startsWith("!")) {
+            ConversationLog.append(ctx, "system", "ASR final refine unavailable ms="
+                    + trace.finalAsrMs + ": " + compact(refined.substring(1), 60));
+            return fastText;
+        }
+        refined = applyHotwordCorrections(cleanupAsrText(refined));
+        if (shouldUseRefinedAsr(fastText, refined)) return refined;
+        ConversationLog.append(ctx, "system", "ASR final refine kept fast ms="
+                + trace.finalAsrMs + " refined=" + compact(refined, 60));
+        return fastText;
     }
 
-    private void processFinalText(String heardText, boolean autoMode) {
-        String text = cleanupAsrText(heardText);
+    private boolean shouldUseRefinedAsr(String fastText, String refinedText) {
+        String fast = normalizeSpeechText(fastText);
+        String refined = normalizeSpeechText(refinedText);
+        if (refined.isEmpty()) return false;
+        if (fast.isEmpty()) return true;
+        if (refined.equals(fast)) return false;
+        if (refined.contains(fast) && refined.length() >= fast.length()) return true;
+        if (fast.contains(refined) && refined.length() + 2 < fast.length()) return false;
+        if (looksAddressedOrQuestion(refinedText) && !looksAddressedOrQuestion(fastText)) return true;
+        return refined.length() >= fast.length() + 2;
+    }
+
+    private void submitFinalText(String text, boolean autoMode) {
+        submitFinalText(text, autoMode, null);
+    }
+
+    private void submitFinalText(String text, boolean autoMode, VoiceTrace trace) {
+        turnExec.execute(() -> processFinalText(text, autoMode, trace));
+    }
+
+    private void processFinalText(String heardText, boolean autoMode, VoiceTrace trace) {
+        String text = applyHotwordCorrections(cleanupAsrText(heardText));
         if (text.isEmpty()) return;
         LlmClient llm = new LlmClient(ctx);
-        if (autoMode && !shouldReply(llm, text)) {
+        if (trace == null) trace = new VoiceTrace(0, System.currentTimeMillis());
+        if (autoMode && !shouldReply(llm, text, trace)) {
             ConversationLog.append(ctx, "heard", text);
             setStatus("听见：" + compact(text, 18));
+            logTrace("voice ignored", trace);
             return;
         }
         if (llm.apiKey.isEmpty()) {
@@ -659,6 +786,9 @@ public class VoiceController {
 
         boolean interrupted = busy.getAndSet(true);
         int turnId = turnSerial.incrementAndGet();
+        trace.turnId = turnId;
+        turnTraces.put(turnId, trace);
+        cleanupTraceMaps();
         try {
             if (interrupted) {
                 ConversationLog.append(ctx, "system", "新语音打断上一轮：" + compact(text, 40));
@@ -671,20 +801,22 @@ public class VoiceController {
             List<LlmClient.Msg> msgs = new ArrayList<>();
             msgs.add(new LlmClient.Msg("system",
                     Prefs.get(ctx, Prefs.K_SYS_PROMPT_VOICE, Prefs.DEFAULT_SYS_PROMPT_VOICE)
-                            + "\n你正在常驻监听环境语音。只在用户确实需要你回应时回答。"
-                            + "回答要像真人对话一样自然、简洁，不要解释你在监听。"));
-            synchronized (dialogHistory) { msgs.addAll(dialogHistory); }
+                            + "\n常驻语音：该答才答，简短自然，勿提监听。"));
+            addRecentDialogHistory(msgs, looksLikeFollowup(text) ? 2 : 1);
             msgs.add(new LlmClient.Msg("user", text));
-            String reply = chatAndQueueTts(llm, msgs, turnId, false);
+            trace.llmStartAt = System.currentTimeMillis();
+            String reply = chatAndQueueTts(llm, msgs, turnId, false, trace);
             if (turnId != turnSerial.get()) return;
             if (reply.startsWith("!")) {
                 ConversationLog.append(ctx, "error", "LLM 失败：" + reply.substring(1));
                 setStatus("LLM 失败：" + compact(reply.substring(1), 18));
+                logTrace("voice llm_error", trace);
                 return;
             }
             reply = reply.trim();
             if (reply.isEmpty()) {
                 setStatus("模型无返回");
+                logTrace("voice empty_reply", trace);
                 return;
             }
             ConversationLog.append(ctx, "assistant", reply);
@@ -692,6 +824,7 @@ public class VoiceController {
             rememberSpoken(reply);
             lastAssistantAt = System.currentTimeMillis();
             setStatus(continuousRunning.get() ? "常驻聆听中..." : "");
+            logTrace("voice done", trace);
         } catch (Throwable t) {
             Log.w(TAG, "process final", t);
             setStatus("错误：" + t.getMessage());
@@ -903,10 +1036,12 @@ public class VoiceController {
     private String transcribeBlocking(LlmClient llm, byte[] wav, long timeoutMs) {
         final String[] text = {""};
         final Object lock = new Object();
-        llm.transcribe(wav, new LlmClient.TextCallback() {
+        final boolean[] done = {false};
+        Call call = llm.transcribe(wav, new LlmClient.TextCallback() {
             @Override public void onResult(String t) {
                 synchronized (lock) {
                     text[0] = t == null ? "" : t;
+                    done[0] = true;
                     lock.notifyAll();
                 }
             }
@@ -914,24 +1049,49 @@ public class VoiceController {
             @Override public void onError(String msg) {
                 synchronized (lock) {
                     text[0] = "!" + (msg == null ? "未知错误" : msg);
+                    done[0] = true;
                     lock.notifyAll();
                 }
             }
         });
-        synchronized (lock) { try { lock.wait(timeoutMs); } catch (InterruptedException ignored) {} }
+        trackCall(call);
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        synchronized (lock) {
+            while (!done[0] && System.currentTimeMillis() < deadline) {
+                try { lock.wait(Math.min(100, Math.max(1, deadline - System.currentTimeMillis()))); }
+                catch (InterruptedException ignored) { break; }
+            }
+        }
+        if (!done[0] && call != null) {
+            try { call.cancel(); } catch (Throwable ignored) {}
+        }
+        untrackCall(call);
         return text[0] == null ? "" : text[0];
     }
 
-    private boolean shouldReply(LlmClient llm, String text) {
+    private boolean shouldReply(LlmClient llm, String text, VoiceTrace trace) {
+        long started = System.currentTimeMillis();
         String t = text == null ? "" : text.trim();
-        if (t.isEmpty() || isFiller(t)) return false;
-        if (looksAddressedOrQuestion(t)) return true;
-        if (looksLikeFollowup(t)) return true;
-        if (llm.apiKey.isEmpty()) return false;
-        String clean = normalizeSpeechText(t);
-        if (clean.length() >= 8) return true;
-        String verdict = chatBlocking(llm, gateMessages(t), 20_000).toUpperCase(Locale.US);
-        return verdict.contains("REPLY");
+        boolean reply;
+        if (t.isEmpty() || isFiller(t)) {
+            reply = false;
+        } else if (looksAddressedOrQuestion(t) || looksLikeFollowup(t)) {
+            reply = true;
+        } else if (looksLikeBackgroundSpeech(t)) {
+            reply = false;
+        } else if (llm.apiKey.isEmpty()) {
+            reply = false;
+        } else {
+            String verdict = chatBlocking(llm, gateMessages(t), GATE_LLM_TIMEOUT_MS,
+                    LlmClient.ChatOptions.gate()).toUpperCase(Locale.US);
+            reply = verdict.contains("REPLY");
+            if (verdict.isEmpty() || verdict.startsWith("!")) {
+                ConversationLog.append(ctx, "system", "LLM gate timeout/skip: " + compact(t, 40));
+                reply = false;
+            }
+        }
+        if (trace != null) trace.gateMs = System.currentTimeMillis() - started;
+        return reply;
     }
 
     private List<LlmClient.Msg> gateMessages(String text) {
@@ -977,11 +1137,25 @@ public class VoiceController {
         return false;
     }
 
+    private boolean looksLikeBackgroundSpeech(String text) {
+        String t = normalizeSpeechText(text);
+        if (t.length() < 3) return true;
+        String[] background = {"欢迎收看", "广告之后", "本节目", "电视剧", "新闻联播",
+                "点赞关注", "直播间", "朋友们大家好", "观众朋友", "下一集", "上集回顾"};
+        for (String s : background) if (t.contains(s)) return true;
+        return false;
+    }
+
     private String chatBlocking(LlmClient llm, List<LlmClient.Msg> msgs, long timeoutMs) {
+        return chatBlocking(llm, msgs, timeoutMs, LlmClient.ChatOptions.defaults());
+    }
+
+    private String chatBlocking(LlmClient llm, List<LlmClient.Msg> msgs, long timeoutMs,
+                                LlmClient.ChatOptions opts) {
         final StringBuilder reply = new StringBuilder();
         final Object doneLock = new Object();
         final boolean[] done = {false};
-        Call call = llm.chat(msgs, false, new LlmClient.StreamCallback() {
+        Call call = llm.chat(msgs, false, opts, new LlmClient.StreamCallback() {
             @Override public void onDelta(String s) {
                 synchronized (doneLock) { reply.append(s); }
             }
@@ -1010,26 +1184,39 @@ public class VoiceController {
                 try { doneLock.wait(250); } catch (InterruptedException ignored) { break; }
             }
         }
+        if (!done[0] && call != null) {
+            try { call.cancel(); } catch (Throwable ignored) {}
+        }
         untrackCall(call);
         return reply.toString();
     }
 
-    private String chatAndQueueTts(LlmClient llm, List<LlmClient.Msg> msgs, int turnId, boolean vision) {
+    private String chatAndQueueTts(LlmClient llm, List<LlmClient.Msg> msgs, int turnId,
+                                   boolean vision, VoiceTrace trace) {
         final StringBuilder full = new StringBuilder();
         final StringBuilder pending = new StringBuilder();
         final Object doneLock = new Object();
         final boolean[] done = {false};
         final String[] error = {null};
         final boolean[] hadDelta = {false};
-        Call call = llm.chat(msgs, vision, new LlmClient.StreamCallback() {
+        final long[] pendingStartedAt = {0L};
+        Call call = llm.chat(msgs, vision, LlmClient.ChatOptions.voice(), new LlmClient.StreamCallback() {
             @Override public void onDelta(String s) {
                 if (turnId != turnSerial.get() || s == null || s.isEmpty()) return;
                 List<String> segments;
                 synchronized (doneLock) {
                     hadDelta[0] = true;
+                    if (trace != null && trace.firstDeltaAt == 0) {
+                        trace.firstDeltaAt = System.currentTimeMillis();
+                        ConversationLog.append(ctx, "system", "LLM first_delta_ms="
+                                + trace.llmFirstDeltaMs());
+                    }
+                    if (pending.length() == 0) pendingStartedAt[0] = System.currentTimeMillis();
                     full.append(s);
                     pending.append(s);
-                    segments = drainSpeakableSegments(pending, false);
+                    segments = drainSpeakableSegments(pending, false,
+                            trace == null || trace.firstTtsEnqueueAt == 0, pendingStartedAt[0]);
+                    if (pending.length() == 0) pendingStartedAt[0] = 0L;
                 }
                 for (String seg : segments) enqueueTts(turnId, seg);
             }
@@ -1041,7 +1228,8 @@ public class VoiceController {
                         full.append(finalText);
                         pending.append(finalText);
                     }
-                    segments = drainSpeakableSegments(pending, true);
+                    segments = drainSpeakableSegments(pending, true,
+                            trace == null || trace.firstTtsEnqueueAt == 0, pendingStartedAt[0]);
                     done[0] = true;
                     doneLock.notifyAll();
                 }
@@ -1071,15 +1259,18 @@ public class VoiceController {
         return full.toString();
     }
 
-    private List<String> drainSpeakableSegments(StringBuilder pending, boolean finishing) {
+    private List<String> drainSpeakableSegments(StringBuilder pending, boolean finishing,
+                                                boolean firstSegment, long pendingStartedAt) {
         List<String> out = new ArrayList<>();
         while (pending.length() > 0) {
             trimLeading(pending);
-            int cut = findSentenceCut(pending, finishing);
+            int cut = findSentenceCut(pending, finishing, firstSegment, pendingStartedAt);
             if (cut <= 0) break;
             String seg = pending.substring(0, cut).trim();
             pending.delete(0, cut);
             if (!seg.isEmpty()) out.add(seg);
+            firstSegment = false;
+            pendingStartedAt = pending.length() == 0 ? 0L : System.currentTimeMillis();
         }
         return out;
     }
@@ -1088,18 +1279,26 @@ public class VoiceController {
         while (sb.length() > 0 && Character.isWhitespace(sb.charAt(0))) sb.deleteCharAt(0);
     }
 
-    private int findSentenceCut(StringBuilder sb, boolean finishing) {
+    private int findSentenceCut(StringBuilder sb, boolean finishing,
+                                boolean firstSegment, long pendingStartedAt) {
         int len = sb.length();
         if (len == 0) return -1;
         String enders = "。！？!?；;\n";
         for (int i = 0; i < len; i++) {
             if (i >= 5 && enders.indexOf(sb.charAt(i)) >= 0) return i + 1;
         }
-        if (!finishing && len > 38) {
-            for (int i = Math.min(len - 1, 46); i >= 18; i--) {
+        if (!finishing && firstSegment) {
+            if (len >= 16) return Math.min(len, 16);
+            if (len >= 12 && pendingStartedAt > 0
+                    && System.currentTimeMillis() - pendingStartedAt >= FIRST_SENTENCE_IDLE_CUT_MS) {
+                return len;
+            }
+        }
+        if (!finishing && len > 24) {
+            for (int i = Math.min(len - 1, 32); i >= 10; i--) {
                 if ("，,、 ".indexOf(sb.charAt(i)) >= 0) return i + 1;
             }
-            return Math.min(len, 42);
+            return Math.min(len, 28);
         }
         return finishing ? len : -1;
     }
@@ -1108,6 +1307,12 @@ public class VoiceController {
         String t = text == null ? "" : text.trim();
         if (t.isEmpty() || turnId != turnSerial.get()) return;
         rememberSpoken(t);
+        VoiceTrace trace = turnTraces.get(turnId);
+        if (firstTtsQueuedTurn.getAndSet(turnId) != turnId && trace != null) {
+            trace.firstTtsEnqueueAt = System.currentTimeMillis();
+            ConversationLog.append(ctx, "system", "first_tts_enqueue_ms="
+                    + trace.firstTtsEnqueueMs() + " text=" + compact(t, 24));
+        }
         ttsQueue.offer(new TtsJob(turnId, t));
     }
 
@@ -1125,13 +1330,11 @@ public class VoiceController {
     private void ttsSynthesisLoop() {
         while (!shuttingDown.get()) {
             try {
-                TtsJob job = ttsQueue.poll(300, TimeUnit.MILLISECONDS);
-                if (job == null || job.turnId != turnSerial.get()) continue;
+                TtsJob job = ttsQueue.take();
+                if (job.turnId != turnSerial.get()) continue;
                 PreparedTts prepared = synthesizeCloudTts(job);
                 if (prepared == null || job.turnId != turnSerial.get()) continue;
-                while (!readyTtsQueue.offer(prepared, 250, TimeUnit.MILLISECONDS)) {
-                    if (shuttingDown.get() || job.turnId != turnSerial.get()) break;
-                }
+                readyTtsQueue.add(prepared);
             } catch (InterruptedException ignored) {
                 break;
             } catch (Throwable t) {
@@ -1143,8 +1346,8 @@ public class VoiceController {
     private void ttsPlaybackLoop() {
         while (!shuttingDown.get()) {
             try {
-                PreparedTts prepared = readyTtsQueue.poll(300, TimeUnit.MILLISECONDS);
-                if (prepared == null || prepared.job.turnId != turnSerial.get()) continue;
+                PreparedTts prepared = readyTtsQueue.take();
+                if (prepared.job.turnId != turnSerial.get()) continue;
                 playPreparedTts(prepared);
             } catch (InterruptedException ignored) {
                 break;
@@ -1162,12 +1365,53 @@ public class VoiceController {
             return null;
         }
         ConversationLog.append(ctx, "system", "TTS synth start: " + compact(job.text, 40));
+        final String[] firstError = {null};
+        PreparedTts prepared = synthesizeCloudTtsOnce(llm, job, null, firstError);
+        if (prepared != null || job.turnId != turnSerial.get()) return prepared;
+
+        String msg = firstError[0] == null ? "无音频返回" : firstError[0];
+        if (isTtsVoiceNotFound(msg)) {
+            ConversationLog.append(ctx, "error", "TTS 失败：" + msg);
+            String selectedVoice = selectReplacementTtsVoice(llm, job.turnId);
+            if (!selectedVoice.isEmpty() && job.turnId == turnSerial.get()) {
+                String oldVoice = llm.ttsVoice;
+                Prefs.put(ctx, Prefs.K_TTS_VOICE, selectedVoice);
+                ConversationLog.append(ctx, "system",
+                        "TTS voice fallback selected: " + selectedVoice);
+                ConversationLog.append(ctx, "system",
+                        "TTS voice saved: " + compact(oldVoice, 24) + " -> "
+                                + compact(selectedVoice, 24));
+                setStatus("切换 TTS 音色...");
+                final String[] retryError = {null};
+                prepared = synthesizeCloudTtsOnce(llm, job, selectedVoice, retryError);
+                if (prepared != null) {
+                    ConversationLog.append(ctx, "system",
+                            "TTS voice fallback retry ok: " + selectedVoice);
+                    return prepared;
+                }
+                msg = retryError[0] == null ? "无音频返回" : retryError[0];
+            } else if (job.turnId == turnSerial.get()) {
+                msg = "TTS 音色不可用";
+            }
+        }
+
+        ConversationLog.append(ctx, "error", "TTS 失败：" + msg);
+        setStatus("TTS 失败：" + compact(msg, 18));
+        return null;
+    }
+
+    private PreparedTts synthesizeCloudTtsOnce(LlmClient llm, TtsJob job,
+                                               String voiceOverride, String[] errorOut) {
         final byte[][] audio = {null};
         final String[] contentType = {""};
         final String[] error = {null};
         final boolean[] done = {false};
         final Object lock = new Object();
-        Call call = llm.synthesize(job.text, new LlmClient.BytesCallback() {
+        if (voiceOverride != null && !voiceOverride.trim().isEmpty()) {
+            ConversationLog.append(ctx, "system", "TTS synth retry voice="
+                    + compact(voiceOverride, 24) + ": " + compact(job.text, 40));
+        }
+        Call call = llm.synthesize(job.text, voiceOverride, new LlmClient.BytesCallback() {
             @Override public void onResult(byte[] bytes) {
                 synchronized (lock) {
                     audio[0] = bytes;
@@ -1205,15 +1449,73 @@ public class VoiceController {
         untrackCall(call);
         if (job.turnId != turnSerial.get()) {
             ConversationLog.append(ctx, "system", "TTS 已被新一轮对话取消");
+            if (errorOut != null && errorOut.length > 0) errorOut[0] = "cancelled";
             return null;
         }
         if (audio[0] == null || audio[0].length == 0) {
-            String msg = error[0] == null ? "无音频返回" : error[0];
-            ConversationLog.append(ctx, "error", "TTS 失败：" + msg);
-            setStatus("TTS 失败：" + compact(msg, 18));
+            if (errorOut != null && errorOut.length > 0) {
+                errorOut[0] = error[0] == null ? "无音频返回" : error[0];
+            }
             return null;
         }
+        VoiceTrace trace = turnTraces.get(job.turnId);
+        if (trace != null && trace.firstTtsAudioAt == 0) {
+            trace.firstTtsAudioAt = System.currentTimeMillis();
+            ConversationLog.append(ctx, "system", "tts_audio_ms=" + trace.firstTtsAudioMs()
+                    + " bytes=" + audio[0].length);
+        }
         return new PreparedTts(job, audio[0], contentType[0]);
+    }
+
+    private boolean isTtsVoiceNotFound(String msg) {
+        String s = msg == null ? "" : msg.toLowerCase(Locale.US);
+        boolean english = s.contains("voice")
+                && (s.contains("not found") || s.contains("not exist")
+                || s.contains("not available") || s.contains("unknown"));
+        boolean chinese = s.contains("音色")
+                && (s.contains("不存在") || s.contains("不可用") || s.contains("未找到"));
+        return english || chinese;
+    }
+
+    private String selectReplacementTtsVoice(LlmClient llm, int turnId) {
+        final ArrayList<String> voices = new ArrayList<>();
+        final String[] error = {null};
+        final boolean[] done = {false};
+        final Object lock = new Object();
+        setStatus("查找 TTS 音色...");
+        Call call = llm.listTtsVoices(new LlmClient.VoicesCallback() {
+            @Override public void onResult(List<String> result) {
+                synchronized (lock) {
+                    voices.clear();
+                    if (result != null) voices.addAll(result);
+                    done[0] = true;
+                    lock.notifyAll();
+                }
+            }
+
+            @Override public void onError(String msg) {
+                synchronized (lock) {
+                    error[0] = msg == null ? "未知错误" : msg;
+                    done[0] = true;
+                    lock.notifyAll();
+                }
+            }
+        });
+        trackCall(call);
+        long deadline = System.currentTimeMillis() + 15_000;
+        synchronized (lock) {
+            while (!done[0] && System.currentTimeMillis() < deadline
+                    && turnId == turnSerial.get()) {
+                try { lock.wait(250); } catch (InterruptedException ignored) { break; }
+            }
+        }
+        untrackCall(call);
+        if (turnId != turnSerial.get()) return "";
+        if (!voices.isEmpty()) return voices.get(0);
+        String msg = error[0] == null ? "没有可用音色" : error[0];
+        ConversationLog.append(ctx, "error", "TTS 音色不可用：" + compact(msg, 80));
+        setStatus("TTS 音色不可用");
+        return "";
     }
 
     private void playPreparedTts(PreparedTts prepared) {
@@ -1227,6 +1529,11 @@ public class VoiceController {
         ttsSpeaking.set(true);
         setStatus("播报中...");
         CloudTts.play(ctx, prepared.audio, prepared.contentType, null);
+        VoiceTrace trace = turnTraces.get(job.turnId);
+        if (trace != null && trace.firstPlayStartAt == 0) {
+            trace.firstPlayStartAt = System.currentTimeMillis();
+            ConversationLog.append(ctx, "system", "play_start_ms=" + trace.playStartMs());
+        }
         long deadline = System.currentTimeMillis() + 90_000;
         while (CloudTts.isPlaying() && job.turnId == turnSerial.get()
                 && !shuttingDown.get() && System.currentTimeMillis() < deadline) {
@@ -1248,12 +1555,46 @@ public class VoiceController {
         ttsHoldoffUntil = lastTtsEndAt + TTS_END_HOLDOFF_MS;
     }
 
+    private void addRecentDialogHistory(List<LlmClient.Msg> out, int turns) {
+        int pairs = Math.max(0, turns);
+        synchronized (dialogHistory) {
+            int count = Math.min(dialogHistory.size(), pairs * 2);
+            int start = Math.max(0, dialogHistory.size() - count);
+            for (int i = start; i < dialogHistory.size(); i++) out.add(dialogHistory.get(i));
+        }
+    }
+
     private void remember(String user, String assistant) {
         synchronized (dialogHistory) {
             dialogHistory.add(new LlmClient.Msg("user", user));
             dialogHistory.add(new LlmClient.Msg("assistant", assistant));
             while (dialogHistory.size() > 8) dialogHistory.remove(0);
         }
+    }
+
+    private void cleanupTraceMaps() {
+        int minTurn = Math.max(0, turnSerial.get() - 8);
+        for (Integer key : turnTraces.keySet()) {
+            if (key == null || key < minTurn) turnTraces.remove(key);
+        }
+        int minSession = Math.max(0, asrSessionSerial.get() - 12);
+        for (Integer key : asrTurns.keySet()) {
+            if (key == null || key < minSession) asrTurns.remove(key);
+        }
+    }
+
+    private void logTrace(String label, VoiceTrace trace) {
+        if (trace == null) return;
+        ConversationLog.append(ctx, "system", label
+                + " session=" + trace.sessionId
+                + " turn=" + trace.turnId
+                + " asr_final_ms=" + trace.fastAsrMs()
+                + " final_asr_ms=" + trace.finalAsrMs
+                + " gate_ms=" + trace.gateMs
+                + " llm_first_delta_ms=" + trace.llmFirstDeltaMs()
+                + " first_tts_enqueue_ms=" + trace.firstTtsEnqueueMs()
+                + " tts_audio_ms=" + trace.firstTtsAudioMs()
+                + " play_start_ms=" + trace.playStartMs());
     }
 
     private void rememberSpoken(String text) {
@@ -1307,6 +1648,36 @@ public class VoiceController {
                 .replace('\n', ' ')
                 .replace('\r', ' ')
                 .trim();
+    }
+
+    private String applyHotwordCorrections(String s) {
+        String t = s == null ? "" : s.trim();
+        if (t.isEmpty()) return "";
+        String[][] fixes = {
+                {"真里罗盘", "真理罗盘"},
+                {"整理罗盘", "真理罗盘"},
+                {"真理螺盘", "真理罗盘"},
+                {"这里罗盘", "真理罗盘"},
+                {"正理罗盘", "真理罗盘"},
+                {"罗牌", "罗盘"},
+                {"螺盘", "罗盘"},
+                {"玲眼", "灵眼"},
+                {"灵验", "灵眼"},
+                {"零眼", "灵眼"},
+                {"上一手", "上一首"},
+                {"上衣首", "上一首"},
+                {"下一手", "下一首"},
+                {"下衣首", "下一首"},
+                {"暂亭", "暂停"},
+                {"赞停", "暂停"},
+                {"网判", "网盘"},
+                {"王盘", "网盘"},
+                {"社置", "设置"}
+        };
+        for (String[] fix : fixes) {
+            t = t.replace(fix[0], fix[1]);
+        }
+        return t;
     }
 
     private String normalizeSpeechText(String s) {

@@ -10,11 +10,14 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 
 import okhttp3.Call;
 import okhttp3.Callback;
+import okhttp3.ConnectionPool;
 import okhttp3.MediaType;
 import okhttp3.MultipartBody;
 import okhttp3.OkHttpClient;
@@ -27,12 +30,14 @@ public class LlmClient {
     private static final String TAG = "LlmClient";
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
     private static final MediaType AUDIO = MediaType.parse("audio/wav");
+    private static final ConnectionPool SHARED_POOL = new ConnectionPool(8, 5, TimeUnit.MINUTES);
 
     private final OkHttpClient client;
     public final String baseUrl, apiKey, voiceApiKey, textModel, visionModel, asrUrl, asrModel, ttsUrl, ttsModel, ttsVoice;
 
     public LlmClient(Context ctx) {
         OkHttpClient.Builder b = com.magneo.compass.netfs.Tls.builder(ctx)
+                .connectionPool(SHARED_POOL)
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(120, TimeUnit.SECONDS)
                 .writeTimeout(90, TimeUnit.SECONDS);
@@ -61,10 +66,23 @@ public class LlmClient {
 
     private static String endpoint(String baseOrEndpoint, String suffix) {
         String s = strip(baseOrEndpoint);
+        if (s.startsWith("ws://")) s = "http://" + s.substring("ws://".length());
+        else if (s.startsWith("wss://")) s = "https://" + s.substring("wss://".length());
         if (s.endsWith(suffix)) return s;
         if (s.endsWith("/v1")) return s + suffix;
         if (looksHostRoot(s)) return s + "/v1" + suffix;
         return s + suffix;
+    }
+
+    private static String voicesEndpoint(String baseOrEndpoint) {
+        String s = strip(baseOrEndpoint);
+        if (s.endsWith("/audio/speech")) {
+            s = s.substring(0, s.length() - "/audio/speech".length());
+        }
+        if (s.endsWith("/voices")) return s;
+        if (s.endsWith("/v1")) return s + "/voices";
+        if (looksHostRoot(s)) return s + "/v1/voices";
+        return s + "/voices";
     }
 
     private static boolean looksHostRoot(String s) {
@@ -115,7 +133,34 @@ public class LlmClient {
         void onError(String msg);
     }
 
+    public static class ChatOptions {
+        public final Float temperature;
+        public final Integer maxTokens;
+
+        private ChatOptions(Float temperature, Integer maxTokens) {
+            this.temperature = temperature;
+            this.maxTokens = maxTokens;
+        }
+
+        public static ChatOptions defaults() {
+            return new ChatOptions(null, null);
+        }
+
+        public static ChatOptions voice() {
+            return new ChatOptions(0.2f, 120);
+        }
+
+        public static ChatOptions gate() {
+            return new ChatOptions(0.0f, 4);
+        }
+    }
+
     public Call chat(java.util.List<Msg> msgs, boolean useVisionModel, StreamCallback cb) {
+        return chat(msgs, useVisionModel, ChatOptions.defaults(), cb);
+    }
+
+    public Call chat(java.util.List<Msg> msgs, boolean useVisionModel,
+                     ChatOptions opts, StreamCallback cb) {
         try {
             JSONArray arr = new JSONArray();
             for (Msg m : msgs) arr.put(msgToJson(m, useVisionModel));
@@ -123,6 +168,12 @@ public class LlmClient {
                     .put("model", useVisionModel ? visionModel : textModel)
                     .put("stream", true)
                     .put("messages", arr);
+            if (opts != null) {
+                if (opts.temperature != null) body.put("temperature", opts.temperature.floatValue());
+                if (opts.maxTokens != null && opts.maxTokens.intValue() > 0) {
+                    body.put("max_tokens", opts.maxTokens.intValue());
+                }
+            }
             Request req = new Request.Builder()
                     .url(baseUrl + "/chat/completions")
                     .addHeader("Authorization", "Bearer " + apiKey)
@@ -170,26 +221,36 @@ public class LlmClient {
     public interface TextCallback { void onResult(String text); void onError(String msg); }
 
     /** ASR：OpenAI 兼容 /audio/transcriptions（multipart）。 */
-    public void transcribe(byte[] wav, TextCallback cb) {
-        if (asrUrl.isEmpty()) { cb.onError("未配置 ASR 语音 API"); return; }
-        RequestBody file = RequestBody.create(AUDIO, wav);
-        RequestBody body = new MultipartBody.Builder().setType(MultipartBody.FORM)
-                .addFormDataPart("model", asrModel)
-                .addFormDataPart("file", "input.wav", file)
-                .build();
-        Request req = new Request.Builder().url(endpoint(asrUrl, "/audio/transcriptions"))
-                .addHeader("Authorization", "Bearer " + audioApiKey()).post(body).build();
-        client.newCall(req).enqueue(new Callback() {
-            @Override public void onFailure(Call call, java.io.IOException e) { cb.onError(e.getMessage()); }
-            @Override public void onResponse(Call call, Response resp) throws java.io.IOException {
-                try {
-                    String s = resp.body() != null ? resp.body().string() : "";
-                    if (!resp.isSuccessful()) { cb.onError("HTTP " + resp.code() + " " + s); return; }
-                    try { cb.onResult(new JSONObject(s).optString("text", "")); }
-                    catch (Exception e) { cb.onError("解析失败"); }
-                } finally { if (resp.body() != null) resp.body().close(); }
-            }
-        });
+    public Call transcribe(byte[] wav, TextCallback cb) {
+        if (asrUrl.isEmpty()) { cb.onError("未配置 ASR 语音 API"); return null; }
+        try {
+            RequestBody file = RequestBody.create(AUDIO, wav);
+            RequestBody body = new MultipartBody.Builder().setType(MultipartBody.FORM)
+                    .addFormDataPart("model", asrModel)
+                    .addFormDataPart("file", "input.wav", file)
+                    .build();
+            Request req = new Request.Builder().url(endpoint(asrUrl, "/audio/transcriptions"))
+                    .addHeader("Authorization", "Bearer " + audioApiKey()).post(body).build();
+            Call call = client.newCall(req);
+            call.enqueue(new Callback() {
+                @Override public void onFailure(Call call, java.io.IOException e) {
+                    cb.onError(e.getMessage());
+                }
+
+                @Override public void onResponse(Call call, Response resp) throws java.io.IOException {
+                    try {
+                        String s = resp.body() != null ? resp.body().string() : "";
+                        if (!resp.isSuccessful()) { cb.onError("HTTP " + resp.code() + " " + s); return; }
+                        try { cb.onResult(new JSONObject(s).optString("text", "")); }
+                        catch (Exception e) { cb.onError("解析失败"); }
+                    } finally { if (resp.body() != null) resp.body().close(); }
+                }
+            });
+            return call;
+        } catch (Exception e) {
+            cb.onError(e.getMessage());
+            return null;
+        }
     }
 
     public interface BytesCallback {
@@ -198,15 +259,26 @@ public class LlmClient {
         void onError(String msg);
     }
 
+    public interface VoicesCallback {
+        void onResult(List<String> voices);
+        void onError(String msg);
+    }
+
     /** TTS：OpenAI 兼容 /audio/speech，返回音频字节。 */
     public Call synthesize(String text, BytesCallback cb) {
+        return synthesize(text, null, cb);
+    }
+
+    public Call synthesize(String text, String voiceOverride, BytesCallback cb) {
         if (ttsUrl.isEmpty()) { cb.onError("未配置 TTS 语音 API"); return null; }
         try {
+            String voice = voiceOverride == null || voiceOverride.trim().isEmpty()
+                    ? ttsVoice : voiceOverride.trim();
             JSONObject body = new JSONObject()
                     .put("model", ttsModel)
-                    .put("voice", ttsVoice)
+                    .put("voice", voice)
                     .put("input", text)
-                    .put("response_format", "mp3");
+                    .put("response_format", "wav");
             Request req = new Request.Builder().url(endpoint(ttsUrl, "/audio/speech"))
                     .addHeader("Authorization", "Bearer " + audioApiKey())
                     .post(RequestBody.create(JSON, body.toString())).build();
@@ -227,5 +299,75 @@ public class LlmClient {
             return call;
         } catch (Exception e) { cb.onError(e.getMessage()); }
         return null;
+    }
+
+    public Call listTtsVoices(VoicesCallback cb) {
+        if (ttsUrl.isEmpty()) { cb.onError("未配置 TTS 语音 API"); return null; }
+        try {
+            Request req = new Request.Builder().url(voicesEndpoint(ttsUrl))
+                    .addHeader("Authorization", "Bearer " + audioApiKey())
+                    .get().build();
+            Call call = client.newCall(req);
+            call.enqueue(new Callback() {
+                @Override public void onFailure(Call call, java.io.IOException e) {
+                    cb.onError(e.getMessage());
+                }
+
+                @Override public void onResponse(Call call, Response resp) throws java.io.IOException {
+                    try {
+                        String s = resp.body() != null ? resp.body().string() : "";
+                        if (!resp.isSuccessful()) {
+                            cb.onError("HTTP " + resp.code() + " " + s);
+                            return;
+                        }
+                        cb.onResult(parseTtsVoices(s));
+                    } finally { if (resp.body() != null) resp.body().close(); }
+                }
+            });
+            return call;
+        } catch (Exception e) { cb.onError(e.getMessage()); }
+        return null;
+    }
+
+    private static List<String> parseTtsVoices(String json) {
+        ArrayList<String> out = new ArrayList<>();
+        try {
+            Object root = new org.json.JSONTokener(json).nextValue();
+            if (root instanceof JSONArray) {
+                addVoiceArray(out, (JSONArray) root, false);
+            } else if (root instanceof JSONObject) {
+                JSONObject o = (JSONObject) root;
+                addVoiceArray(out, o.optJSONArray("custom_voices"), true);
+                addVoiceArray(out, o.optJSONArray("preset_voices"), false);
+                addVoiceArray(out, o.optJSONArray("voices"), false);
+                addVoiceArray(out, o.optJSONArray("data"), false);
+                addVoiceObject(out, o, false);
+            }
+        } catch (Exception ignored) {}
+        return out;
+    }
+
+    private static void addVoiceArray(ArrayList<String> out, JSONArray arr, boolean custom) {
+        if (arr == null) return;
+        for (int i = 0; i < arr.length(); i++) {
+            Object item = arr.opt(i);
+            if (item instanceof JSONObject) addVoiceObject(out, (JSONObject) item, custom);
+            else if (item != null) addVoiceCandidate(out, String.valueOf(item));
+        }
+    }
+
+    private static void addVoiceObject(ArrayList<String> out, JSONObject o, boolean custom) {
+        String id = o.optString("id", "").trim();
+        if (id.isEmpty()) id = o.optString("voice_id", "").trim();
+        if (id.isEmpty()) id = o.optString("voice", "").trim();
+        if (id.isEmpty() && !custom) id = o.optString("name", "").trim();
+        if (id.isEmpty()) id = o.optString("name", "").trim();
+        addVoiceCandidate(out, id);
+    }
+
+    private static void addVoiceCandidate(ArrayList<String> out, String voice) {
+        String v = voice == null ? "" : voice.trim();
+        if (v.isEmpty() || out.contains(v)) return;
+        out.add(v);
     }
 }
