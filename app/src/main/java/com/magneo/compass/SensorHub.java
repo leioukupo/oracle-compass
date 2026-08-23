@@ -31,7 +31,6 @@ public class SensorHub {
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     public volatile float ax, ay, az, gx, gy, gz, mx, my, mz;
-    public volatile float light = -1, prox = -1;
     public volatile float azimuth = Float.NaN, pitch, roll;
     public volatile int battery = 100;
     public volatile double lat = Double.NaN, lon = Double.NaN, alt = Double.NaN;
@@ -82,8 +81,6 @@ public class SensorHub {
                     gx = e.values[0]; gy = e.values[1]; gz = e.values[2]; break;
                 case Sensor.TYPE_MAGNETIC_FIELD:
                     mx = e.values[0]; my = e.values[1]; mz = e.values[2]; hasMag = true; break;
-                case Sensor.TYPE_LIGHT: light = e.values[0]; break;
-                case Sensor.TYPE_PROXIMITY: prox = e.values[0]; break;
             }
             updateFused();
             listener.onUpdate();
@@ -202,8 +199,6 @@ public class SensorHub {
         register(Sensor.TYPE_ACCELEROMETER);
         register(Sensor.TYPE_GYROSCOPE);
         register(Sensor.TYPE_MAGNETIC_FIELD);
-        register(Sensor.TYPE_LIGHT);
-        register(Sensor.TYPE_PROXIMITY);
     }
 
     private void register(int type) {

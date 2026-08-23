@@ -15,6 +15,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
+import android.text.TextPaint;
 import android.util.Base64;
 import android.util.Log;
 import android.view.Gravity;
@@ -52,12 +53,17 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
     private volatile int camH;
     private volatile boolean rendering;
     private volatile String overlayText = "";
+    private volatile long overlaySetAt = 0;
+    private volatile boolean useHalVisionFrames = true;
+    private volatile long halFrameSeq = 0;
+    private volatile long lastRenderedSeq = -1;
 
     private FrameView frameView;
     private OverlayView overlayView;
     private Thread renderThread;
     private VoiceController voiceController;
     private boolean startedVoiceForVision;
+    private boolean startedCameraForVision;
     private final VoiceController.SpeechConsumer speechConsumer = text -> {
         handleSpeechText(text);
         return true;
@@ -68,6 +74,7 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
             lastNv21 = nv21.clone();
             camW = w;
             camH = h;
+            halFrameSeq++;
             if (frameView != null) frameView.postInvalidate();
         }
     };
@@ -93,17 +100,28 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
 
     @Override protected void onResume() {
         super.onResume();
-        CameraStreamService.start(getApplicationContext());
-        CameraStreamService.setFrameListener(frameListener);
+        useHalVisionFrames = Prefs.VISION_FRAME_SOURCE_HAL.equals(Prefs.visionFrameSource(this));
+        halFrameSeq = 0;
+        lastRenderedSeq = -1;
+        lastNv21 = null;
+        camW = 0;
+        camH = 0;
+        startedCameraForVision = !CameraStreamService.isActive();
+        if (startedCameraForVision) {
+            CameraStreamService.start(getApplicationContext());
+        }
+        CameraStreamService.setVisionSnapshotEnabled(!useHalVisionFrames);
+        CameraStreamService.setFrameListener(useHalVisionFrames ? frameListener : null);
         if (canListenForAi()) {
             voiceController = VoiceController.get(this, null);
             voiceController.setSpeechConsumer(speechConsumer);
-            boolean globalVad = Prefs.getB(this, Prefs.K_VAD_ENABLED, false);
+            boolean globalVad = Prefs.vadEnabled(this);
             startedVoiceForVision = !globalVad;
             if (globalVad) startService(new Intent(this, VadService.class));
             else voiceController.ensureContinuousListening();
-            showOverlay("灵眼聆听中");
-            h.postDelayed(() -> clearOverlayIf("灵眼聆听中"), 1800);
+            String source = Prefs.visionFrameSourceLabel(this);
+            showOverlay("灵眼聆听中 · " + source);
+            h.postDelayed(() -> clearOverlayIf("灵眼聆听中 · " + source), 1800);
         }
     }
 
@@ -114,8 +132,12 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
             if (startedVoiceForVision) voiceController.stopContinuousListening();
         }
         startedVoiceForVision = false;
+        CameraStreamService.setVisionSnapshotEnabled(false);
         CameraStreamService.setFrameListener(null);
-        CameraStreamService.stop(getApplicationContext());
+        if (startedCameraForVision) {
+            CameraStreamService.stop(getApplicationContext());
+        }
+        startedCameraForVision = false;
     }
 
     @Override protected void onDestroy() {
@@ -147,12 +169,11 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         renderThread = new Thread(() -> {
             while (rendering) {
                 try {
-                    byte[] nv21 = lastNv21;
-                    int w = camW;
-                    int hh = camH;
-                    if (nv21 != null && w > 0 && hh > 0) {
-                        Bitmap b = frameBitmap(nv21, w, hh, 48);
+                    FrameData frame = currentFrameData();
+                    if (frame != null && frame.seq != lastRenderedSeq) {
+                        Bitmap b = frameBitmap(frame.nv21, frame.w, frame.h, renderQuality());
                         if (b != null) {
+                            lastRenderedSeq = frame.seq;
                             runOnUiThread(() -> {
                                 if (!rendering || frameView == null) {
                                     b.recycle();
@@ -163,7 +184,7 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
                             });
                         }
                     }
-                    Thread.sleep(66);
+                    Thread.sleep(renderIntervalMs());
                 } catch (Throwable t) {
                     try { Thread.sleep(120); } catch (InterruptedException ignored) { break; }
                 }
@@ -262,20 +283,18 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
     }
 
     private String currentFrameBase64() {
-        byte[] nv21 = lastNv21;
-        int w = camW;
-        int hh = camH;
-        if (nv21 == null || w <= 0 || hh <= 0) return null;
+        FrameData frame = currentFrameData();
+        if (frame == null) return null;
         Bitmap full = null;
         Bitmap cropped = null;
         Bitmap scaled = null;
         try {
-            full = frameBitmap(nv21, w, hh, 62);
+            full = frameBitmap(frame.nv21, frame.w, frame.h, askQuality());
             if (full == null) return null;
             cropped = centerCrop(full);
             scaled = scaleDown(cropped, 640);
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            scaled.compress(Bitmap.CompressFormat.JPEG, 62, out);
+            scaled.compress(Bitmap.CompressFormat.JPEG, askQuality(), out);
             return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
         } catch (Throwable t) {
             Log.w(TAG, "capture", t);
@@ -285,6 +304,31 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
             if (cropped != null && cropped != full && !cropped.isRecycled()) cropped.recycle();
             if (full != null && !full.isRecycled()) full.recycle();
         }
+    }
+
+    private FrameData currentFrameData() {
+        if (useHalVisionFrames) {
+            byte[] nv21 = lastNv21;
+            int w = camW;
+            int hh = camH;
+            if (nv21 == null || w <= 0 || hh <= 0) return null;
+            return new FrameData(nv21, w, hh, halFrameSeq);
+        }
+        CameraStreamService.FrameSnapshot snap = CameraStreamService.latestVisionSnapshot();
+        if (snap == null || snap.nv21 == null || snap.w <= 0 || snap.h <= 0) return null;
+        return new FrameData(snap.nv21, snap.w, snap.h, snap.seq);
+    }
+
+    private int renderQuality() {
+        return useHalVisionFrames ? 78 : 62;
+    }
+
+    private int askQuality() {
+        return useHalVisionFrames ? 70 : 62;
+    }
+
+    private int renderIntervalMs() {
+        return useHalVisionFrames ? 50 : 120;
     }
 
     private Bitmap frameBitmap(byte[] nv21, int w, int h, int quality) {
@@ -303,6 +347,20 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         } catch (Throwable t) {
             Log.w(TAG, "frame bitmap", t);
             return null;
+        }
+    }
+
+    private static final class FrameData {
+        final byte[] nv21;
+        final int w;
+        final int h;
+        final long seq;
+
+        FrameData(byte[] nv21, int w, int h, long seq) {
+            this.nv21 = nv21;
+            this.w = w;
+            this.h = h;
+            this.seq = seq;
         }
     }
 
@@ -326,20 +384,14 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
     private void showOverlay(String s) {
         String text = s == null ? "" : s.replace('\n', ' ').replace('\r', ' ').trim();
         h.post(() -> {
-            overlayText = compact(text, 74);
+            overlayText = text;
+            overlaySetAt = System.currentTimeMillis();
             if (overlayView != null) overlayView.invalidate();
         });
     }
 
     private void clearOverlayIf(String oldText) {
         if (oldText != null && oldText.equals(overlayText)) showOverlay("");
-    }
-
-    private String compact(String s, int max) {
-        if (s == null) return "";
-        String t = s.trim();
-        if (t.length() <= max) return t;
-        return t.substring(0, Math.max(1, max - 3)) + "...";
     }
 
     private class FrameView extends View {
@@ -384,6 +436,7 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
 
     private class OverlayView extends View {
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
         private final RectF r = new RectF();
 
         OverlayView(android.content.Context ctx) {
@@ -401,12 +454,19 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
             float cx = w / 2f;
             float cy = h / 2f;
             float radius = shortSide / 2f;
+            textPaint.setColor(Ui.COLOR_TEXT);
+            textPaint.setTextSize(Ui.dpF(VisionActivity.this, 13));
+            textPaint.setTextAlign(Paint.Align.LEFT);
+
             float barH = Ui.dpF(VisionActivity.this, 38);
             float barCy = h - shortSide * 0.14f;
             float dy = Math.abs(barCy - cy);
             float halfChord = (float) Math.sqrt(Math.max(0, radius * radius - dy * dy))
                     - Ui.dpF(VisionActivity.this, 18);
-            float barW = Math.min(halfChord * 2f, Ui.dpF(VisionActivity.this, 292));
+            float textW = textPaint.measureText(text);
+            boolean longText = textW > Ui.dpF(VisionActivity.this, 250);
+            float barW = Math.min(halfChord * 2f,
+                    longText ? Ui.dpF(VisionActivity.this, 560) : Ui.dpF(VisionActivity.this, 292));
             if (barW < Ui.dpF(VisionActivity.this, 180)) {
                 barW = Math.min(w - Ui.dpF(VisionActivity.this, 40),
                         Ui.dpF(VisionActivity.this, 240));
@@ -421,27 +481,36 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
             p.setColor(Color.argb(132, 212, 175, 55));
             canvas.drawRoundRect(r, barH / 2f, barH / 2f, p);
 
-            p.setStyle(Paint.Style.FILL);
-            p.setColor(aiBusy.get() ? Ui.COLOR_AETHER : Ui.COLOR_GOLD);
-            canvas.drawCircle(r.left + Ui.dpF(VisionActivity.this, 18), barCy,
-                    Ui.dpF(VisionActivity.this, 3.5f), p);
-
-            p.setColor(Ui.COLOR_TEXT);
-            p.setTextSize(Ui.dpF(VisionActivity.this, 13));
-            p.setTextAlign(Paint.Align.LEFT);
-            Paint.FontMetrics fm = p.getFontMetrics();
-            float textX = r.left + Ui.dpF(VisionActivity.this, 30);
-            float maxTextW = r.width() - Ui.dpF(VisionActivity.this, 44);
-            canvas.drawText(fit(text, maxTextW), textX,
-                    barCy - (fm.ascent + fm.descent) / 2f, p);
+            drawSingleLineText(canvas, text);
         }
 
-        private String fit(String s, float maxW) {
-            if (p.measureText(s) <= maxW) return s;
-            String ellipsis = "...";
-            int end = s.length();
-            while (end > 1 && p.measureText(s.substring(0, end) + ellipsis) > maxW) end--;
-            return s.substring(0, Math.max(1, end)) + ellipsis;
+        private void drawSingleLineText(Canvas canvas, String text) {
+            Paint.FontMetrics fm = textPaint.getFontMetrics();
+            float padX = Ui.dpF(VisionActivity.this, 18);
+            float maxTextW = Math.max(1f, r.width() - padX * 2f);
+            float fullW = textPaint.measureText(text);
+            float baseY = r.centerY() - (fm.ascent + fm.descent) / 2f;
+            float x;
+            if (fullW <= maxTextW) {
+                x = r.centerX() - fullW / 2f;
+            } else {
+                long age = Math.max(0, System.currentTimeMillis() - overlaySetAt);
+                float pause = 850f;
+                float speed = Ui.dpF(VisionActivity.this, 26) / 1000f;
+                float overflow = fullW - maxTextW;
+                float travelMs = overflow / Math.max(0.01f, speed);
+                float cycle = pause * 2f + travelMs;
+                float t = age % (long) cycle;
+                float scroll = 0;
+                if (t > pause) scroll = Math.min(overflow, (t - pause) * speed);
+                x = r.left + padX - scroll;
+                postInvalidateDelayed(33);
+            }
+
+            int save = canvas.save();
+            canvas.clipRect(r.left + padX, r.top, r.right - padX, r.bottom);
+            canvas.drawText(text, x, baseY, textPaint);
+            canvas.restoreToCount(save);
         }
     }
 }

@@ -39,3 +39,12 @@ third_party/
 
 # CMake/AGP 构建产物
 app/.cxx/
+
+# Local device exports / secrets
+.tmp_*.xml
+*.prefs.xml
+prefs.json
+oracle-compass-backup/
+*.jks
+*.keystore
+*.p12

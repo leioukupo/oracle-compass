@@ -20,6 +20,9 @@ public class CameraStreamService extends Service {
     private static volatile String realFps = "-";
     private static volatile String fpsInfo = "";
     private static volatile String camDiag = "";
+    private static volatile boolean visionSnapshotEnabled = false;
+    private static volatile FrameSnapshot latestVisionSnapshot;
+    private static volatile long latestVisionSeq = 0;
 
     private H264Encoder encoder;
     private RtpServer rtp;
@@ -34,12 +37,30 @@ public class CameraStreamService extends Service {
     }
     private volatile FrameListener frameListener;
 
+    public static final class FrameSnapshot {
+        public final byte[] nv21;
+        public final int w;
+        public final int h;
+        public final long ptsUs;
+        public final long seq;
+
+        FrameSnapshot(byte[] nv21, int w, int h, long ptsUs, long seq) {
+            this.nv21 = nv21;
+            this.w = w;
+            this.h = h;
+            this.ptsUs = ptsUs;
+            this.seq = seq;
+        }
+    }
+
     public static String status() { return status; }
     public static String statusDetail() { return statusDetail; }
     public static String realFps() { return realFps; }
     public static String fpsInfo() { return fpsInfo; }
     public static String camDiag() { return camDiag; }
     public static boolean isRunning() { return "running".equals(status); }
+    public static boolean isStarting() { return "starting".equals(status); }
+    public static boolean isActive() { return isRunning() || isStarting(); }
 
     public static void start(Context c) {
         c.startService(new Intent(c, CameraStreamService.class));
@@ -53,6 +74,14 @@ public class CameraStreamService extends Service {
         CameraStreamService s = inst;
         if (s != null) s.frameListener = l;
         else pendingListener = l;
+    }
+
+    public static void setVisionSnapshotEnabled(boolean enabled) {
+        visionSnapshotEnabled = enabled;
+    }
+
+    public static FrameSnapshot latestVisionSnapshot() {
+        return latestVisionSnapshot;
     }
     private static volatile FrameListener pendingListener;
 
@@ -213,8 +242,11 @@ public class CameraStreamService extends Service {
                                 + " " + fpsInfo;
                     }
                 }
+                long pts = System.nanoTime() / 1000;
+                if (visionSnapshotEnabled) {
+                    latestVisionSnapshot = new FrameSnapshot(data.clone(), w, h, pts, ++latestVisionSeq);
+                }
                 try {
-                    long pts = System.nanoTime() / 1000;
                     if (encoder != null) encoder.feedRaw(data, pts);
                     WebRtcStreamer wr2 = WebRtcStreamer.get();
                     if (wr2 != null) wr2.feedFrameRaw(data, w, h, camSrcFmt);
@@ -334,6 +366,9 @@ public class CameraStreamService extends Service {
         if (rtmp != null) { try { rtmp.stop(); } catch (Exception ignored) {} rtmp = null; }
         try { WebRtcStreamer.get().teardown(); } catch (Exception ignored) {}
         try { CameraHttpStreamer.get().clear(); } catch (Exception ignored) {}
+        latestVisionSnapshot = null;
+        latestVisionSeq = 0;
+        visionSnapshotEnabled = false;
     }
 
     @Override public void onDestroy() {

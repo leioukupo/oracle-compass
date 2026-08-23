@@ -4,11 +4,20 @@ import android.content.Context;
 
 import com.magneo.compass.ConversationLog;
 import com.magneo.compass.Prefs;
+import com.magneo.compass.ProviderConfig;
+import com.magneo.compass.llm.LlmClient;
+import com.magneo.compass.netfs.FsManager;
+import com.magneo.compass.netfs.NetFs;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.Inet4Address;
@@ -17,7 +26,14 @@ import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
+import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** 本机网页设置服务：设备浏览器打开 http://127.0.0.1:8080 可配置应用（不含推流）。 */
 public class SettingsWebServer {
@@ -92,56 +108,150 @@ public class SettingsWebServer {
     private static void handle(Socket s) {
         try {
             s.setSoTimeout(15000);
-            BufferedReader r = new BufferedReader(new InputStreamReader(s.getInputStream(), "ISO-8859-1"));
-            String req = r.readLine();
+            InputStream in = s.getInputStream();
+            Request req = readRequest(in);
             if (req == null) return;
-            String[] parts = req.split(" ");
-            if (parts.length < 2) return;
-            String method = parts[0];
-            String path = parts[1].split("\\?")[0];
-
-            int len = 0;
-            String line;
-            while ((line = r.readLine()) != null && !line.isEmpty()) {
-                if (line.toLowerCase().startsWith("content-length:")) {
-                    try { len = Integer.parseInt(line.substring(15).trim()); } catch (Exception ignored) {}
-                }
-            }
+            String method = req.method;
+            String path = req.path;
             String body = "";
-            if (method.equals("POST") && len > 0) {
-                char[] buf = new char[len];
-                int off = 0;
-                while (off < len) {
-                    int n = r.read(buf, off, len - off);
-                    if (n < 0) break;
-                    off += n;
-                }
-                body = new String(buf, 0, off);
+            if (method.equals("POST") && req.contentLength > 0 && !path.equals("/appmgr/upload")) {
+                body = readBodyString(in, req.contentLength, 512 * 1024);
             }
 
             OutputStream out = s.getOutputStream();
-            if (path.equals("/")) serveHtml(out);
-            else if (path.equals("/status")) serveStatus(out);
-            else if (path.equals("/conversations")) serveConversations(out);
-            else if (path.equals("/clear_conv")) serveClearConv(out);
+            boolean authed = isAuthed(req);
+            if (path.equals("/")) serveConsoleHtml(out);
+            else if (path.equals("/status")) serveStatus(out, authed);
+            else if (path.equals("/conversations")) {
+                if (!requireAuth(out, authed)) return;
+                serveConversations(out);
+            }
+            else if (path.equals("/clear_conv")) {
+                if (!requireAuth(out, authed)) return;
+                serveClearConv(out);
+            }
             else if (path.equals("/stream")) { serveStream(s); return; }
             else if (path.equals("/h264")) { serveH264(s); return; }
             else if (path.equals("/h264fast")) { serveH264Fast(s); return; }
             else if (path.equals("/stream_state")) serveStreamState(out);
             else if (path.equals("/system_status")) serveSystemStatus(out);
-            else if (path.equals("/key")) { serveKey(out, parts[1]); return; }
-            else if (path.equals("/touch")) { serveTouch(out, parts[1]); return; }
+            else if (path.equals("/key")) {
+                if (!requireAuth(out, authed)) return;
+                serveKey(out, req.target); return;
+            }
+            else if (path.equals("/touch")) {
+                if (!requireAuth(out, authed)) return;
+                serveTouch(out, req.target); return;
+            }
             else if (path.equals("/cam")) { serveCamPage(out); }
             else if (path.equals("/camhttp")) { com.magneo.compass.cam.CameraHttpStreamer.serve(s); return; }
-            else if (path.equals("/cam/start")) { com.magneo.compass.cam.CameraStreamService.start(app); serveText(out, "正在启动摄像头推流…"); }
-            else if (path.equals("/cam/stop")) { com.magneo.compass.cam.CameraStreamService.stop(app); serveText(out, "已停止"); }
+            else if (path.equals("/cam/start")) {
+                if (!requireAuth(out, authed)) return;
+                com.magneo.compass.cam.CameraStreamService.start(app); serveText(out, "正在启动摄像头推流…");
+            }
+            else if (path.equals("/cam/stop")) {
+                if (!requireAuth(out, authed)) return;
+                com.magneo.compass.cam.CameraStreamService.stop(app); serveText(out, "已停止");
+            }
             else if (path.equals("/cam/status")) serveCamStatus(out);
             else if (path.equals("/cam/offer")) serveCamOffer(out, body);
             else if (path.equals("/cam/answer")) serveCamAnswer(out);
             else if (path.equals("/frpc/status")) serveFrpcStatus(out);
-            else if (path.equals("/frpc/start")) serveText(out, com.magneo.compass.frp.FrpcManager.start(app));
-            else if (path.equals("/frpc/stop")) serveText(out, com.magneo.compass.frp.FrpcManager.stop());
-            else if (path.equals("/save")) serveSave(out, body);
+            else if (path.equals("/frpc/start")) {
+                if (!requireAuth(out, authed)) return;
+                serveText(out, com.magneo.compass.frp.FrpcManager.start(app));
+            }
+            else if (path.equals("/frpc/stop")) {
+                if (!requireAuth(out, authed)) return;
+                serveText(out, com.magneo.compass.frp.FrpcManager.stop());
+            }
+            else if (path.equals("/adb/status")) serveJson(out, AdbManager.status(app));
+            else if (path.equals("/adb/save")) {
+                if (!authed) serveJson(out, appMgrAuthError());
+                else serveJson(out, AdbManager.save(app, body));
+            }
+            else if (path.equals("/adb/start")) {
+                if (!authed) serveJson(out, appMgrAuthError());
+                else serveJson(out, AdbManager.start(app, body));
+            }
+            else if (path.equals("/adb/stop")) {
+                if (!authed) serveJson(out, appMgrAuthError());
+                else serveJson(out, AdbManager.stop(app));
+            }
+            else if (path.equals("/appmgr/state")) serveJson(out, AppManager.state(app, req.header("x-appmgr-token")));
+            else if (path.equals("/appmgr/login")) serveJson(out, AppManager.login(app, body));
+            else if (path.equals("/appmgr/setup")) serveJson(out, AppManager.setup(app, body));
+            else if (path.equals("/appmgr/apps")) {
+                if (!authed) serveJson(out, appMgrAuthError());
+                else serveJson(out, AppManager.apps(app));
+            }
+            else if (path.equals("/appmgr/upload")) {
+                if (!authed) serveJson(out, appMgrAuthError());
+                else {
+                    s.setSoTimeout(0);
+                    serveJson(out, AppManager.upload(app, in, req.contentLength, req.header("x-file-name")));
+                }
+            }
+            else if (path.equals("/appmgr/fetch")) {
+                if (!authed) serveJson(out, appMgrAuthError());
+                else serveJson(out, AppManager.fetch(app, body));
+            }
+            else if (path.equals("/appmgr/install")) {
+                if (!authed) serveJson(out, appMgrAuthError());
+                else serveJson(out, AppManager.install(app));
+            }
+            else if (path.equals("/appmgr/uninstall")) {
+                if (!authed) serveJson(out, appMgrAuthError());
+                else serveJson(out, AppManager.uninstall(app, body));
+            }
+            else if (path.equals("/save")) {
+                if (!requireAuth(out, authed)) return;
+                serveSave(out, body);
+            }
+            else if (path.equals("/backup/export")) {
+                if (!requireAuth(out, authed)) return;
+                serveBackupExport(out);
+            }
+            else if (path.equals("/backup/restore")) {
+                if (!requireAuth(out, authed)) return;
+                serveBackupRestore(out, body);
+            }
+            else if (path.equals("/test/llm")) {
+                if (!requireAuth(out, authed)) return;
+                serveTestLlm(out);
+            }
+            else if (path.equals("/test/asr_final")) {
+                if (!requireAuth(out, authed)) return;
+                serveTestAsrFinal(out);
+            }
+            else if (path.equals("/test/tts")) {
+                if (!requireAuth(out, authed)) return;
+                serveTestTts(out);
+            }
+            else if (path.equals("/test/tts_voices")) {
+                if (!requireAuth(out, authed)) return;
+                serveTtsVoices(out);
+            }
+            else if (path.equals("/open/tts_test")) {
+                if (!requireAuth(out, authed)) return;
+                serveOpenTtsTest(out);
+            }
+            else if (path.equals("/fs/list")) {
+                if (!requireAuth(out, authed)) return;
+                serveFsList(out);
+            }
+            else if (path.equals("/fs/save")) {
+                if (!requireAuth(out, authed)) return;
+                serveFsSave(out, body);
+            }
+            else if (path.equals("/fs/remove")) {
+                if (!requireAuth(out, authed)) return;
+                serveFsRemove(out, body);
+            }
+            else if (path.equals("/fs/test")) {
+                if (!requireAuth(out, authed)) return;
+                serveFsTest(out, body);
+            }
             else serve404(out);
             out.flush();
         } catch (Exception ignored) {
@@ -150,24 +260,326 @@ public class SettingsWebServer {
         }
     }
 
+    private static Request readRequest(InputStream in) throws IOException {
+        String head = readHeaderBlock(in);
+        if (head == null || head.trim().isEmpty()) return null;
+        String[] lines = head.split("\\r?\\n");
+        if (lines.length == 0) return null;
+        String[] parts = lines[0].split(" ");
+        if (parts.length < 2) return null;
+        Map<String, String> headers = new HashMap<>();
+        for (int i = 1; i < lines.length; i++) {
+            int p = lines[i].indexOf(':');
+            if (p <= 0) continue;
+            headers.put(lines[i].substring(0, p).trim().toLowerCase(Locale.US),
+                    lines[i].substring(p + 1).trim());
+        }
+        long len = 0;
+        try { len = Long.parseLong(headers.getOrDefault("content-length", "0")); } catch (Exception ignored) {}
+        return new Request(parts[0], parts[1], headers, len);
+    }
+
+    private static String readHeaderBlock(InputStream in) throws IOException {
+        ByteArrayOutputStream b = new ByteArrayOutputStream();
+        int state = 0;
+        while (b.size() < 65536) {
+            int c = in.read();
+            if (c < 0) break;
+            b.write(c);
+            if (c == '\r') state = (state == 2) ? 3 : 1;
+            else if (c == '\n') state = (state == 1) ? 2 : (state == 3 ? 4 : 0);
+            else state = 0;
+            if (state == 4) break;
+        }
+        if (b.size() == 0) return null;
+        return new String(b.toByteArray(), "ISO-8859-1");
+    }
+
+    private static String readBodyString(InputStream in, long len, int max) throws IOException {
+        if (len <= 0) return "";
+        if (len > max) throw new IOException("请求体过大");
+        byte[] buf = new byte[(int) len];
+        int off = 0;
+        while (off < buf.length) {
+            int n = in.read(buf, off, buf.length - off);
+            if (n < 0) break;
+            off += n;
+        }
+        return new String(buf, 0, off, "UTF-8");
+    }
+
+    private static JSONObject appMgrAuthError() {
+        JSONObject o = new JSONObject();
+        try {
+            o.put("ok", false);
+            o.put("err", AppManager.hasPassword(app) ? "需要登录管理密码" : "请先设置管理密码");
+        } catch (Exception ignored) {}
+        return o;
+    }
+
+    private static boolean isAuthed(Request req) {
+        return req != null && AppManager.authorized(app, req.header("x-appmgr-token"));
+    }
+
+    private static boolean requireAuth(OutputStream out, boolean authed) throws IOException {
+        if (authed) return true;
+        serveJson(out, appMgrAuthError());
+        return false;
+    }
+
+    private static final class Request {
+        final String method;
+        final String target;
+        final String path;
+        final Map<String, String> headers;
+        final long contentLength;
+
+        Request(String method, String target, Map<String, String> headers, long contentLength) {
+            this.method = method;
+            this.target = target;
+            this.path = target.split("\\?", 2)[0];
+            this.headers = headers;
+            this.contentLength = Math.max(0, contentLength);
+        }
+
+        String header(String name) {
+            return headers.get(name.toLowerCase(Locale.US));
+        }
+    }
+
+    private static void serveConsoleHtml(OutputStream out) throws IOException {
+        StringBuilder h = new StringBuilder(60000);
+        h.append("<!DOCTYPE html><html><head><meta charset='utf-8'>")
+                .append("<meta name='viewport' content='width=device-width,initial-scale=1'>")
+                .append("<title>真理罗盘 · 远程控制台</title>")
+                .append("<style>")
+                .append(":root{--bg:#1b150f;--panel:#251d14;--panel2:#2d2418;--gold:#d4af37;--gold2:#9b7b2e;--red:#7e2924;--cyan:#52c9d8;--text:#f0e3c7;--dim:#ad9f86;--ok:#93c973;--bad:#e06d5f}")
+                .append("*{box-sizing:border-box}body{margin:0;background-color:var(--bg);background-image:linear-gradient(180deg,#2a2116 0%,#21190f 34%,#1b150f 100%);background-attachment:fixed;color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:18px 18px 92px}")
+                .append(".wrap{max-width:1180px;margin:0 auto}.hero{display:flex;gap:14px;align-items:flex-end;justify-content:space-between;margin-bottom:14px}.title h1{margin:0;color:var(--gold);font-size:24px;letter-spacing:0}.title p{margin:4px 0 0;color:var(--dim);font-size:13px}")
+                .append(".pill{border:1px solid rgba(212,175,55,.45);border-radius:999px;padding:7px 12px;background:rgba(40,31,19,.72);color:var(--gold);font-size:12px;white-space:nowrap}")
+                .append(".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:10px}.chip{border:1px solid rgba(181,139,48,.32);border-radius:12px;background:rgba(43,33,20,.58);padding:10px;min-height:58px}.chip span{display:block;color:var(--dim);font-size:11px}.chip b{display:block;color:var(--gold);font-size:16px;margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chip.ok b{color:var(--ok)}.chip.bad b{color:var(--bad)}")
+                .append(".card,.panel{border:1px solid rgba(181,139,48,.38);border-radius:14px;background:rgba(37,29,20,.72);box-shadow:0 12px 32px rgba(32,22,10,.22);padding:14px;margin:12px 0}.auth{max-width:560px;margin:20px auto}.tabs{position:sticky;top:0;z-index:5;display:flex;gap:8px;overflow-x:auto;background:rgba(27,21,15,.92);border-bottom:1px solid rgba(181,139,48,.25);padding:10px 0;margin-top:10px}.tab{background:rgba(41,32,20,.68);color:var(--dim);border:1px solid rgba(181,139,48,.34);border-radius:999px;padding:9px 14px;cursor:pointer;white-space:nowrap}.tab.active{color:#1b150f;background:var(--gold);border-color:var(--gold)}")
+                .append(".panel{display:none}.panel.active{display:block}.sectionTitle{display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid rgba(181,139,48,.22);margin:-2px 0 12px;padding-bottom:10px}.sectionTitle h2{margin:0;color:var(--gold);font-size:18px}.sectionTitle small{color:var(--dim)}")
+                .append(".cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.box{border:1px solid rgba(181,139,48,.24);border-radius:12px;background:rgba(32,25,17,.52);padding:12px}.box h3{margin:0 0 10px;color:#dec98f;font-size:15px}.row{display:grid;grid-template-columns:130px 1fr;gap:10px;align-items:center;margin:8px 0}.row label{color:var(--gold);font-size:13px}.hint{color:var(--dim);font-size:11px;line-height:1.5}.state{color:var(--cyan);font-size:12px}.danger{color:var(--bad)}")
+                .append("input,select,textarea{width:100%;background:rgba(29,22,15,.82);color:var(--text);border:1px solid rgba(181,139,48,.42);border-radius:9px;padding:8px;font:inherit;font-size:13px}textarea{min-height:92px;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace}.inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.inline input[type=checkbox]{width:auto}.checkrow{display:flex;gap:8px;align-items:center;color:var(--dim);font-size:13px;margin:8px 0}.checkrow input{width:auto}")
+                .append("button{background:var(--gold);color:#1b150f;border:0;border-radius:9px;padding:8px 13px;margin:3px;cursor:pointer;font-weight:600}button.secondary{background:rgba(41,32,20,.68);color:var(--gold);border:1px solid rgba(181,139,48,.42)}button.danger{background:#5d2a22;color:#f5d9d2;border:1px solid #925044}button:disabled{opacity:.45;cursor:default}")
+                .append("pre,.log{background:rgba(25,19,13,.72);border:1px solid rgba(181,139,48,.24);border-radius:10px;color:#9ed17d;padding:9px;max-height:220px;overflow:auto;white-space:pre-wrap;font-size:12px;line-height:1.45}.list{border:1px solid rgba(181,139,48,.24);border-radius:10px;overflow:hidden;background:rgba(27,21,15,.58)}.item{display:flex;gap:10px;align-items:center;padding:9px;border-bottom:1px solid rgba(181,139,48,.16)}.item:last-child{border-bottom:0}.item .main{flex:1;min-width:0}.item b{color:var(--gold)}.item small{display:block;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mini{font-size:11px;color:var(--dim)}")
+                .append("details{border:1px solid rgba(181,139,48,.24);border-radius:12px;background:rgba(32,25,17,.48);padding:9px;margin:10px 0}summary{cursor:pointer;color:var(--gold)}.preview{width:min(92mm,88vw);height:min(92mm,88vw);border-radius:50%;border:1px solid rgba(181,139,48,.42);background:#15110c;display:block;margin:10px auto;object-fit:cover}.savebar{position:fixed;left:0;right:0;bottom:0;background:rgba(29,23,16,.96);border-top:1px solid rgba(181,139,48,.34);padding:10px 18px;z-index:10}.savebar .inner{max-width:1180px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:10px}.hidden{display:none!important}a{color:var(--gold)}")
+                .append("@media(max-width:720px){body{padding:12px 12px 92px}.hero{display:block}.row{grid-template-columns:1fr}.tabs{top:0}.cols{grid-template-columns:1fr}.savebar .inner{align-items:flex-start;flex-direction:column}}")
+                .append("</style></head><body><div class='wrap'>")
+                .append("<header class='hero'><div class='title'><h1>真理罗盘 · 远程控制台</h1><p>配置、链路测试、备份恢复和设备运维集中在这里。</p></div><div class='pill' id='authBadge'>未登录</div></header>")
+                .append("<div class='grid' id='overview'>")
+                .append("<div class='chip ok'><span>设备</span><b id='ovDevice'>在线</b></div>")
+                .append("<div class='chip'><span>FRPC</span><b id='ovFrpc'>未知</b></div>")
+                .append("<div class='chip'><span>ADB</span><b id='ovAdb'>未知</b></div>")
+                .append("<div class='chip'><span>常驻监听</span><b id='ovVad'>未知</b></div>")
+                .append("<div class='chip'><span>ASR</span><b id='ovAsr'>未知</b></div>")
+                .append("<div class='chip'><span>Final ASR</span><b id='ovAsrFinal'>未知</b></div>")
+                .append("<div class='chip'><span>LLM Key</span><b id='ovLlm'>未知</b></div>")
+                .append("<div class='chip'><span>TTS</span><b id='ovTts'>未知</b></div>")
+                .append("</div>")
+                .append("<div class='card auth' id='authPanel'><div class='sectionTitle'><h2>管理登录</h2><small id='authHelp'>公网访问时需要先登录</small></div>")
+                .append("<div class='row'><label>管理密码</label><input type='password' id='appPwd' autocomplete='current-password'></div>")
+                .append("<div class='row'><label>旧密码</label><input type='password' id='appOldPwd' autocomplete='current-password' placeholder='修改密码时填写'></div>")
+                .append("<div class='inline'><button type='button' onclick='appLogin()'>登录</button><button type='button' class='secondary' onclick='appSetup()'>设置/修改密码</button><span class='state' id='appAuth'></span></div>")
+                .append("</div>")
+                .append("<div id='console' class='hidden'>")
+                .append("<nav class='tabs'>")
+                .append("<button type='button' class='tab active' data-tab='model'>大模型</button>")
+                .append("<button type='button' class='tab' data-tab='voice'>语音链路</button>")
+                .append("<button type='button' class='tab' data-tab='vision'>视觉/摄像头</button>")
+                .append("<button type='button' class='tab' data-tab='browser'>浏览器/网盘</button>")
+                .append("<button type='button' class='tab' data-tab='remote'>FRP/ADB</button>")
+                .append("<button type='button' class='tab' data-tab='apps'>应用管理</button>")
+                .append("<button type='button' class='tab' data-tab='records'>记录/备份</button>")
+                .append("</nav>")
+                .append("<form id='f' onsubmit='save();return false'>")
+                .append("<section class='panel active' id='tab-model'><div class='sectionTitle'><h2>大模型</h2><small>Key 留空表示保持当前值</small></div><div class='cols'><div class='box'><h3>模型入口</h3>")
+                .append(rowSelect("Provider", "provider", "provider", "<option value='deepseek'>deepseek</option><option value='openai兼容'>openai兼容</option>", "providerChanged()"))
+                .append(rowInput("API Key", "apiKey", "password", "留空=保持当前 Key"))
+                .append("<div class='row'><label></label><div class='inline'><span class='state' id='apiKeyState'>未知</span><label class='checkrow'><input type='checkbox' name='clearApiKey'>清空 Key</label></div></div>")
+                .append(rowInput("公共 Base", "baseUrl", "text", "https://api.deepseek.com/v1"))
+                .append(rowInput("文本 Base", "textBaseUrl", "text", "留空=公共 Base URL"))
+                .append(rowInput("文本模型", "textModel", "text", "deepseek-chat"))
+                .append(rowInput("视觉 Base", "visionBaseUrl", "text", "留空=公共 Base URL"))
+                .append(rowInput("视觉模型", "visionModel", "text", "gpt-4.1-mini"))
+                .append("</div><div class='box'><h3>生成参数</h3>")
+                .append(rowSelect("思考强度", "reasoningEffort", null, "<option value='auto'>自动</option><option value='none'>禁止思考</option><option value='low'>低</option><option value='medium'>中</option><option value='high'>高</option><option value='max'>最大</option>", null))
+                .append(rowInput("文本 MaxToken", "textMaxTokens", "text", "0=服务默认"))
+                .append(rowInput("语音 MaxToken", "voiceMaxTokens", "text", "长故事可设 1500/2048"))
+                .append(rowInput("视觉 MaxToken", "visionMaxTokens", "text", "0=服务默认"))
+                .append(rowInput("文本温度", "textTemperature", "text", "0.0-2.0"))
+                .append(rowInput("语音温度", "voiceTemperature", "text", "0.0-2.0"))
+                .append(rowInput("视觉温度", "visionTemperature", "text", "0.0-2.0"))
+                .append("<div class='inline'><button type='button' onclick=\"runTest('llm')\">测试 LLM</button><span class='state' id='testLlm'></span></div>")
+                .append("<p class='hint'>DeepSeek 禁止思考会写入 thinking disabled；OpenAI 兼容格式使用 reasoning_effort。</p>")
+                .append("</div></div></section>")
+                .append("<section class='panel' id='tab-voice'><div class='sectionTitle'><h2>语音链路</h2><small>ASR / LLM / TTS 分段排障</small></div><div class='cols'><div class='box'><h3>ASR 与监听</h3>")
+                .append(rowInput("语音 API Key", "voiceApiKey", "password", "留空=复用/保持当前语音 Key"))
+                .append("<div class='row'><label></label><div class='inline'><span class='state' id='voiceKeyState'>未知</span><label class='checkrow'><input type='checkbox' name='clearVoiceApiKey'>清空语音 Key</label></div></div>")
+                .append(rowInput("ASR 地址", "asrUrl", "text", "ws://host:port 或 http://host:port/"))
+                .append(rowInput("最终 ASR", "asrFinalUrl", "text", "http://host:port/ 或 /api/v1/asr"))
+                .append(rowInput("ASR 模型", "asrModel", "text", "whisper-1 / 服务默认"))
+                .append(rowCheckbox("常驻监听", "vadEnabled", "启动后持续听外部语音"))
+                .append(rowInput("VAD 灵敏度", "vadSensitivity", "text", "600"))
+                .append(rowSelect("打断模式", "bargeMode", null, "<option value='steady'>稳健</option><option value='sensitive'>灵敏</option><option value='off'>关闭</option>", null))
+                .append("<div class='inline'><button type='button' onclick=\"runTest('asr')\">测试 Final ASR</button><span class='state' id='testAsr'></span></div>")
+                .append("</div><div class='box'><h3>TTS</h3>")
+                .append(rowInput("TTS 地址", "ttsUrl", "text", "http://host:port/"))
+                .append(rowInput("TTS 模型", "ttsModel", "text", "cosyvoice-v3"))
+                .append("<div class='row'><label>TTS 音色</label><div><input type='text' name='ttsVoice' list='ttsVoiceList'><datalist id='ttsVoiceList'></datalist></div></div>")
+                .append(rowCheckbox("本地优先", "localTtsFirst", "关闭时不静默切本地 TTS"))
+                .append("<div class='inline'><button type='button' onclick=\"runTest('voices')\">查询音色</button><button type='button' onclick=\"runTest('tts')\">测试 TTS</button><button type='button' class='secondary' onclick='openTtsSelfTest()'>打开设备自检页</button><span class='state' id='testTts'></span></div>")
+                .append("<h3 style='margin-top:16px'>语音系统提示词</h3><textarea name='sysPromptVoice'></textarea>")
+                .append("</div></div></section>")
+                .append("<section class='panel' id='tab-vision'><div class='sectionTitle'><h2>视觉 / 摄像头</h2><small>默认折叠高开销推流预览</small></div><div class='cols'><div class='box'><h3>灵眼</h3>")
+                .append(rowInput("视觉间隔秒", "visionInterval", "text", "2"))
+                .append(rowSelect("灵眼画面源", "visionFrameSource", null, "<option value='hal'>HAL直出</option><option value='rtsp'>RTSP同源</option>", null))
+                .append("<h3 style='margin-top:16px'>视觉系统提示词</h3><textarea name='sysPromptVision'></textarea>")
+                .append("</div><div class='box'><h3>摄像头推流</h3>")
+                .append(rowSelect("摄像头", "camId", null, "<option value='0'>后置</option><option value='1'>前置</option>", null))
+                .append("<div class='row'><label>分辨率</label><div class='inline'><select name='camWidth'><option>640</option><option>800</option><option>1280</option></select><select name='camHeight'><option>480</option><option>800</option><option>720</option></select></div></div>")
+                .append(rowSelect("帧率", "camFps", null, "<option>24</option>", null))
+                .append(rowSelect("码率(Kbps)", "camBitrate", null, "<option>2000</option><option>4000</option><option>5000</option><option>6000</option><option>8000</option><option>12000</option><option>20000</option>", null))
+                .append(rowInput("RTSP 端口", "rtspPort", "text", "8554"))
+                .append(rowInput("RTMP 地址", "rtmpUrl", "text", "rtmp://VPS:1935/cam/stream"))
+                .append(rowCheckbox("开机推流", "camAutoStart", "应用启动时自动开始摄像头推流"))
+                .append("<div class='inline'><button type='button' onclick='camToggle()' id='camBtn'>启动推流</button><span class='state' id='camMsg'></span></div><p class='hint'>状态：<span id='camState'>未知</span></p><div class='hint' id='camUrls'></div>")
+                .append("</div></div><details><summary>屏幕推流与远程触摸</summary><div class='cols'><div class='box'>")
+                .append(rowSelect("推流方式", "streamMode", null, "<option value='h264'>H.264 硬编</option><option value='h264fast'>H.264 高速</option><option value='mjpeg'>MJPEG 兼容</option>", null))
+                .append(rowSelect("帧率(fps)", "streamFps", null, "<option>1</option><option>2</option><option>3</option><option>5</option>", null))
+                .append(rowSelect("码率(Kbps)", "streamBitrate", null, "<option value='600'>600</option><option value='1000'>1000</option><option value='1500'>1500</option><option value='2500'>2500</option><option value='4000'>4000</option><option value='6000'>6000</option><option value='8000'>8000</option>", null))
+                .append(rowSelect("画质(MJPEG)", "streamQuality", null, "<option value='30'>低</option><option value='55'>中</option><option value='75'>高</option>", null))
+                .append(rowSelect("尺寸(MJPEG)", "streamScale", null, "<option value='2'>半尺寸</option><option value='1'>原始</option>", null))
+                .append("<div class='inline'><button type='button' onclick='toggleStream()' id='sbtn'>开始屏幕预览</button><button type='button' class='secondary' onclick='keyEvent(4)'>返回</button><button type='button' class='secondary' onclick='keyEvent(3)'>桌面</button><button type='button' class='secondary' onclick='keyEvent(187)'>最近</button></div><p class='state' id='sstate'></p>")
+                .append("</div><div class='box'><img id='screen' class='preview' style='display:none'><div id='touchpad' class='preview' style='display:none;cursor:crosshair;touch-action:none;user-select:none'></div><p class='hint' id='tstat'>MJPEG 兼容预览可远程点击/拖动圆面。</p></div></div></details>")
+                .append("</section>")
+                .append("<section class='panel' id='tab-browser'><div class='sectionTitle'><h2>浏览器 / 网盘</h2><small>圆屏浏览和网络文件配置</small></div><div class='cols'><div class='box'><h3>浏览器</h3>")
+                .append(rowInput("搜索引擎", "searchEngine", "text", "https://www.bing.com/search?q=%s"))
+                .append(rowCheckbox("圆屏适配", "browserRoundFit", "网页默认避开圆屏四角"))
+                .append(rowCheckbox("无图模式", "noImages", "减少加载流量"))
+                .append(rowCheckbox("桌面 UA", "uaDesktop", "请求桌面版网页"))
+                .append(rowCheckbox("忽略 SSL", "ignoreSsl", "仅用于证书异常站点"))
+                .append("</div><div class='box'><h3>网盘连接</h3><div id='fsList' class='list'></div>")
+                .append("<h3 style='margin-top:14px'>编辑连接</h3><input type='hidden' id='fsId'>")
+                .append(fsRow("名称", "fsName", "自动命名可留空"))
+                .append("<div class='row'><label>类型</label><select id='fsType'><option>FTP</option><option>WebDAV</option><option>SMB</option><option>NFS</option></select></div>")
+                .append(fsRow("主机", "fsHost", "dav.example.com"))
+                .append(fsRow("端口", "fsPort", "WebDAV 默认 443"))
+                .append(fsRow("用户", "fsUser", ""))
+                .append("<div class='row'><label>密码</label><input type='password' id='fsPass' placeholder='留空=保持旧密码'></div>")
+                .append(fsRow("根路径", "fsRoot", "/dav 或留空"))
+                .append(fsRow("SMB 域", "fsDomain", "可留空"))
+                .append("<div class='inline'><button type='button' onclick='fsSave()'>保存连接</button><button type='button' class='secondary' onclick='fsTest()'>测试连接</button><button type='button' class='secondary' onclick='fsNew()'>新建</button><span class='state' id='fsMsg'></span></div>")
+                .append("</div></div></section>")
+                .append("<section class='panel' id='tab-remote'><div class='sectionTitle'><h2>FRP / ADB</h2><small>远程访问与安装通道</small></div><div class='cols'><div class='box'><h3>frpc.toml</h3><textarea name='frpcConfig' style='min-height:260px'></textarea><p class='hint'>保存后点启动 frpc。APK 安装优先走应用管理上传，不走 adb install 传文件。</p><div class='inline'><button type='button' onclick='frpcStart()'>启动 frpc</button><button type='button' class='secondary' onclick='frpcStop()'>停止 frpc</button><span class='state' id='frpcMsg'></span></div><p class='hint'>状态：<span id='frpcState'>未知</span><span id='frpcStateDetail'></span></p><pre id='frpcLog'></pre></div>")
+                .append("<div class='box'><h3>ADB TCP</h3><div class='row'><label>ADB 端口</label><input type='text' id='adbPort' value='5555'></div><label class='checkrow'><input type='checkbox' id='adbAuto'>开机自启 ADB TCP</label><div class='inline'><button type='button' onclick='adbSave()'>保存自启</button><button type='button' onclick='adbStart()'>启动 ADB TCP</button><button type='button' class='secondary' onclick='adbStop()'>关闭 ADB TCP</button><span class='state' id='adbMsg'></span></div><p class='hint'>状态：<span id='adbState'>未知</span><span id='adbDetail'></span></p><pre id='adbLog'></pre></div></div></section>")
+                .append("<section class='panel' id='tab-apps'><div class='sectionTitle'><h2>应用管理</h2><small>上传 APK 后设备本地安装</small></div><div class='cols'><div class='box'><h3>安装 APK</h3><div class='row'><label>APK 文件</label><input type='file' id='appApk' accept='.apk,application/vnd.android.package-archive'></div><div class='row'><label>APK 下载地址</label><input type='text' id='appFetchUrl' placeholder='https://.../app.apk 或 ftp://...'></div><div class='inline'><button type='button' onclick='appUpload()'>上传 APK</button><button type='button' class='secondary' onclick='appFetch()'>从 URL 拉取</button><button type='button' id='appInstallBtn' onclick='appInstall()' disabled>安装上传的 APK</button></div><p class='state' id='appUploadMsg'></p><p class='hint' id='appUploadInfo'></p><pre id='appTaskLog'></pre></div>")
+                .append("<div class='box'><h3>已安装应用</h3><div class='row'><label>搜索应用</label><input type='text' id='appSearch' oninput='renderApps()'></div><div class='inline'><button type='button' class='secondary' onclick='loadApps()'>刷新应用</button><span class='hint' id='appCount'></span></div><div id='appList' class='list'></div></div></div></section>")
+                .append("<section class='panel' id='tab-records'><div class='sectionTitle'><h2>记录 / 备份</h2><small>排障与恢复</small></div><div class='cols'><div class='box'><h3>对话记录</h3>")
+                .append(rowInput("大小上限(KB)", "convMaxKb", "text", "1024"))
+                .append(rowInput("清理间隔(分钟)", "convCleanMin", "text", "60"))
+                .append("<div class='row'><label>过滤角色</label><select id='convFilter' onchange='loadConv()'><option value='all'>全部</option><option value='user'>用户</option><option value='assistant'>AI</option><option value='heard'>听见</option><option value='error'>错误</option></select></div><div class='inline'><button type='button' class='danger' onclick='clearConv()'>清空记录</button><span class='state' id='convMsg'></span></div><div id='conv' class='log'></div></div>")
+                .append("<div class='box'><h3>配置备份</h3><div class='inline'><button type='button' onclick='backupExport()'>导出当前配置</button><button type='button' class='secondary' onclick='backupRestore()'>从下面内容恢复</button><span class='state' id='backupMsg'></span></div><textarea id='backupContent' placeholder='导出后会显示 JSON；也可以粘贴旧 prefs.json 后恢复。' style='min-height:320px'></textarea></div></div></section>")
+                .append("</form></div></div>")
+                .append("<div class='savebar hidden' id='savebar'><div class='inner'><div><b id='dirtyState'>未修改</b><div class='hint'>保存前自动导出备份；Key 留空不会覆盖旧值。</div></div><div><button type='button' onclick='save()'>保存设置</button><span class='state' id='msg'></span></div></div></div>")
+                .append("<script>")
+                .append("var token=sessionStorage.getItem('appmgrToken')||'',started=false,dirty=false,appApps=[],fsConns=[],convCache=null,streamOn=false;")
+                .append("function q(s){return document.querySelector(s)}function qa(s){return document.querySelectorAll(s)}")
+                .append("function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\\"/g,'&quot;').replace(/'/g,'&#39;')}")
+                .append("function enc(o){var a=[];for(var k in o)a.push(encodeURIComponent(k)+'='+encodeURIComponent(o[k]==null?'':o[k]));return a.join('&')}")
+                .append("function hdr(x){if(token)x.setRequestHeader('X-AppMgr-Token',token)}")
+                .append("function api(m,u,b,cb,ct){var x=new XMLHttpRequest();x.open(m,u,true);hdr(x);if(ct)x.setRequestHeader('Content-Type',ct);x.onload=function(){var d=null;try{d=JSON.parse(x.responseText)}catch(e){d={ok:false,err:x.responseText||'请求失败'}}if(cb)cb(d,x)};x.onerror=function(){if(cb)cb({ok:false,err:'网络错误'},x)};x.send(b||null)}")
+                .append("function textApi(m,u,b,cb,ct){var x=new XMLHttpRequest();x.open(m,u,true);hdr(x);if(ct)x.setRequestHeader('Content-Type',ct);x.onload=function(){if(cb)cb(x.responseText,x)};x.onerror=function(){if(cb)cb('网络错误',x)};x.send(b||null)}")
+                .append("function chip(id,text,ok,bad){var e=q('#'+id);if(!e)return;e.textContent=text||'未知';var c=e.parentNode;c.className='chip'+(ok?' ok':'')+(bad?' bad':'')}")
+                .append("function boot(){wireTabs();wireDirty();publicStatus();authState();setInterval(publicStatus,3000)}")
+                .append("function authState(){api('GET','/appmgr/state',null,function(d){var p=q('#authPanel'),c=q('#console'),b=q('#authBadge'),h=q('#authHelp');if(!d||!d.ok){b.textContent='未登录';return}if(!d.hasPassword){h.textContent='首次使用请设置管理密码';b.textContent='未设置密码';p.classList.remove('hidden');c.classList.add('hidden');return}if(d.authed){b.textContent='已登录';p.classList.add('hidden');c.classList.remove('hidden');q('#savebar').classList.remove('hidden');if(!started){started=true;initConsole()}}else{b.textContent='未登录';p.classList.remove('hidden');c.classList.add('hidden');q('#savebar').classList.add('hidden')}})}")
+                .append("function appLogin(){api('POST','/appmgr/login',enc({password:q('#appPwd').value}),function(d){if(d&&d.ok){token=d.token;sessionStorage.setItem('appmgrToken',token);q('#appPwd').value='';msg('appAuth','已登录');authState()}else msg('appAuth',d&&d.err?d.err:'登录失败')},'application/x-www-form-urlencoded')}")
+                .append("function appSetup(){api('POST','/appmgr/setup',enc({password:q('#appPwd').value,oldPassword:q('#appOldPwd').value}),function(d){if(d&&d.ok){token=d.token;sessionStorage.setItem('appmgrToken',token);q('#appPwd').value='';q('#appOldPwd').value='';msg('appAuth','管理密码已保存');authState()}else msg('appAuth',d&&d.err?d.err:'设置失败')},'application/x-www-form-urlencoded')}")
+                .append("function msg(id,t){var e=q('#'+id);if(e)e.textContent=t||''}")
+                .append("function publicStatus(){api('GET','/status',null,function(d){if(d){chip('ovVad',d.vadEnabled?'开启':'关闭',!!d.vadEnabled,!d.vadEnabled);chip('ovAsr',d.asrUrlSet?'已配置':'未配置',!!d.asrUrlSet,!d.asrUrlSet);chip('ovAsrFinal',d.asrFinalUrlSet?'已配置':'未配置',!!d.asrFinalUrlSet,false);chip('ovLlm',d.apiKeySet?d.apiKeyMask:'未设置',!!d.apiKeySet,!d.apiKeySet);chip('ovTts',d.ttsUrlSet?'已配置':'未配置',!!d.ttsUrlSet,!d.ttsUrlSet)}});api('GET','/frpc/status',null,function(d){if(d)chip('ovFrpc',d.status==='running'?'运行中':(d.status==='error'?'异常':'停止'),d.status==='running',d.status==='error')});api('GET','/adb/status',null,function(d){if(d)chip('ovAdb',d.running?'运行中':'未监听',!!d.running,false)})}")
+                .append("function initConsole(){loadStatus();frpcRefresh();camRefresh();adbStatus();appState();fsList();loadConv();setInterval(function(){frpcRefresh();camRefresh();adbStatus();appState()},3000);setInterval(loadConv,4000)}")
+                .append("function wireTabs(){var bs=qa('.tab');for(var i=0;i<bs.length;i++)bs[i].onclick=function(){var id=this.getAttribute('data-tab');var b=qa('.tab'),p=qa('.panel');for(var j=0;j<b.length;j++)b[j].classList.remove('active');for(var k=0;k<p.length;k++)p[k].classList.remove('active');this.classList.add('active');q('#tab-'+id).classList.add('active')}}")
+                .append("function wireDirty(){var f=q('#f');if(!f)return;var es=f.querySelectorAll('input,textarea,select');for(var i=0;i<es.length;i++){es[i].addEventListener('input',markDirty);es[i].addEventListener('change',markDirty)}}")
+                .append("function markDirty(){dirty=true;q('#dirtyState').textContent='有未保存修改';q('#dirtyState').style.color='var(--gold)'}function clean(){dirty=false;q('#dirtyState').textContent='已保存';q('#dirtyState').style.color='var(--ok)'}")
+                .append("function loadStatus(){api('GET','/status',null,function(d){if(!d||!d.authed){authState();return}for(var k in d){var e=q('[name=\"'+k+'\"]');if(!e)continue;if(e.type==='checkbox')e.checked=(d[k]===true||d[k]==='true');else if(k!=='apiKey'&&k!=='voiceApiKey')e.value=d[k]}q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';msg('apiKeyState',d.apiKeySet?'当前 '+d.apiKeyMask:'当前未设置');msg('voiceKeyState',d.voiceApiKeySet?'当前 '+d.voiceApiKeyMask:'当前未设置');clean()})}")
+                .append("function providerChanged(){var p=q('#provider').value;if(p==='deepseek'){q('[name=baseUrl]').value='https://api.deepseek.com/v1';q('[name=textModel]').value='deepseek-chat';if(!q('[name=visionModel]').value)q('[name=visionModel]').value='deepseek-chat';q('[name=textBaseUrl]').value='';q('[name=visionBaseUrl]').value=''}else{if(q('[name=baseUrl]').value==='https://api.deepseek.com/v1')q('[name=baseUrl]').value='';if(!q('[name=textModel]').value||q('[name=textModel]').value==='deepseek-chat')q('[name=textModel]').value='gpt-4.1-mini'}}")
+                .append("function save(){var fd=new FormData(q('#f')),b=new URLSearchParams(fd),c=q('#f').querySelectorAll('input[type=checkbox]');for(var i=0;i<c.length;i++)b.set(c[i].name,c[i].checked?'true':'false');textApi('POST','/save',b.toString(),function(t){msg('msg',t);if(t.indexOf('已保存')>=0){q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';q('[name=clearApiKey]').checked=false;q('[name=clearVoiceApiKey]').checked=false;clean();loadStatus()}},'application/x-www-form-urlencoded')}")
+                .append("function runTest(kind){var map={llm:['/test/llm','testLlm'],asr:['/test/asr_final','testAsr'],tts:['/test/tts','testTts'],voices:['/test/tts_voices','testTts']},m=map[kind];if(!m)return;msg(m[1],'测试中...');api('GET',m[0],null,function(d){if(kind==='voices'&&d&&d.ok){var dl=q('#ttsVoiceList');dl.innerHTML='';for(var i=0;i<(d.voices||[]).length;i++){var op=document.createElement('option');op.value=d.voices[i];dl.appendChild(op)}msg(m[1],'音色 '+(d.voices||[]).length+' 个 · '+d.ms+'ms');return}msg(m[1],d&&d.ok?('成功 '+(d.ms||0)+'ms '+(d.text||d.contentType||'')+(d.bytes?(' · '+fmtBytes(d.bytes)):'')+(d.retry?' · 已重试':'')+(d.note?' · '+d.note:'')):('失败 '+(d&&d.err?d.err:'未知错误')))})}")
+                .append("function openTtsSelfTest(){msg('testTts','正在打开设备页面...');api('POST','/open/tts_test','',function(d){msg('testTts',d&&d.ok?'已打开设备自检页':('打开失败 '+(d&&d.err?d.err:'未知错误')))},'application/x-www-form-urlencoded')}")
+                .append("function frpcRefresh(){api('GET','/frpc/status',null,function(d){if(!d)return;msg('frpcState',d.status==='running'?'运行中':(d.status==='error'?'异常':'已停止'));msg('frpcStateDetail',d.detail?' · '+d.detail:'');var l=q('#frpcLog');if(l){l.textContent=d.log||'';l.scrollTop=l.scrollHeight}})}")
+                .append("function frpcStart(){textApi('GET','/frpc/start',null,function(t){msg('frpcMsg',t);frpcRefresh()})}function frpcStop(){textApi('GET','/frpc/stop',null,function(t){msg('frpcMsg',t);frpcRefresh()})}")
+                .append("function adbStatus(){api('GET','/adb/status',null,function(d){if(!d)return;if(document.activeElement!==q('#adbPort'))q('#adbPort').value=d.port||5555;q('#adbAuto').checked=!!d.autoStart;msg('adbState',d.running?'运行中':'未监听');msg('adbDetail',' · 端口 '+(d.port||'--')+' · service='+(d.servicePort||'')+' · persist='+(d.persistPort||''));var l=q('#adbLog');if(l)l.textContent=d.log||''})}")
+                .append("function adbBody(){return enc({port:q('#adbPort').value,autoStart:q('#adbAuto').checked?'true':'false'})}function adbSave(){api('POST','/adb/save',adbBody(),function(d){msg('adbMsg',d&&d.ok?'已保存':(d&&d.err?d.err:'失败'));adbStatus()},'application/x-www-form-urlencoded')}function adbStart(){if(!confirm('启动 ADB TCP 会重启 adbd，继续？'))return;api('POST','/adb/start',adbBody(),function(d){msg('adbMsg',d&&d.ok?(d.msg||'已启动'):(d&&d.err?d.err:'失败'));adbStatus()},'application/x-www-form-urlencoded')}function adbStop(){if(!confirm('关闭 ADB TCP 会断开远程 ADB，继续？'))return;api('POST','/adb/stop','',function(d){msg('adbMsg',d&&d.ok?(d.msg||'已关闭'):(d&&d.err?d.err:'失败'));setTimeout(adbStatus,1500)},'application/x-www-form-urlencoded')}")
+                .append("function camRefresh(){api('GET','/cam/status',null,function(d){if(!d)return;msg('camState',d.status==='running'?('运行中 · '+(d.detail||'')):d.status);q('#camBtn').textContent=d.status==='running'?'停止推流':'启动推流';q('#camUrls').innerHTML=(d.rtsp?'<div>RTSP: '+esc(d.rtsp)+'</div>':'')+(d.rtmpUrl?'<div>RTMP: '+esc(d.rtmpUrl)+'</div>':'')+(d.webrtc?'<div>WebRTC: '+esc(d.webrtc)+'</div>':'')+(d.realFps?'<div>实际帧率: '+esc(d.realFps)+' fps</div>':'')})}")
+                .append("function camToggle(){api('GET','/cam/status',null,function(d){if(d&&d.status==='running')textApi('GET','/cam/stop',null,function(t){msg('camMsg',t);setTimeout(camRefresh,500)});else textApi('GET','/cam/start',null,function(t){msg('camMsg',t);setTimeout(camRefresh,1500)})})}")
+                .append("function toggleStream(){var img=q('#screen'),tp=q('#touchpad'),st=q('#sstate');streamOn=!streamOn;if(streamOn){img.src='/stream';img.style.display='block';tp.style.display='block';q('#sbtn').textContent='停止屏幕预览';st.textContent='MJPEG 预览中'}else{img.src='';img.style.display='none';tp.style.display='none';q('#sbtn').textContent='开始屏幕预览';st.textContent=''}}")
+                .append("function keyEvent(code){textApi('GET','/key?code='+code,null,function(){msg('tstat','已发送按键 '+code);setTimeout(function(){msg('tstat','')},1200)})}")
+                .append("var tp=q('#touchpad'),td={on:false,moved:false,x:0,y:0,lx:0,ly:0,last:0};function tPos(ev){var r=tp.getBoundingClientRect(),cx=(ev.clientX-r.left)/r.width,cy=(ev.clientY-r.top)/r.height,dx=cx-.5,dy=cy-.5;if(dx*dx+dy*dy>.25)return null;return{x:Math.max(0,Math.min(800,Math.round(cx*800))),y:Math.max(0,Math.min(800,Math.round(cy*800)))}}function tSend(qs){textApi('GET','/touch?'+qs,null,function(){})}if(tp){tp.addEventListener('pointerdown',function(ev){ev.preventDefault();var p=tPos(ev);if(!p)return;td.on=true;td.moved=false;td.x=p.x;td.y=p.y;td.lx=p.x;td.ly=p.y;td.last=0});tp.addEventListener('pointermove',function(ev){ev.preventDefault();if(!td.on)return;var p=tPos(ev);if(!p)return;if(!td.moved&&Math.abs(p.x-td.x)+Math.abs(p.y-td.y)<10)return;td.moved=true;var now=Date.now();if(now-td.last>70){tSend('act=move&x='+p.x+'&y='+p.y+'&px='+td.lx+'&py='+td.ly);td.lx=p.x;td.ly=p.y;td.last=now}});function tend(){if(!td.on)return;td.on=false;if(!td.moved)tSend('act=tap&x='+td.x+'&y='+td.y)}tp.addEventListener('pointerup',tend);tp.addEventListener('pointercancel',tend)}")
+                .append("function fsBody(){return enc({id:q('#fsId').value,name:q('#fsName').value,type:q('#fsType').value,host:q('#fsHost').value,port:q('#fsPort').value,user:q('#fsUser').value,pass:q('#fsPass').value,root:q('#fsRoot').value,domain:q('#fsDomain').value})}")
+                .append("function fsList(){api('GET','/fs/list',null,function(d){if(!d||!d.ok)return;fsConns=d.connections||[];var h='';for(var i=0;i<fsConns.length;i++){var c=fsConns[i];h+='<div class=\"item\"><div class=\"main\"><b>'+esc(c.name||c.host)+'</b><small>'+esc(c.type)+' · '+esc(c.host)+(c.port?(':'+c.port):'')+' · '+(c.passSet?'有密码':'无密码')+'</small></div><button type=\"button\" class=\"secondary\" onclick=\"fsEdit('+i+')\">编辑</button><button type=\"button\" class=\"secondary\" onclick=\"fsTest(\\''+esc(c.id)+'\\')\">测试</button><button type=\"button\" class=\"danger\" onclick=\"fsRemove(\\''+esc(c.id)+'\\')\">删除</button></div>'}q('#fsList').innerHTML=h||'<div class=\"item\"><div class=\"main\"><b>暂无连接</b><small>在下面添加 FTP / WebDAV / SMB / NFS</small></div></div>'})}")
+                .append("function fsEdit(i){var c=fsConns[i];if(!c)return;q('#fsId').value=c.id||'';q('#fsName').value=c.name||'';q('#fsType').value=c.type||'FTP';q('#fsHost').value=c.host||'';q('#fsPort').value=c.port||'';q('#fsUser').value=c.user||'';q('#fsPass').value='';q('#fsRoot').value=c.root||'';q('#fsDomain').value=c.domain||'';msg('fsMsg',c.passSet?'已载入，密码留空则保持旧值':'已载入')}")
+                .append("function fsNew(){q('#fsId').value='';q('#fsName').value='';q('#fsType').value='WebDAV';q('#fsHost').value='';q('#fsPort').value='';q('#fsUser').value='';q('#fsPass').value='';q('#fsRoot').value='';q('#fsDomain').value='';msg('fsMsg','新连接')}function fsSave(){api('POST','/fs/save',fsBody(),function(d){msg('fsMsg',d&&d.ok?'已保存':(d&&d.err?d.err:'保存失败'));if(d&&d.ok){q('#fsId').value=d.id||'';q('#fsPass').value='';fsList();publicStatus()}},'application/x-www-form-urlencoded')}function fsTest(id){var b=id?enc({id:id}):fsBody();msg('fsMsg','测试中...');api('POST','/fs/test',b,function(d){msg('fsMsg',d&&d.ok?('连接成功 · '+d.entries+' 项 · '+d.ms+'ms'):(d&&d.err?d.err:'测试失败'))},'application/x-www-form-urlencoded')}function fsRemove(id){if(!confirm('删除这个网盘连接？'))return;api('POST','/fs/remove',enc({id:id}),function(d){msg('fsMsg',d&&d.ok?'已删除':(d&&d.err?d.err:'删除失败'));fsList();publicStatus()},'application/x-www-form-urlencoded')}")
+                .append("function fmtBytes(n){n=Number(n||0);if(n>=1048576)return (n/1048576).toFixed(1)+' MB';if(n>=1024)return (n/1024).toFixed(1)+' KB';return n+' B'}function appErr(d){return d&&d.err?d.err:'操作失败'}function appMsg(m){msg('appUploadMsg',m)}")
+                .append("function renderUpload(u){var info=q('#appUploadInfo'),btn=q('#appInstallBtn');if(!u||!u.exists){info.textContent='未上传 APK';btn.disabled=true;return}var v=(u.versionName?(' v'+u.versionName):'')+(u.versionCode?(' ('+u.versionCode+')'):'');info.textContent='已上传 '+(u.packageName||'未知包名')+v+' · '+fmtBytes(u.size)+(u.self?' · 当前应用':'');btn.disabled=false}")
+                .append("function renderTask(t){var l=q('#appTaskLog');if(!t){l.textContent='';return}l.textContent=t.log||'';l.scrollTop=l.scrollHeight}")
+                .append("function appState(){api('GET','/appmgr/state',null,function(d){if(!d)return;if(d.authed){renderUpload(d.upload);renderTask(d.task)}else{renderUpload(null);q('#appTaskLog').textContent=''}})}")
+                .append("function appUpload(){var fi=q('#appApk'),f=fi.files&&fi.files[0];if(!f){appMsg('请选择 APK 文件');return}var x=new XMLHttpRequest();x.open('POST','/appmgr/upload',true);hdr(x);x.setRequestHeader('Content-Type','application/vnd.android.package-archive');x.setRequestHeader('X-File-Name',encodeURIComponent(f.name));x.upload.onprogress=function(e){if(e.lengthComputable)appMsg('上传 '+Math.round(e.loaded*100/e.total)+'% · '+fmtBytes(e.loaded)+' / '+fmtBytes(e.total))};x.onload=function(){var d=null;try{d=JSON.parse(x.responseText)}catch(e){d={ok:false,err:x.responseText||'上传失败'}}if(d&&d.ok){appMsg('上传完成');renderUpload(d.upload);appState()}else appMsg(appErr(d))};x.onerror=function(){appMsg('上传中断')};x.send(f)}")
+                .append("function appFetch(){var u=q('#appFetchUrl').value.trim();if(!u){appMsg('请输入 APK 下载地址');return}api('POST','/appmgr/fetch',enc({url:u}),function(d){if(d&&d.ok){appMsg('拉取完成');renderUpload(d.upload);appState()}else appMsg(appErr(d))},'application/x-www-form-urlencoded')}function appInstall(){if(!confirm('安装上传的 APK？安装当前应用时网页会短暂断开。'))return;api('POST','/appmgr/install','',function(d){if(d&&d.ok){appMsg('安装任务已开始');renderTask(d.task);setTimeout(appState,1000)}else appMsg(appErr(d))},'application/x-www-form-urlencoded')}")
+                .append("function loadApps(){api('GET','/appmgr/apps',null,function(d){if(d&&d.ok){appApps=d.apps||[];renderApps();appMsg('应用列表已刷新')}else appMsg(appErr(d))})}function renderApps(){var box=q('#appList'),cnt=q('#appCount'),s=q('#appSearch').value.toLowerCase(),h='',n=0;for(var i=0;i<appApps.length;i++){var a=appApps[i],hay=((a.label||'')+' '+(a.packageName||'')).toLowerCase();if(s&&hay.indexOf(s)<0)continue;n++;h+='<div class=\"item\"><div class=\"main\"><b>'+esc(a.label||a.packageName)+'</b><small>'+esc(a.packageName)+'</small><small>'+esc(a.versionName||'')+' · '+(a.system?'系统':'第三方')+' · '+(a.enabled?'启用':'停用')+(a.self?' · 当前管理':'')+'</small></div><button type=\"button\" '+(a.self?'disabled ':'')+'onclick=\"appUninstall(\\''+esc(a.packageName)+'\\','+(a.system?'true':'false')+',\\''+esc(a.label||a.packageName)+'\\')\">卸载</button></div>'}box.innerHTML=h||'<div class=\"item\"><div class=\"main\"><b>没有匹配应用</b></div></div>';cnt.textContent='显示 '+n+' / '+appApps.length+' 个'}function appUninstall(pkg,sys,label){if(sys){var p=prompt('系统应用卸载风险高，请输入包名确认：'+pkg);if(p!==pkg)return}else if(!confirm('卸载 '+label+' ?'))return;api('POST','/appmgr/uninstall',enc({packageName:pkg}),function(d){if(d&&d.ok){appMsg('卸载任务已开始');renderTask(d.task);setTimeout(loadApps,1200)}else appMsg(appErr(d))},'application/x-www-form-urlencoded')}")
+                .append("function convHtml(d){convCache=d;var arr=d.entries||[],f=q('#convFilter').value,h='';for(var i=Math.max(0,arr.length-250);i<arr.length;i++){var e=arr[i];if(f!=='all'&&e.role!==f)continue;var who=e.role==='user'?'用户':(e.role==='assistant'?'AI':(e.role==='heard'?'听见':(e.role==='error'?'错误':'系统')));h+='<div><span class=\"mini\">'+esc(e.ts)+'</span> <b>'+who+':</b> '+esc(e.text)+'</div>'}if(!h)h='<div class=\"hint\">暂无匹配记录</div>';h+='<div class=\"mini\">共 '+arr.length+' 条 · 文件 '+d.sizeKb+' KB / 上限 '+d.maxKb+' KB</div>';return h}function loadConv(){api('GET','/conversations',null,function(d){if(!d||!d.entries)return;var v=q('#conv');v.innerHTML=convHtml(d);v.scrollTop=v.scrollHeight})}function clearConv(){if(!confirm('清空对话记录？'))return;textApi('POST','/clear_conv','',function(){msg('convMsg','已清空');loadConv()})}")
+                .append("function backupExport(){api('GET','/backup/export',null,function(d){if(d&&d.ok){q('#backupContent').value=d.content||'';msg('backupMsg','已导出 '+(d.bytes||0)+' bytes · '+(d.path||''))}else msg('backupMsg',d&&d.err?d.err:'导出失败')})}function backupRestore(){var c=q('#backupContent').value;if(!c.trim()){msg('backupMsg','请先粘贴备份 JSON');return}if(!confirm('从此 JSON 恢复配置？当前配置会被覆盖。'))return;api('POST','/backup/restore',enc({content:c}),function(d){msg('backupMsg',d&&d.ok?'已恢复，正在重载':(d&&d.err?d.err:'恢复失败'));if(d&&d.ok)setTimeout(loadStatus,800)},'application/x-www-form-urlencoded')}")
+                .append("boot();")
+                .append("</script></body></html>");
+        byte[] b = h.toString().getBytes("UTF-8");
+        writeHead(out, "text/html; charset=utf-8", b.length);
+        out.write(b);
+    }
+
+    private static String rowInput(String label, String name, String type, String placeholder) {
+        return "<div class='row'><label>" + label + "</label><input type='" + type + "' name='"
+                + name + "' placeholder='" + placeholder + "'></div>";
+    }
+
+    private static String rowSelect(String label, String name, String id, String options, String onchange) {
+        String idAttr = id == null || id.isEmpty() ? "" : " id='" + id + "'";
+        String change = onchange == null || onchange.isEmpty() ? "" : " onchange='" + onchange + "'";
+        return "<div class='row'><label>" + label + "</label><select name='" + name + "'" + idAttr
+                + change + ">" + options + "</select></div>";
+    }
+
+    private static String rowCheckbox(String label, String name, String hint) {
+        return "<label class='checkrow'><input type='checkbox' name='" + name + "'><b style='color:var(--gold)'>"
+                + label + "</b><span>" + hint + "</span></label>";
+    }
+
+    private static String fsRow(String label, String id, String placeholder) {
+        return "<div class='row'><label>" + label + "</label><input type='text' id='" + id
+                + "' placeholder='" + placeholder + "'></div>";
+    }
+
     private static void serveHtml(OutputStream out) throws IOException {
         String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>真理罗盘 · 网页设置</title>"
                 + "<style>body{background:#0d0b08;color:#e8dcc0;font-family:sans-serif;margin:0;padding:16px}"
                 + "h1{color:#d4af37;text-align:center;font-size:20px}"
                 + "fieldset{border:1px solid #6b5a2e;border-radius:12px;margin:10px 0;padding:10px}"
                 + "legend{color:#d4af37}.row{margin:6px 0}label{display:inline-block;width:110px;color:#d4af37;font-size:13px}"
-                + "input[type=text]{width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px}"
+                + "input[type=text],input[type=password],input[type=file]{width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px}"
                 + "button{background:#d4af37;color:#0d0b08;border:none;border-radius:8px;padding:8px 14px;margin:4px}"
+                + "button:disabled{opacity:.45}"
                 + ".navbtn{width:74px;height:42px;border-radius:21px;background:#171512;color:#d4af37;border:1px solid #6b5a2e;font-size:13px;margin:0 5px;cursor:pointer}"
                 + ".navbtn:active{background:#d4af37;color:#0d0b08}"
                 + ".ok{color:#8fbf6a}</style></head><body>"
                 + "<h1>☯ 真理罗盘 · 网页设置</h1>"
                 + "<form id='f' onsubmit='save();return false'>"
                 + "<fieldset><legend>大模型</legend>"
-                + "<div class='row'><label>Provider</label><input type='text' name='provider' id='provider'></div>"
+                + "<div class='row'><label>Provider</label><select name='provider' id='provider' onchange='providerChanged()' style='width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'>"
+                + "<option value='deepseek'>deepseek</option><option value='openai兼容'>openai兼容</option></select></div>"
                 + "<div class='row'><label>API Key</label><input type='text' name='apiKey'></div>"
-                + "<div class='row'><label>Base URL</label><input type='text' name='baseUrl'></div>"
+                + "<div class='row'><label>公共 Base</label><input type='text' name='baseUrl' id='baseUrl'></div>"
+                + "<div class='row'><label>文本 Base</label><input type='text' name='textBaseUrl' placeholder='留空=公共 Base URL'></div>"
                 + "<div class='row'><label>文本模型</label><input type='text' name='textModel'></div>"
+                + "<div class='row'><label>视觉 Base</label><input type='text' name='visionBaseUrl' placeholder='留空=公共 Base URL'></div>"
                 + "<div class='row'><label>视觉模型</label><input type='text' name='visionModel'></div>"
                 + "<div class='row'><label>思考强度</label><select name='reasoningEffort'>"
                 + "<option value='auto'>自动</option>"
@@ -176,17 +588,25 @@ public class SettingsWebServer {
                 + "<option value='medium'>中</option>"
                 + "<option value='high'>高</option>"
                 + "<option value='max'>最大</option></select></div>"
-                + "<div style='color:#8a8272;font-size:11px'>自动=沿用服务默认；DeepSeek 会额外带上 thinking 开关，OpenAI 兼容格式则直接写 reasoning_effort。</div></fieldset>"
+                + "<div class='row'><label>文本 MaxToken</label><input type='text' name='textMaxTokens' placeholder='0=服务默认'></div>"
+                + "<div class='row'><label>语音 MaxToken</label><input type='text' name='voiceMaxTokens' placeholder='讲故事可设 1500/2048'></div>"
+                + "<div class='row'><label>视觉 MaxToken</label><input type='text' name='visionMaxTokens' placeholder='0=服务默认'></div>"
+                + "<div class='row'><label>文本温度</label><input type='text' name='textTemperature' placeholder='0.0-2.0'></div>"
+                + "<div class='row'><label>语音温度</label><input type='text' name='voiceTemperature' placeholder='0.0-2.0'></div>"
+                + "<div class='row'><label>视觉温度</label><input type='text' name='visionTemperature' placeholder='0.0-2.0'></div>"
+                + "<div style='color:#8a8272;font-size:11px'>自动=沿用服务默认；DeepSeek 会额外带上 thinking 开关，OpenAI 兼容格式则直接写 reasoning_effort。MaxToken 是回复长度上限，0 表示不主动传这个参数。</div></fieldset>"
                 + "<fieldset><legend>语音</legend>"
                 + "<div class='row'><label>语音 API Key</label><input type='text' name='voiceApiKey' placeholder='留空=复用大模型 API Key'></div>"
                 + "<div class='row'><label>ASR 地址</label><input type='text' name='asrUrl'></div>"
-                + "<div class='row'><label>最终 ASR</label><input type='text' name='asrFinalUrl' placeholder='http://192.168.31.5:50000/ 或 /api/v1/asr'></div>"
+                + "<div class='row'><label>最终 ASR</label><input type='text' name='asrFinalUrl' placeholder='http://<asr-final-host>:<port>/ 或 /api/v1/asr'></div>"
                 + "<div class='row'><label>ASR 模型</label><input type='text' name='asrModel'></div>"
                 + "<div class='row'><label>TTS 地址</label><input type='text' name='ttsUrl'></div>"
                 + "<div class='row'><label>TTS 模型</label><input type='text' name='ttsModel'></div>"
                 + "<div class='row'><label>TTS 音色</label><input type='text' name='ttsVoice'></div>"
                 + "<div class='row'><label>本地优先</label><input type='checkbox' name='localTtsFirst' style='width:auto;vertical-align:middle'>"
                 + "<span style='font-size:11px;color:#8a8272'>关闭时固定优先云端 TTS，云端失败不会偷偷换本地声音</span></div>"
+                + "<div class='row'><label>打断模式</label><select name='bargeMode' style='width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'>"
+                + "<option value='steady'>稳健</option><option value='sensitive'>灵敏</option><option value='off'>关闭</option></select></div>"
                 + "<div style='color:#8a8272;font-size:11px;margin:4px 0 8px 114px'>流式 ASR 填 ws://地址:端口 或 http://主机根地址；最终 ASR 这里填 SenseVoice 根地址或 /api/v1/asr，OpenAI 兼容则直接填 /v1/audio/transcriptions。</div>"
                 + "<div class='row' style='margin-top:10px'><label style='width:100%'>语音系统提示词</label></div>"
                 + "<textarea name='sysPromptVoice' style='width:calc(100% - 14px);height:64px;background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'></textarea>"
@@ -199,6 +619,8 @@ public class SettingsWebServer {
                 + "<div class='row'><label>搜索引擎</label><input type='text' name='searchEngine'></div>"
                 + "<div class='row' style='margin-top:10px'><label style='width:100%'>视觉系统提示词</label></div>"
                 + "<textarea name='sysPromptVision' style='width:calc(100% - 14px);height:80px;background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'></textarea>"
+                + "<div class='row'><label>灵眼画面源</label><select name='visionFrameSource' style='width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'>"
+                + "<option value='hal'>HAL直出</option><option value='rtsp'>RTSP同源</option></select></div>"
                 + "</fieldset>"
                 + "<fieldset><legend>屏幕推流</legend>"
                 + "<div class='row'><label>推流方式</label><select name='streamMode'>"
@@ -243,10 +665,11 @@ public class SettingsWebServer {
                 + "</fieldset>"
                 + "<fieldset><legend>定位 API</legend>"
                 + "<div class='row'><label>显示定位</label><input type='checkbox' name='showLoc' id='showLoc' style='width:auto;vertical-align:middle'>"
-                + "<span style='font-size:11px;color:#8a8272'>显示 GPS / WiFi 定位信息（关闭后不再请求定位，省电）</span></div>"
+                + "<span style='font-size:11px;color:#8a8272'>显示 GPS / 系统网络 / WiFi 定位信息（关闭后不再请求定位，省电）</span></div>"
                 + "<div class='row'><label>WiFi 定位地址</label><input type='text' name='locWifiUrl'></div>"
-                + "<div class='row'><label>IP 定位地址</label><input type='text' name='locIpUrl'></div>"
-                + "<div style='color:#8a8272;font-size:11px'>WiFi：POST JSON {wifiAccessPoints:[{macAddress,signalStrength}]}，返回 {location:{lat,lng},accuracy}（MLS 格式，可换带自己 key 的地址）；IP：GET 返回 {status:success,lat,lon}。保存后下一轮定位（≤30s）生效。</div>"
+                + "<div class='row'><label>IP 粗定位地址</label><input type='text' name='locIpUrl' placeholder='留空=不用 IP 粗定位'></div>"
+                + "<div style='color:#8a8272;font-size:11px'>优先系统网络定位和 WiFi BSSID 定位；IP 定位城市级不准确，默认留空不用。保存后下一轮定位（≤30s）生效。</div>"
+                + "</fieldset>"
                 + "<fieldset><legend>摄像头推流</legend>"
                 + "<div class='row'><label>摄像头</label><select name='camId'><option value='0'>后置（默认）</option><option value='1'>前置</option></select></div>"
                 + "<div class='row'><label>分辨率</label><select name='camWidth'><option>640</option><option>800</option><option>1280</option></select> × "
@@ -269,7 +692,8 @@ public class SettingsWebServer {
                 + "<fieldset><legend>内网穿透 frpc</legend>"
                 + "<div class='row'><label style='width:100%'>frpc.toml 配置（保存后生效）</label></div>"
                 + "<textarea name='frpcConfig' rows='12' style='width:calc(100% - 14px);height:220px;background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px;font-family:monospace;font-size:12px'></textarea>"
-                + "<div style='color:#8a8272;font-size:11px'>示例：serverAddr = '你的服务器IP' / serverPort = 7000 / auth.token = '密钥'，代理用 [[proxies]]：name='web' type='tcp' localIP='127.0.0.1' localPort=8080 remotePort=11608（远程端口按你的 VPS 规划填写，改完先点保存）</div>"
+                + "<div style='color:#8a8272;font-size:11px'>示例：serverAddr = '你的服务器IP' / serverPort = 7000 / auth.token = '密钥'，代理用 [[proxies]]：name='web' type='tcp' localIP='127.0.0.1' localPort=8080 remotePort=你的远程端口（远程端口按你的 VPS 规划填写，改完先点保存）</div>"
+                + "<div style='color:#8a8272;font-size:11px'>当前服务端不支持 QUIC/KCP 传输端口，且 tcpMux=false 实测会断；ADB/大文件保持默认 TCP，安装 APK 优先用下面的应用管理。</div>"
                 + "<div class='row'>状态：<span id='frpcState' style='color:#d4af37'>未知</span>"
                 + "<span id='frpcStateDetail' style='font-size:11px;color:#8a8272;margin-left:8px'></span>"
                 + "<span style='font-size:11px;color:#8a8272;margin-left:8px'>应用启动时自动运行（配置非空）</span></div>"
@@ -288,20 +712,130 @@ public class SettingsWebServer {
                 + "max-height:320px;overflow-y:auto;font-size:12px;line-height:1.5'></div></fieldset>"
                 + "<div style='text-align:center'><button type='submit'>保存设置</button><span id='msg' class='ok'></span></div>"
                 + "</form>"
+                + "<fieldset><legend>ADB TCP</legend>"
+                + "<div class='row'><label>ADB 端口</label><input type='text' id='adbPort' value='5555'></div>"
+                + "<div class='row'><label>开机自启</label><input type='checkbox' id='adbAuto' style='width:auto;vertical-align:middle'>"
+                + "<span style='font-size:11px;color:#8a8272'>由本应用 root 启动 adbd TCP，替代外部 adbwireless</span></div>"
+                + "<div class='row'>状态：<span id='adbState' style='color:#d4af37'>未知</span>"
+                + "<span id='adbDetail' style='font-size:11px;color:#8a8272;margin-left:8px'></span></div>"
+                + "<div style='text-align:center'><button type='button' onclick='adbSave()'>保存自启</button>"
+                + "<button type='button' onclick='adbStart()'>启动 ADB TCP</button>"
+                + "<button type='button' onclick='adbStop()'>关闭 ADB TCP</button>"
+                + "<span id='adbMsg' style='font-size:12px;color:#8fbf6a'></span></div>"
+                + "<pre id='adbLog' style='background:#171512;border:1px solid #6b5a2e;border-radius:10px;padding:8px;max-height:120px;overflow-y:auto;font-size:11px;white-space:pre-wrap;color:#8fbf6a'></pre>"
+                + "</fieldset>"
+                + "<fieldset><legend>应用管理</legend>"
+                + "<div class='row'><label>管理密码</label><input type='password' id='appPwd' autocomplete='current-password'></div>"
+                + "<div class='row'><label>旧密码</label><input type='password' id='appOldPwd' autocomplete='current-password' placeholder='修改密码时填写'></div>"
+                + "<div style='text-align:center'><button type='button' onclick='appLogin()'>登录</button>"
+                + "<button type='button' onclick='appSetup()'>设置/修改密码</button>"
+                + "<span id='appAuth' style='font-size:12px;color:#8fbf6a'></span></div>"
+                + "<div class='row'><label>APK 文件</label><input type='file' id='appApk' accept='.apk,application/vnd.android.package-archive'></div>"
+                + "<div class='row'><label>APK 下载地址</label><input type='text' id='appFetchUrl' placeholder='https://.../app.apk 或 ftp://...'></div>"
+                + "<div style='text-align:center'><button type='button' onclick='appUpload()'>上传 APK</button>"
+                + "<button type='button' onclick='appFetch()'>从 URL 拉取</button>"
+                + "<button type='button' id='appInstallBtn' onclick='appInstall()' disabled>安装上传的 APK</button>"
+                + "<span id='appUploadMsg' style='font-size:12px;color:#8fbf6a'></span></div>"
+                + "<div id='appUploadInfo' style='font-size:11px;color:#8a8272;margin:4px 0'></div>"
+                + "<div style='color:#8a8272;font-size:11px;margin:2px 0 6px 0'>上传/拉取都走普通网络，不走 <code>adb install</code> 的文件传输。</div>"
+                + "<div class='row'><label>搜索应用</label><input type='text' id='appSearch' oninput='renderApps()'></div>"
+                + "<div style='text-align:center'><button type='button' onclick='loadApps()'>刷新应用</button>"
+                + "<span id='appCount' style='font-size:12px;color:#8a8272'></span></div>"
+                + "<div id='appList' style='background:#171512;border:1px solid #6b5a2e;border-radius:10px;padding:8px;max-height:360px;overflow-y:auto;font-size:12px'></div>"
+                + "<div style='color:#8a8272;font-size:11px;margin-top:6px'>任务日志（安装/卸载期间自动刷新）：</div>"
+                + "<pre id='appTaskLog' style='background:#171512;border:1px solid #6b5a2e;border-radius:10px;padding:8px;max-height:160px;overflow-y:auto;font-size:11px;white-space:pre-wrap;color:#8fbf6a'></pre>"
+                + "</fieldset>"
                 + "<script>"
                 + "function get(url,cb){var x=new XMLHttpRequest();x.open('GET',url,true);"
                 + "x.onload=function(){try{cb(JSON.parse(x.responseText));}catch(e){cb(null);}};"
                 + "x.onerror=function(){cb(null);};x.send();}"
                 + "get('/status',function(d){if(!d)return;for(var k in d){var e=document.querySelector('[name='+k+']');if(!e)continue;"
                 + "if(e.type==='checkbox'){e.checked=(d[k]===true||d[k]==='true');}else{e.value=d[k];}}"
-                + "document.getElementById('provider').value=d.provider;"
+                + "document.getElementById('provider').value=normProvider(d.provider);"
                 + "document.getElementById('msg').textContent='已加载设备当前配置';});"
+                + "function normProvider(p){p=String(p||'').toLowerCase();return p.indexOf('deepseek')>=0?'deepseek':'openai兼容';}"
+                + "function providerChanged(){var p=document.getElementById('provider').value;"
+                + "if(p==='deepseek'){document.getElementById('baseUrl').value='https://api.deepseek.com/v1';"
+                + "document.querySelector('[name=textModel]').value='deepseek-chat';document.querySelector('[name=visionModel]').value='deepseek-chat';"
+                + "document.querySelector('[name=textBaseUrl]').value='';document.querySelector('[name=visionBaseUrl]').value='';}"
+                + "else{var b=document.getElementById('baseUrl'),t=document.querySelector('[name=textModel]'),v=document.querySelector('[name=visionModel]');"
+                + "if(b.value==='https://api.deepseek.com/v1')b.value='';if(!t.value||t.value==='deepseek-chat')t.value='gpt-4.1-mini';"
+                + "if(!v.value||v.value==='deepseek-chat')v.value='gpt-4.1-mini';}}"
                 + "function save(){var b=new URLSearchParams(new FormData(document.getElementById('f')));"
-                + "var cbs=document.querySelectorAll('input[type=checkbox]');for(var i=0;i<cbs.length;i++){b.set(cbs[i].name,cbs[i].checked?'true':'false');}"
+                + "var cbs=document.querySelectorAll('#f input[type=checkbox]');for(var i=0;i<cbs.length;i++){b.set(cbs[i].name,cbs[i].checked?'true':'false');}"
                 + "var x=new XMLHttpRequest();x.open('POST','/save',true);"
                 + "x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');"
                 + "x.onload=function(){document.getElementById('msg').textContent=x.responseText;};x.send(b.toString());}"
-                + "function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}"
+                + "function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;');}"
+                + "var appApps=[],appTaskRunning=false;"
+                + "function appToken(){return sessionStorage.getItem('appmgrToken')||'';}"
+                + "function appErr(d){return d&&d.err?d.err:'操作失败';}"
+                + "function appMsg(m){var e=document.getElementById('appUploadMsg');if(e)e.textContent=m||'';}"
+                + "function appReq(m,u,body,cb,ctype){var x=new XMLHttpRequest();x.open(m,u,true);"
+                + "var t=appToken();if(t)x.setRequestHeader('X-AppMgr-Token',t);if(ctype)x.setRequestHeader('Content-Type',ctype);"
+                + "x.onload=function(){var d=null;try{d=JSON.parse(x.responseText);}catch(e){d={ok:false,err:x.responseText||'请求失败'};}if(cb)cb(d,x);};"
+                + "x.onerror=function(){if(cb)cb({ok:false,err:'网络错误'},x);};x.send(body||null);}"
+                + "function adbMsg(m){var e=document.getElementById('adbMsg');if(e)e.textContent=m||'';}"
+                + "function adbStatus(){get('/adb/status',function(d){if(!d)return;var p=document.getElementById('adbPort'),a=document.getElementById('adbAuto');"
+                + "if(p&&document.activeElement!==p)p.value=d.port||5555;if(a&&document.activeElement!==a)a.checked=!!d.autoStart;var st=document.getElementById('adbState');"
+                + "st.textContent=d.running?'运行中':'未监听';var det=document.getElementById('adbDetail');"
+                + "det.textContent='端口 '+(d.port||'--')+' · service='+esc(d.servicePort||'')+' · persist='+esc(d.persistPort||'')+' · 自启='+(d.autoStart?'开':'关');"
+                + "var l=document.getElementById('adbLog');if(l){l.textContent=d.log||'';}});}"
+                + "function adbBody(){return 'port='+encodeURIComponent(document.getElementById('adbPort').value)+'&autoStart='+(document.getElementById('adbAuto').checked?'true':'false');}"
+                + "function adbSave(){appReq('POST','/adb/save',adbBody(),function(d){if(d&&d.ok){adbMsg('已保存');adbStatus();}else adbMsg(appErr(d));},'application/x-www-form-urlencoded');}"
+                + "function adbStart(){if(!confirm('启动 ADB TCP 会重启 adbd，当前 ADB 连接会短暂断开。继续？'))return;"
+                + "appReq('POST','/adb/start',adbBody(),function(d){if(d&&d.ok){adbMsg(d.msg||'已启动');adbStatus();}else adbMsg(appErr(d));},'application/x-www-form-urlencoded');}"
+                + "function adbStop(){if(!confirm('关闭 ADB TCP 会断开远程 ADB。网页/frp 仍可继续使用。继续？'))return;"
+                + "appReq('POST','/adb/stop','',function(d){if(d&&d.ok){adbMsg(d.msg||'已关闭');setTimeout(adbStatus,1500);}else adbMsg(appErr(d));},'application/x-www-form-urlencoded');}"
+                + "function appLogin(){var p=document.getElementById('appPwd').value;"
+                + "appReq('POST','/appmgr/login','password='+encodeURIComponent(p),function(d){"
+                + "if(d&&d.ok){sessionStorage.setItem('appmgrToken',d.token);document.getElementById('appPwd').value='';appMsg('已登录');appState();loadApps();}"
+                + "else appMsg(appErr(d));},'application/x-www-form-urlencoded');}"
+                + "function appSetup(){var p=document.getElementById('appPwd').value,old=document.getElementById('appOldPwd').value;"
+                + "var b='password='+encodeURIComponent(p)+'&oldPassword='+encodeURIComponent(old);"
+                + "appReq('POST','/appmgr/setup',b,function(d){if(d&&d.ok){sessionStorage.setItem('appmgrToken',d.token);"
+                + "document.getElementById('appPwd').value='';document.getElementById('appOldPwd').value='';appMsg('管理密码已保存');appState();loadApps();}"
+                + "else appMsg(appErr(d));},'application/x-www-form-urlencoded');}"
+                + "function fmtBytes(n){n=Number(n||0);if(n>=1048576)return (n/1048576).toFixed(1)+' MB';if(n>=1024)return (n/1024).toFixed(1)+' KB';return n+' B';}"
+                + "function renderUpload(u){var info=document.getElementById('appUploadInfo'),btn=document.getElementById('appInstallBtn');"
+                + "if(!u||!u.exists){info.textContent='未上传 APK';btn.disabled=true;return;}"
+                + "var v=(u.versionName?(' v'+u.versionName):'')+(u.versionCode?(' ('+u.versionCode+')'):'');"
+                + "info.textContent='已上传 '+(u.packageName||'未知包名')+v+' · '+fmtBytes(u.size)+(u.self?' · 当前应用':'');btn.disabled=false;}"
+                + "function renderTask(t){var l=document.getElementById('appTaskLog');if(!t){l.textContent='';return;}"
+                + "l.textContent=t.log||'';l.scrollTop=l.scrollHeight;var was=appTaskRunning;appTaskRunning=!!t.running;"
+                + "if(was&&!appTaskRunning){loadApps();appState();}}"
+                + "function appState(){appReq('GET','/appmgr/state',null,function(d){if(!d)return;"
+                + "var a=document.getElementById('appAuth');if(!d.hasPassword)a.textContent='未设置管理密码';"
+                + "else a.textContent=d.authed?'已登录':'未登录';if(d.authed){renderUpload(d.upload);renderTask(d.task);}"
+                + "else{renderUpload(null);document.getElementById('appTaskLog').textContent='';}});}"
+                + "function appUpload(){if(!appToken()){appMsg('请先登录');return;}var fi=document.getElementById('appApk');var f=fi.files&&fi.files[0];"
+                + "if(!f){appMsg('请选择 APK 文件');return;}var x=new XMLHttpRequest();x.open('POST','/appmgr/upload',true);"
+                + "x.setRequestHeader('X-AppMgr-Token',appToken());x.setRequestHeader('Content-Type','application/vnd.android.package-archive');"
+                + "x.setRequestHeader('X-File-Name',encodeURIComponent(f.name));"
+                + "x.upload.onprogress=function(e){if(e.lengthComputable)appMsg('上传 '+Math.round(e.loaded*100/e.total)+'% · '+fmtBytes(e.loaded)+' / '+fmtBytes(e.total));};"
+                + "x.onload=function(){var d=null;try{d=JSON.parse(x.responseText);}catch(e){d={ok:false,err:x.responseText||'上传失败'};}"
+                + "if(d&&d.ok){appMsg('上传完成');renderUpload(d.upload);appState();}else appMsg(appErr(d));};"
+                + "x.onerror=function(){appMsg('上传中断');};x.send(f);}"
+                + "function appFetch(){if(!appToken()){appMsg('请先登录');return;}var u=document.getElementById('appFetchUrl');var url=u&&u.value?u.value.trim():'';"
+                + "if(!url){appMsg('请输入 APK 下载地址');return;}appReq('POST','/appmgr/fetch','url='+encodeURIComponent(url),function(d){"
+                + "if(d&&d.ok){appMsg('拉取完成');renderUpload(d.upload);appState();}else appMsg(appErr(d));},'application/x-www-form-urlencoded');}"
+                + "function appInstall(){if(!appToken()){appMsg('请先登录');return;}if(!confirm('安装上传的 APK？安装当前应用时网页会短暂断开。'))return;"
+                + "appReq('POST','/appmgr/install','',function(d){if(d&&d.ok){appMsg('安装任务已开始');renderTask(d.task);setTimeout(appState,1000);}else appMsg(appErr(d));},'application/x-www-form-urlencoded');}"
+                + "function loadApps(){if(!appToken()){appMsg('请先登录');return;}appReq('GET','/appmgr/apps',null,function(d){"
+                + "if(d&&d.ok){appApps=d.apps||[];renderApps();appMsg('应用列表已刷新');}else appMsg(appErr(d));});}"
+                + "function renderApps(){var box=document.getElementById('appList'),cnt=document.getElementById('appCount');if(!box)return;"
+                + "var q=(document.getElementById('appSearch').value||'').toLowerCase(),h='',n=0;"
+                + "for(var i=0;i<appApps.length;i++){var a=appApps[i],hay=((a.label||'')+' '+(a.packageName||'')).toLowerCase();if(q&&hay.indexOf(q)<0)continue;n++;"
+                + "h+=\"<div style='display:flex;align-items:center;gap:8px;border-bottom:1px solid #3a2f19;padding:6px 0'>\""
+                + "+\"<div style='flex:1;min-width:0'><div style='color:#d4af37;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>\"+esc(a.label||a.packageName)+\"</div>\""
+                + "+\"<div style='color:#8a8272;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>\"+esc(a.packageName)+\"</div>\""
+                + "+\"<div style='color:#8fbf6a;font-size:11px'>\"+esc(a.versionName||'')+\" · \"+(a.system?'系统':'第三方')+\" · \"+(a.enabled?'启用':'停用')+(a.self?' · 当前管理':'')+\"</div></div>\""
+                + "+\"<button type='button' data-pkg='\"+esc(a.packageName)+\"' data-system='\"+(a.system?'1':'0')+\"' data-label='\"+esc(a.label||a.packageName)+\"' \"+(a.self?'disabled':'')+\">卸载</button></div>\";}"
+                + "box.innerHTML=h||'<div style=\"color:#8a8272\">没有匹配的应用</div>';cnt.textContent='显示 '+n+' / '+appApps.length+' 个';"
+                + "var bs=box.querySelectorAll('button[data-pkg]');for(var j=0;j<bs.length;j++){bs[j].onclick=function(){appUninstall(this.getAttribute('data-pkg'),this.getAttribute('data-system')==='1',this.getAttribute('data-label'));};}}"
+                + "function appUninstall(pkg,sys,label){if(sys){var p=prompt('系统应用卸载风险高，请输入包名确认：'+pkg);if(p!==pkg)return;}"
+                + "else if(!confirm('卸载 '+label+' ?'))return;appReq('POST','/appmgr/uninstall','packageName='+encodeURIComponent(pkg),function(d){"
+                + "if(d&&d.ok){appMsg('卸载任务已开始');renderTask(d.task);setTimeout(appState,1000);}else appMsg(appErr(d));},'application/x-www-form-urlencoded');}"
                 + "function convHtml(d){var h='';var arr=d.entries||[];"
                 + "for(var i=Math.max(0,arr.length-200);i<arr.length;i++){var e=arr[i];"
                 + "var who=e.role==='user'?'你':(e.role==='assistant'?'AI':(e.role==='heard'?'听见':'系统'));"
@@ -444,7 +978,7 @@ public class SettingsWebServer {
                 + "function frpcStop(){var x=new XMLHttpRequest();x.open('GET','/frpc/stop',true);"
                 + "x.onload=function(){document.getElementById('frpcMsg').textContent=x.responseText;frpcRefresh();};x.send();}"
                 + "setInterval(function(){get('/system_status',renderSystem);},2000);"
-                + "loadConv();setInterval(loadConv,3000);setInterval(streamState,3000);frpcRefresh();setInterval(frpcRefresh,3000);camRefresh();setInterval(camRefresh,3000);"
+                + "loadConv();setInterval(loadConv,3000);setInterval(streamState,3000);frpcRefresh();setInterval(frpcRefresh,3000);camRefresh();setInterval(camRefresh,3000);adbStatus();setInterval(adbStatus,3000);appState();setInterval(appState,3000);"
                 + "</script></body></html>";
         byte[] b = html.getBytes("UTF-8");
         writeHead(out, "text/html; charset=utf-8", b.length);
@@ -603,16 +1137,68 @@ public class SettingsWebServer {
         out.write(b);
     }
 
-    private static void serveStatus(OutputStream out) throws IOException {
+    private static void serveJson(OutputStream out, JSONObject o) throws IOException {
+        byte[] b = (o == null ? "{}" : o.toString()).getBytes("UTF-8");
+        writeHead(out, "application/json; charset=utf-8", b.length);
+        out.write(b);
+    }
+
+    private static void serveStatus(OutputStream out, boolean authed) throws IOException {
         JSONObject o = new JSONObject();
         try {
-            o.put("provider", Prefs.get(app, Prefs.K_PROVIDER, ""));
-            o.put("apiKey", Prefs.get(app, Prefs.K_API_KEY, ""));
-            o.put("voiceApiKey", Prefs.get(app, Prefs.K_VOICE_API_KEY, ""));
+            o.put("ok", true);
+            o.put("authed", authed);
+            o.put("hasPassword", AppManager.hasPassword(app));
+            String savedApiKey = Prefs.get(app, Prefs.K_API_KEY, "");
+            String savedVoiceKey = Prefs.get(app, Prefs.K_VOICE_API_KEY, "");
+            o.put("apiKeySet", !savedApiKey.trim().isEmpty());
+            o.put("apiKeyMask", maskSecret(savedApiKey));
+            o.put("voiceApiKeySet", !savedVoiceKey.trim().isEmpty());
+            o.put("voiceApiKeyMask", maskSecret(savedVoiceKey));
+            o.put("vadEnabled", Prefs.vadEnabled(app));
+            o.put("localTtsFirst", Prefs.getB(app, Prefs.K_LOCAL_TTS_FIRST, false));
+            o.put("asrUrlSet", !Prefs.get(app, Prefs.K_ASR_URL, "").trim().isEmpty());
+            o.put("asrFinalUrlSet", !Prefs.get(app, Prefs.K_ASR_FINAL_URL, "").trim().isEmpty());
+            o.put("ttsUrlSet", !Prefs.get(app, Prefs.K_TTS_URL, "").trim().isEmpty());
+            o.put("fsCount", FsManager.list(app).size());
+            if (!authed) {
+                o.put("locked", true);
+                byte[] b = o.toString().getBytes("UTF-8");
+                writeHead(out, "application/json; charset=utf-8", b.length);
+                out.write(b);
+                return;
+            }
+            String provider = ProviderConfig.normalizeName(Prefs.get(app, Prefs.K_PROVIDER, ""));
+            ProviderConfig preset = ProviderConfig.byName(provider);
+            String baseUrl = Prefs.get(app, Prefs.K_BASE_URL, "");
+            if (baseUrl.trim().isEmpty() && ProviderConfig.PROVIDER_DEEPSEEK.equals(provider)) {
+                baseUrl = ProviderConfig.DEEPSEEK_BASE_URL;
+            }
+            String textModel = Prefs.get(app, Prefs.K_TEXT_MODEL, "");
+            String visionModel = Prefs.get(app, Prefs.K_VISION_MODEL, "");
+            if (textModel.trim().isEmpty()) textModel = preset.textModel;
+            if (visionModel.trim().isEmpty()) visionModel = preset.visionModel;
+            o.put("provider", provider);
+            o.put("apiKey", "");
+            o.put("voiceApiKey", "");
             o.put("reasoningEffort", Prefs.get(app, Prefs.K_REASONING_EFFORT, Prefs.DEFAULT_REASONING_EFFORT));
-            o.put("baseUrl", Prefs.get(app, Prefs.K_BASE_URL, ""));
-            o.put("textModel", Prefs.get(app, Prefs.K_TEXT_MODEL, ""));
-            o.put("visionModel", Prefs.get(app, Prefs.K_VISION_MODEL, ""));
+            o.put("textMaxTokens", String.valueOf(Prefs.getI(app, Prefs.K_TEXT_MAX_TOKENS,
+                    Prefs.DEFAULT_TEXT_MAX_TOKENS)));
+            o.put("voiceMaxTokens", String.valueOf(Prefs.getI(app, Prefs.K_VOICE_MAX_TOKENS,
+                    Prefs.DEFAULT_VOICE_MAX_TOKENS)));
+            o.put("visionMaxTokens", String.valueOf(Prefs.getI(app, Prefs.K_VISION_MAX_TOKENS,
+                    Prefs.DEFAULT_VISION_MAX_TOKENS)));
+            o.put("textTemperature", trimFloat(Prefs.getF(app, Prefs.K_TEXT_TEMPERATURE,
+                    Prefs.DEFAULT_TEXT_TEMPERATURE)));
+            o.put("voiceTemperature", trimFloat(Prefs.getF(app, Prefs.K_VOICE_TEMPERATURE,
+                    Prefs.DEFAULT_VOICE_TEMPERATURE)));
+            o.put("visionTemperature", trimFloat(Prefs.getF(app, Prefs.K_VISION_TEMPERATURE,
+                    Prefs.DEFAULT_VISION_TEMPERATURE)));
+            o.put("baseUrl", baseUrl);
+            o.put("textBaseUrl", Prefs.get(app, Prefs.K_TEXT_BASE_URL, ""));
+            o.put("visionBaseUrl", Prefs.get(app, Prefs.K_VISION_BASE_URL, ""));
+            o.put("textModel", textModel);
+            o.put("visionModel", visionModel);
             o.put("asrUrl", Prefs.get(app, Prefs.K_ASR_URL, ""));
             o.put("asrFinalUrl", Prefs.get(app, Prefs.K_ASR_FINAL_URL, ""));
             o.put("asrModel", Prefs.get(app, Prefs.K_ASR_MODEL, ""));
@@ -620,10 +1206,16 @@ public class SettingsWebServer {
             o.put("ttsModel", Prefs.get(app, Prefs.K_TTS_MODEL, ""));
             o.put("ttsVoice", Prefs.get(app, Prefs.K_TTS_VOICE, ""));
             o.put("localTtsFirst", Prefs.getB(app, Prefs.K_LOCAL_TTS_FIRST, false));
+            o.put("bargeMode", Prefs.get(app, Prefs.K_BARGE_MODE, Prefs.DEFAULT_BARGE_MODE));
             o.put("visionInterval", String.valueOf(Prefs.getI(app, Prefs.K_VISION_INTERVAL, 2)));
-            o.put("vadEnabled", Prefs.getB(app, Prefs.K_VAD_ENABLED, false));
+            o.put("visionFrameSource", Prefs.visionFrameSource(app));
+            o.put("vadEnabled", Prefs.vadEnabled(app));
             o.put("vadSensitivity", String.valueOf(Prefs.getI(app, Prefs.K_VAD_SENSITIVITY, 600)));
             o.put("searchEngine", Prefs.get(app, Prefs.K_SEARCH_ENGINE, "https://www.bing.com/search?q=%s"));
+            o.put("ignoreSsl", Prefs.getB(app, Prefs.K_IGNORE_SSL, false));
+            o.put("uaDesktop", Prefs.getB(app, Prefs.K_UA_DESKTOP, false));
+            o.put("noImages", Prefs.getB(app, Prefs.K_NO_IMAGES, false));
+            o.put("browserRoundFit", Prefs.getB(app, Prefs.K_BROWSER_ROUND_FIT, true));
             o.put("convMaxKb", String.valueOf(Prefs.getI(app, Prefs.K_CONV_MAX_KB, 1024)));
             o.put("convCleanMin", String.valueOf(Prefs.getI(app, Prefs.K_CONV_CLEAN_MIN, 60)));
             o.put("sysPromptVoice", Prefs.get(app, Prefs.K_SYS_PROMPT_VOICE, Prefs.DEFAULT_SYS_PROMPT_VOICE));
@@ -634,7 +1226,7 @@ public class SettingsWebServer {
             o.put("streamBitrate", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_BITRATE, 1500)));
             o.put("locWifiUrl", Prefs.get(app, Prefs.K_LOC_WIFI_URL, Prefs.DEFAULT_LOC_WIFI_URL));
             o.put("locIpUrl", Prefs.get(app, Prefs.K_LOC_IP_URL, Prefs.DEFAULT_LOC_IP_URL));
-            o.put("showLoc", Prefs.getB(app, Prefs.K_SHOW_LOC, true));
+            o.put("showLoc", Prefs.getB(app, Prefs.K_SHOW_LOC, false));
             o.put("frpcConfig", Prefs.get(app, Prefs.K_FRPC_CONFIG, ""));
             o.put("camId", String.valueOf(Prefs.getI(app, Prefs.K_CAM_ID, 0)));
             o.put("camWidth", String.valueOf(Prefs.getI(app, Prefs.K_CAM_WIDTH, 1280)));
@@ -655,14 +1247,29 @@ public class SettingsWebServer {
 
     private static void serveSave(OutputStream out, String body) throws IOException {
         try {
-            String[] pairs = body.split("&");
-            for (String pair : pairs) {
-                String[] kv = pair.split("=", 2);
-                if (kv.length < 2) continue;
-                String k = URLDecoder.decode(kv[0], "UTF-8");
-                String v = URLDecoder.decode(kv[1], "UTF-8");
+            Map<String, String> fields = form(body);
+            if (isTrue(fields.get("clearApiKey"))) Prefs.put(app, Prefs.K_API_KEY, "");
+            if (isTrue(fields.get("clearVoiceApiKey"))) Prefs.put(app, Prefs.K_VOICE_API_KEY, "");
+            for (Map.Entry<String, String> entry : fields.entrySet()) {
+                String k = entry.getKey();
+                String v = entry.getValue();
+                if (k == null) continue;
+                if (k.equals("clearApiKey") || k.equals("clearVoiceApiKey")) continue;
+                if (k.equals(Prefs.K_API_KEY) || k.equals(Prefs.K_VOICE_API_KEY)) {
+                    if (v == null || v.trim().isEmpty()) continue;
+                    Prefs.put(app, k, v.trim());
+                    continue;
+                }
                 if (k.equals("visionInterval") || k.equals("vadSensitivity")) {
                     try { Prefs.putI(app, k, Integer.parseInt(v)); } catch (Exception ignored) {}
+                } else if (k.equals(Prefs.K_VISION_FRAME_SOURCE)) {
+                    Prefs.put(app, k, Prefs.normalizeVisionFrameSource(v));
+                } else if (isMaxTokenKey(k)) {
+                    try { Prefs.putI(app, k, clamp(Integer.parseInt(v), 0, 8192)); } catch (Exception ignored) {}
+                } else if (isTemperatureKey(k)) {
+                    try { Prefs.putF(app, k, clampF(Float.parseFloat(v), 0f, 2f)); } catch (Exception ignored) {}
+                } else if (k.equals(Prefs.K_BARGE_MODE)) {
+                    Prefs.put(app, k, normalizeBargeMode(v));
                 } else if (k.equals("convMaxKb")) {
                     try { Prefs.putI(app, k, Math.max(100, Math.min(20480, Integer.parseInt(v)))); } catch (Exception ignored) {}
                 } else if (k.equals("convCleanMin")) {
@@ -682,12 +1289,21 @@ public class SettingsWebServer {
                         android.content.Intent i = new android.content.Intent(app,
                                 com.magneo.compass.voice.VadService.class);
                         if (on) app.startService(i);
-                        else app.stopService(i);
+                        else {
+                            app.stopService(i);
+                            try {
+                                com.magneo.compass.voice.VoiceController.get(app, null)
+                                        .stopContinuousListening();
+                            } catch (Throwable ignored) {}
+                        }
                     }
+                } else if (k.equals(Prefs.K_PROVIDER)) {
+                    Prefs.put(app, k, ProviderConfig.normalizeName(v));
                 } else {
                     Prefs.put(app, k, v);
                 }
             }
+            Prefs.exportBackup(app);
             byte[] b = "设置已保存".getBytes("UTF-8");
             writeHead(out, "text/plain; charset=utf-8", b.length);
             out.write(b);
@@ -698,10 +1314,525 @@ public class SettingsWebServer {
         }
     }
 
+    private static void serveBackupExport(OutputStream out) throws IOException {
+        JSONObject o = new JSONObject();
+        try {
+            Prefs.exportBackup(app);
+            File f = backupFile();
+            if (!f.exists() || f.length() <= 0) {
+                o.put("ok", false).put("err", "未找到备份文件");
+            } else {
+                o.put("ok", true);
+                o.put("path", f.getAbsolutePath());
+                o.put("bytes", f.length());
+                o.put("content", readAll(f, 1024 * 1024));
+            }
+        } catch (Exception e) {
+            putErr(o, e.getMessage());
+        }
+        serveJson(out, o);
+    }
+
+    private static void serveBackupRestore(OutputStream out, String body) throws IOException {
+        JSONObject o = new JSONObject();
+        try {
+            Map<String, String> f = form(body);
+            String content = f.get("content");
+            if (content == null || content.trim().isEmpty()) content = body;
+            Object root = new org.json.JSONTokener(content).nextValue();
+            if (!(root instanceof JSONObject)) {
+                serveJson(out, err("备份内容不是 JSON 对象"));
+                return;
+            }
+            File bf = backupFile();
+            File dir = bf.getParentFile();
+            if (dir != null && !dir.exists()) dir.mkdirs();
+            try (FileOutputStream fo = new FileOutputStream(bf, false)) {
+                fo.write(((JSONObject) root).toString(2).getBytes("UTF-8"));
+            }
+            boolean ok = Prefs.restoreBackupIfPresent(app);
+            o.put("ok", ok);
+            o.put("msg", ok ? "已从备份恢复" : "恢复失败");
+        } catch (Exception e) {
+            putErr(o, e.getMessage());
+        }
+        serveJson(out, o);
+    }
+
+    private static void serveTestLlm(OutputStream out) throws IOException {
+        JSONObject o = new JSONObject();
+        final CountDownLatch latch = new CountDownLatch(1);
+        final StringBuilder text = new StringBuilder();
+        final AtomicReference<String> err = new AtomicReference<>("");
+        final long start = System.currentTimeMillis();
+        final long[] first = {-1L};
+        try {
+            LlmClient llm = new LlmClient(app);
+            if (llm.apiKey.trim().isEmpty()) {
+                serveJson(out, err("未配置大模型 API Key"));
+                return;
+            }
+            ArrayList<LlmClient.Msg> msgs = new ArrayList<>();
+            msgs.add(new LlmClient.Msg("system", "你是链路测试助手。只用中文一句话回复。"));
+            msgs.add(new LlmClient.Msg("user", "真理罗盘大模型链路测试，请回复收到。"));
+            okhttp3.Call call = llm.chat(msgs, false, llm.voiceOptions(), new LlmClient.StreamCallback() {
+                @Override public void onDelta(String s) {
+                    if (first[0] < 0) first[0] = System.currentTimeMillis() - start;
+                    if (s != null) text.append(s);
+                }
+
+                @Override public void onDone(String full) {
+                    if (text.length() == 0 && full != null) text.append(full);
+                    latch.countDown();
+                }
+
+                @Override public void onError(String msg) {
+                    err.set(msg == null ? "请求失败" : msg);
+                    latch.countDown();
+                }
+            });
+            boolean done = latch.await(25000, java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (!done) {
+                if (call != null) call.cancel();
+                o.put("ok", false).put("err", "LLM 测试超时");
+            } else if (!err.get().isEmpty()) {
+                o.put("ok", false).put("err", err.get());
+            } else {
+                o.put("ok", true);
+                o.put("firstDeltaMs", first[0]);
+                o.put("text", clip(text.toString(), 300));
+            }
+            o.put("ms", System.currentTimeMillis() - start);
+            o.put("model", llm.textModel);
+            o.put("baseUrl", llm.textBaseUrl);
+        } catch (Exception e) {
+            putErr(o, e.getMessage());
+        }
+        serveJson(out, o);
+    }
+
+    private static void serveTestAsrFinal(OutputStream out) throws IOException {
+        JSONObject o = new JSONObject();
+        final CountDownLatch latch = new CountDownLatch(1);
+        final AtomicReference<String> text = new AtomicReference<>("");
+        final AtomicReference<String> err = new AtomicReference<>("");
+        final long start = System.currentTimeMillis();
+        try {
+            LlmClient llm = new LlmClient(app);
+            okhttp3.Call call = llm.transcribe(silenceWav(800), new LlmClient.TextCallback() {
+                @Override public void onResult(String t) {
+                    text.set(t == null ? "" : t);
+                    latch.countDown();
+                }
+
+                @Override public void onError(String msg) {
+                    err.set(msg == null ? "请求失败" : msg);
+                    latch.countDown();
+                }
+            });
+            boolean done = latch.await(20000, java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (!done) {
+                if (call != null) call.cancel();
+                o.put("ok", false).put("err", "Final ASR 测试超时");
+            } else if (!err.get().isEmpty()) {
+                o.put("ok", false).put("err", err.get());
+            } else {
+                o.put("ok", true);
+                o.put("text", text.get());
+                o.put("sample", "静音 800ms WAV");
+                o.put("note", text.get().trim().isEmpty()
+                        ? "接口可返回，静音样本无文本；准确率请用真实录音测试"
+                        : "接口可返回，但静音样本出现文本，准确率请用真实录音测试");
+            }
+            o.put("ms", System.currentTimeMillis() - start);
+            o.put("url", llm.asrFinalUrl);
+        } catch (Exception e) {
+            putErr(o, e.getMessage());
+        }
+        serveJson(out, o);
+    }
+
+    private static void serveTestTts(OutputStream out) throws IOException {
+        JSONObject o = new JSONObject();
+        final long start = System.currentTimeMillis();
+        try {
+            LlmClient llm = new LlmClient(app);
+            TtsProbeResult r = runTtsProbe(llm, "真理罗盘 TTS 链路测试。", 30000);
+            boolean retried = false;
+            if (!r.ok && isResetLike(r.err)) {
+                retried = true;
+                r = runTtsProbe(llm, "真理罗盘 TTS 链路测试。", 30000);
+            }
+            if (!r.ok) {
+                o.put("ok", false).put("err", r.err);
+            } else {
+                o.put("ok", r.bytes > 0);
+                o.put("bytes", r.bytes);
+                o.put("contentType", r.contentType);
+            }
+            o.put("ms", System.currentTimeMillis() - start);
+            o.put("model", llm.ttsModel);
+            o.put("voice", llm.ttsVoice);
+            o.put("retry", retried);
+        } catch (Exception e) {
+            putErr(o, e.getMessage());
+        }
+        serveJson(out, o);
+    }
+
+    private static TtsProbeResult runTtsProbe(LlmClient llm, String text, long timeoutMs)
+            throws InterruptedException {
+        final CountDownLatch latch = new CountDownLatch(1);
+        final TtsProbeResult r = new TtsProbeResult();
+        okhttp3.Call call = llm.synthesize(text, new LlmClient.BytesCallback() {
+            @Override public void onResult(byte[] audio) {
+                r.ok = audio != null && audio.length > 0;
+                r.bytes = audio == null ? 0 : audio.length;
+                if (!r.ok) r.err = "TTS 返回空音频";
+                latch.countDown();
+            }
+
+            @Override public void onResult(byte[] audio, String ct) {
+                r.contentType = ct == null ? "" : ct;
+                onResult(audio);
+            }
+
+            @Override public void onError(String msg) {
+                r.ok = false;
+                r.err = msg == null ? "请求失败" : msg;
+                latch.countDown();
+            }
+        });
+        boolean done = latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+        if (!done) {
+            if (call != null) call.cancel();
+            r.ok = false;
+            r.err = "TTS 测试超时";
+        }
+        return r;
+    }
+
+    private static boolean isResetLike(String msg) {
+        String s = msg == null ? "" : msg.toLowerCase(Locale.US);
+        return s.contains("econnreset") || s.contains("connection reset")
+                || s.contains("unexpected end of stream") || s.contains("closed");
+    }
+
+    private static class TtsProbeResult {
+        boolean ok;
+        long bytes;
+        String contentType = "";
+        String err = "";
+    }
+
+    private static void serveTtsVoices(OutputStream out) throws IOException {
+        JSONObject o = new JSONObject();
+        final CountDownLatch latch = new CountDownLatch(1);
+        final AtomicReference<String> err = new AtomicReference<>("");
+        final ArrayList<String> voices = new ArrayList<>();
+        final long start = System.currentTimeMillis();
+        try {
+            LlmClient llm = new LlmClient(app);
+            okhttp3.Call call = llm.listTtsVoices(new LlmClient.VoicesCallback() {
+                @Override public void onResult(List<String> result) {
+                    if (result != null) voices.addAll(result);
+                    latch.countDown();
+                }
+
+                @Override public void onError(String msg) {
+                    err.set(msg == null ? "请求失败" : msg);
+                    latch.countDown();
+                }
+            });
+            boolean done = latch.await(20000, java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (!done) {
+                if (call != null) call.cancel();
+                o.put("ok", false).put("err", "查询音色超时");
+            } else if (!err.get().isEmpty()) {
+                o.put("ok", false).put("err", err.get());
+            } else {
+                o.put("ok", true);
+                JSONArray arr = new JSONArray();
+                for (String v : voices) arr.put(v);
+                o.put("voices", arr);
+            }
+            o.put("ms", System.currentTimeMillis() - start);
+        } catch (Exception e) {
+            putErr(o, e.getMessage());
+        }
+        serveJson(out, o);
+    }
+
+    private static void serveOpenTtsTest(OutputStream out) throws IOException {
+        JSONObject o = new JSONObject();
+        try {
+            android.content.Intent i = new android.content.Intent(app,
+                    com.magneo.compass.voice.TtsTestActivity.class);
+            i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                    | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            app.startActivity(i);
+            o.put("ok", true);
+        } catch (Exception e) {
+            putErr(o, e.getMessage());
+        }
+        serveJson(out, o);
+    }
+
+    private static void serveFsList(OutputStream out) throws IOException {
+        JSONObject root = new JSONObject();
+        try {
+            JSONArray arr = new JSONArray();
+            for (FsManager.Conn c : FsManager.list(app)) {
+                JSONObject o = new JSONObject();
+                o.put("id", c.id);
+                o.put("name", c.name);
+                o.put("type", c.type);
+                o.put("host", c.host);
+                o.put("port", c.port);
+                o.put("user", c.user);
+                o.put("root", c.root);
+                o.put("domain", c.domain);
+                o.put("passSet", c.pass != null && !c.pass.isEmpty());
+                o.put("passMask", maskSecret(c.pass));
+                arr.put(o);
+            }
+            root.put("ok", true);
+            root.put("connections", arr);
+        } catch (Exception e) {
+            putErr(root, e.getMessage());
+        }
+        serveJson(out, root);
+    }
+
+    private static void serveFsSave(OutputStream out, String body) throws IOException {
+        try {
+            Map<String, String> f = form(body);
+            String id = trim(f.get("id"));
+            FsManager.Conn existing = id.isEmpty() ? null : FsManager.byId(app, id);
+            FsManager.Conn c = buildFsConn(f, existing);
+            if (c.host.trim().isEmpty()) {
+                serveJson(out, err("请填写网盘主机"));
+                return;
+            }
+            FsManager.save(app, c);
+            JSONObject o = new JSONObject();
+            o.put("ok", true).put("id", c.id).put("msg", "网盘连接已保存");
+            serveJson(out, o);
+        } catch (Exception e) {
+            serveJson(out, err(e.getMessage()));
+        }
+    }
+
+    private static void serveFsRemove(OutputStream out, String body) throws IOException {
+        try {
+            String id = trim(form(body).get("id"));
+            if (id.isEmpty()) {
+                serveJson(out, err("缺少连接 ID"));
+                return;
+            }
+            FsManager.remove(app, id);
+            JSONObject o = new JSONObject();
+            o.put("ok", true).put("msg", "已删除连接");
+            serveJson(out, o);
+        } catch (Exception e) {
+            serveJson(out, err(e.getMessage()));
+        }
+    }
+
+    private static void serveFsTest(OutputStream out, String body) throws IOException {
+        NetFs fs = null;
+        JSONObject o = new JSONObject();
+        long start = System.currentTimeMillis();
+        try {
+            Map<String, String> f = form(body);
+            String id = trim(f.get("id"));
+            FsManager.Conn existing = id.isEmpty() ? null : FsManager.byId(app, id);
+            FsManager.Conn c = buildFsConn(f, existing);
+            fs = FsManager.connect(app, c);
+            List<NetFs.Entry> entries = fs.list("");
+            o.put("ok", true);
+            o.put("entries", entries == null ? 0 : entries.size());
+            o.put("msg", "连接成功");
+        } catch (Exception e) {
+            putErr(o, e.getMessage());
+        } finally {
+            if (fs != null) {
+                try { fs.close(); } catch (Exception ignored) {}
+            }
+        }
+        try { o.put("ms", System.currentTimeMillis() - start); } catch (Exception ignored) {}
+        serveJson(out, o);
+    }
+
     private static boolean isBoolKey(String k) {
         return k.equals("localTtsFirst") || k.equals("visionEnabled") || k.equals("vadEnabled")
                 || k.equals("ignoreSsl") || k.equals("uaDesktop") || k.equals("noImages")
-                || k.equals("showLoc");
+                || k.equals("browserRoundFit") || k.equals("camAutoStart") || k.equals("showLoc");
+    }
+
+    private static Map<String, String> form(String body) {
+        HashMap<String, String> out = new HashMap<>();
+        if (body == null || body.isEmpty()) return out;
+        String[] pairs = body.split("&");
+        for (String pair : pairs) {
+            if (pair == null || pair.isEmpty()) continue;
+            String[] kv = pair.split("=", 2);
+            try {
+                String k = URLDecoder.decode(kv[0], "UTF-8");
+                String v = kv.length > 1 ? URLDecoder.decode(kv[1], "UTF-8") : "";
+                out.put(k, v);
+            } catch (Exception ignored) {}
+        }
+        return out;
+    }
+
+    private static boolean isTrue(String v) {
+        return "true".equalsIgnoreCase(v) || "1".equals(v) || "on".equalsIgnoreCase(v);
+    }
+
+    private static String trim(String s) {
+        return s == null ? "" : s.trim();
+    }
+
+    private static JSONObject err(String msg) {
+        JSONObject o = new JSONObject();
+        putErr(o, msg);
+        return o;
+    }
+
+    private static void putErr(JSONObject o, String msg) {
+        try {
+            o.put("ok", false);
+            o.put("err", msg == null || msg.isEmpty() ? "操作失败" : msg);
+        } catch (Exception ignored) {}
+    }
+
+    private static String maskSecret(String s) {
+        String v = trim(s);
+        if (v.isEmpty()) return "未设置";
+        if (v.length() <= 8) return "已设置";
+        return v.substring(0, Math.min(4, v.length())) + "..." + v.substring(v.length() - 4);
+    }
+
+    private static String clip(String s, int max) {
+        String v = s == null ? "" : s.trim();
+        if (v.length() <= max) return v;
+        return v.substring(0, max) + "...";
+    }
+
+    private static File backupFile() {
+        return new File(new File(android.os.Environment.getExternalStorageDirectory(),
+                "oracle-compass-backup"), "prefs.json");
+    }
+
+    private static String readAll(File f, int max) throws IOException {
+        if (f == null || !f.exists()) return "";
+        if (f.length() > max) throw new IOException("文件过大");
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (FileInputStream in = new FileInputStream(f)) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) >= 0) {
+                if (n == 0) continue;
+                out.write(buf, 0, n);
+                if (out.size() > max) throw new IOException("文件过大");
+            }
+        }
+        return new String(out.toByteArray(), "UTF-8");
+    }
+
+    private static FsManager.Conn buildFsConn(Map<String, String> f, FsManager.Conn existing) {
+        FsManager.Conn c = existing == null ? new FsManager.Conn() : existing;
+        String id = trim(f.get("id"));
+        if (!id.isEmpty()) c.id = id;
+        if (f.containsKey("type")) c.type = normalizeFsType(f.get("type"));
+        if (f.containsKey("host")) c.host = trim(f.get("host"));
+        if (f.containsKey("port")) c.port = parseInt(f.get("port"), c.port);
+        if (f.containsKey("user")) c.user = trim(f.get("user"));
+        if (f.containsKey("pass")) {
+            String pass = f.get("pass");
+            if (pass != null && !pass.isEmpty()) c.pass = pass;
+        }
+        if (f.containsKey("root")) c.root = trim(f.get("root"));
+        if (f.containsKey("domain")) c.domain = trim(f.get("domain"));
+        if (f.containsKey("name")) c.name = trim(f.get("name"));
+        if (c.name.isEmpty()) c.name = c.host + " (" + c.type + ")";
+        return c;
+    }
+
+    private static String normalizeFsType(String type) {
+        String t = trim(type);
+        if ("WebDAV".equals(t) || "SMB".equals(t) || "NFS".equals(t)) return t;
+        return "FTP";
+    }
+
+    private static int parseInt(String s, int def) {
+        try { return Integer.parseInt(trim(s)); } catch (Exception e) { return def; }
+    }
+
+    private static byte[] silenceWav(int ms) {
+        int samples = Math.max(1, 16000 * Math.max(1, ms) / 1000);
+        int dataLen = samples * 2;
+        byte[] out = new byte[44 + dataLen];
+        putAscii(out, 0, "RIFF");
+        putLe32(out, 4, 36 + dataLen);
+        putAscii(out, 8, "WAVEfmt ");
+        putLe32(out, 16, 16);
+        putLe16(out, 20, 1);
+        putLe16(out, 22, 1);
+        putLe32(out, 24, 16000);
+        putLe32(out, 28, 16000 * 2);
+        putLe16(out, 32, 2);
+        putLe16(out, 34, 16);
+        putAscii(out, 36, "data");
+        putLe32(out, 40, dataLen);
+        return out;
+    }
+
+    private static void putAscii(byte[] b, int off, String s) {
+        for (int i = 0; i < s.length() && off + i < b.length; i++) b[off + i] = (byte) s.charAt(i);
+    }
+
+    private static void putLe16(byte[] b, int off, int v) {
+        b[off] = (byte) (v & 0xff);
+        b[off + 1] = (byte) ((v >> 8) & 0xff);
+    }
+
+    private static void putLe32(byte[] b, int off, int v) {
+        b[off] = (byte) (v & 0xff);
+        b[off + 1] = (byte) ((v >> 8) & 0xff);
+        b[off + 2] = (byte) ((v >> 16) & 0xff);
+        b[off + 3] = (byte) ((v >> 24) & 0xff);
+    }
+
+    private static boolean isMaxTokenKey(String k) {
+        return k.equals(Prefs.K_TEXT_MAX_TOKENS) || k.equals(Prefs.K_VOICE_MAX_TOKENS)
+                || k.equals(Prefs.K_VISION_MAX_TOKENS);
+    }
+
+    private static boolean isTemperatureKey(String k) {
+        return k.equals(Prefs.K_TEXT_TEMPERATURE) || k.equals(Prefs.K_VOICE_TEMPERATURE)
+                || k.equals(Prefs.K_VISION_TEMPERATURE);
+    }
+
+    private static int clamp(int v, int lo, int hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+
+    private static float clampF(float v, float lo, float hi) {
+        if (Float.isNaN(v) || Float.isInfinite(v)) return lo;
+        return Math.max(lo, Math.min(hi, v));
+    }
+
+    private static String trimFloat(float v) {
+        if (Math.abs(v - Math.round(v)) < 0.0001f) return String.valueOf(Math.round(v));
+        return String.format(Locale.US, "%.2f", v).replaceAll("0+$", "").replaceAll("\\.$", "");
+    }
+
+    private static String normalizeBargeMode(String v) {
+        String s = v == null ? "" : v.trim().toLowerCase(Locale.US);
+        if (Prefs.BARGE_MODE_OFF.equals(s) || Prefs.BARGE_MODE_SENSITIVE.equals(s)) return s;
+        return Prefs.BARGE_MODE_STEADY;
     }
 
     private static void serveConversations(OutputStream out) throws IOException {
@@ -737,8 +1868,8 @@ public class SettingsWebServer {
             o.put("gpu", readGpuPct());
             o.put("temps", readTemps());
             com.magneo.compass.SensorHub h = com.magneo.compass.SensorHub.instance;
-            String gpsTxt = Prefs.getB(app, Prefs.K_SHOW_LOC, true) ? "无" : "已关闭";
-            if (Prefs.getB(app, Prefs.K_SHOW_LOC, true) && h != null) {
+            String gpsTxt = Prefs.getB(app, Prefs.K_SHOW_LOC, false) ? "无" : "已关闭";
+            if (Prefs.getB(app, Prefs.K_SHOW_LOC, false) && h != null) {
                 if (!Double.isNaN(h.lat)) gpsTxt = h.gpsStatus + " 已定位";
                 else if (!Double.isNaN(h.netLat))
                     gpsTxt = "定位(" + h.netSrc + ") " + String.format(java.util.Locale.US, "%.5f,%.5f ±%.0fm", h.netLat, h.netLon, h.netAcc);

@@ -6,9 +6,12 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
@@ -60,7 +63,7 @@
 
         <activity android:name=".voice.TtsTestActivity" android:exported="true" android:screenOrientation="portrait" />
         <service android:name="com.magneo.compass.cam.CameraStreamService" android:exported="false" />
-    <service android:name=".voice.VadService" android:exported="false" />
+        <service android:name=".voice.VadService" android:exported="false" />
         <service android:name=".netfs.MusicService" android:exported="false" />
 
         <service
@@ -75,5 +78,12 @@
                 android:name="android.speech.tts.ENGINE_SERVICE"
                 android:value="com.magneo.compass.tts.BaguaTtsService" />
         </service>
+
+        <receiver android:name=".BootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

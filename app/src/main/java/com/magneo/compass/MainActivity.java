@@ -40,10 +40,11 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         hideSystemUi();
 
+        Prefs.restoreBackupIfPresent(this);
         if (Prefs.get(this, Prefs.K_PROVIDER, "").isEmpty()) {
-            ProviderConfig.apply(this, ProviderConfig.qwen());
+            ProviderConfig.apply(this, ProviderConfig.openaiCompatible());
         }
-        // MT6580 软件渲染全屏罗盘较贵，传感器重绘限到约 8fps；语音状态仍由 View 自己即时刷新。
+        // MT6580 软件渲染全屏罗盘较贵，传感器重绘限到约 8fps。
         long[] lastDraw = {0};
         hub = new SensorHub(this, () -> {
             long now = System.currentTimeMillis();
@@ -54,17 +55,18 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         });
         view = new CompassView(this, hub, this);
         setContentView(view);
-        // GPS 硬件不可用时用 WiFi/IP 定位兜底（每 30s 更新一次，onResume 启动）
+        // GPS 硬件不可用时用系统网络/WiFi 定位兜底（每 30s 更新一次，onResume 启动）
         locator = new WifiLocator(this);
 
-        voice = VoiceController.get(this, view::setStatus);
+        voice = VoiceController.get(this, this::setMainVoiceStatus);
         LocalTts.ensureInit(this);
         com.magneo.compass.web.SettingsWebServer.start(this);
-        // 自动启动 frpc（配置非空时）；摄像头推流不再随主屏冷启，改由 Vision 前后 onResume/onPause 或 web /cam/start|stop 按需启停，避免冷启即占 CPU
+        // 自动启动 ADB TCP / frpc（按网页配置）；摄像头推流不再随主屏冷启，改由 Vision 前后 onResume/onPause 或 web /cam/start|stop 按需启停，避免冷启即占 CPU
         new Thread(() -> {
             try {
+                String adb = com.magneo.compass.web.AdbManager.ensureAutoStart(getApplicationContext());
                 boolean hasCfg = !Prefs.get(MainActivity.this, Prefs.K_FRPC_CONFIG, "").trim().isEmpty();
-                String r1 = "frpc auto: cfg=" + hasCfg + " run=" + com.magneo.compass.frp.FrpcManager.isRunning();
+                String r1 = "adb auto: " + adb + "\nfrpc auto: cfg=" + hasCfg + " run=" + com.magneo.compass.frp.FrpcManager.isRunning();
                 if (hasCfg && !com.magneo.compass.frp.FrpcManager.isRunning()) {
                     r1 += " -> " + com.magneo.compass.frp.FrpcManager.start(getApplicationContext());
                 }
@@ -91,15 +93,13 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
             } catch (Exception ignored) {}
             android.os.Process.killProcess(android.os.Process.myPid());
         });
-        if (Prefs.getB(this, Prefs.K_VAD_ENABLED, false)) {
-            startService(new Intent(this, VadService.class));
-        }
+        syncVoiceServiceFromPrefs();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        boolean showLoc = Prefs.getB(this, Prefs.K_SHOW_LOC, true);
+        boolean showLoc = Prefs.getB(this, Prefs.K_SHOW_LOC, false);
         hub.gpsEnabled = showLoc;
         hub.start();
         if (locator != null) {
@@ -114,7 +114,8 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         }
         uiTicker.removeCallbacks(uiTick);
         uiTicker.post(uiTick);
-        if (voice != null) voice = VoiceController.get(this, view::setStatus);
+        if (voice != null) voice = VoiceController.get(this, this::setMainVoiceStatus);
+        syncVoiceServiceFromPrefs();
         hideSystemUi();
     }
 
@@ -142,6 +143,48 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
             pw.println(new java.util.Date() + " " + msg);
             pw.close();
         } catch (Exception ignored) {}
+    }
+
+    private void syncVoiceServiceFromPrefs() {
+        Intent i = new Intent(this, VadService.class);
+        if (Prefs.vadEnabled(this)) {
+            startService(i);
+        } else {
+            stopService(i);
+            if (voice != null) voice.stopContinuousListening();
+        }
+    }
+
+    private void setMainVoiceStatus(String status) {
+        if (view == null) return;
+        view.setStatus(filterMainVoiceStatus(status));
+    }
+
+    private String filterMainVoiceStatus(String status) {
+        if (status == null) return "";
+        String s = status.trim();
+        if (s.isEmpty()) return "";
+        String base = s;
+        while (base.endsWith(".") || base.endsWith("…")) {
+            base = base.substring(0, base.length() - 1).trim();
+        }
+        if (base.equals("常驻聆听中")
+                || base.equals("聆听中")
+                || base.equals("识别中")
+                || base.equals("思考中")
+                || base.equals("合成中")
+                || base.equals("播报中")
+                || base.equals("正在重试识别")
+                || base.equals("听见声音")
+                || base.equals("收到打断")
+                || base.equals("回声已过滤")
+                || base.equals("语音已暂停")
+                || base.equals("切换 TTS 音色")
+                || base.equals("查找 TTS 音色")
+                || base.startsWith("听见：")) {
+            return "";
+        }
+        return s;
     }
 
     private void hideSystemUi() {
@@ -174,27 +217,9 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     }
 
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (keyCode == KeyEvent.KEYCODE_CAMERA) {
-            voice.startListening(false); // 按下开始（按住说话）
-            return true;
-        }
-        return super.onKeyDown(keyCode, event);
-    }
-
-    @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         // 主屏不响应返回键：吞掉，BaseActivity 默认会 finish()，桌面 launcher 不应被关
         if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) return true;
         return super.dispatchKeyEvent(event);
-    }
-
-    @Override
-    public boolean onKeyUp(int keyCode, KeyEvent event) {
-        if (keyCode == KeyEvent.KEYCODE_CAMERA) {
-            voice.stopAndSend(); // 松开发送
-            return true;
-        }
-        return super.onKeyUp(keyCode, event);
     }
 }

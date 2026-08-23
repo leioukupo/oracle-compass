@@ -6,17 +6,17 @@
 - ASR 快速流式：sherpa-onnx FunASR 兼容层，WebSocket/HTTP 端口 `10096`
 - ASR 最终校正：SenseVoice/FunASR 兼容 HTTP 服务，端口 `50000`
 
-当前常用外网穿透端口：
+外网穿透端口：
 
-- TTS `25304`
-- ASR 快速 `15462`
-- ASR 最终 `11608`
+- TTS `<tts-public-port>`
+- ASR 快速 `<asr-stream-public-port>`
+- ASR 最终 `<asr-final-public-port>`
 
-当前这套已验证地址示例：
+地址填写示例：
 
-- TTS 本地 `http://192.168.31.5:8188/`，公网 `http://114.66.28.184:25304/`
-- ASR 快速本地 `ws://192.168.31.5:10096`，公网 `ws://114.66.28.184:15462`
-- ASR 最终本地 `http://192.168.31.5:50000/`，公网 `http://114.66.28.184:11608/`
+- TTS 本地 `http://<tts-host>:8188/`，公网 `http://<public-host>:<tts-public-port>/`
+- ASR 快速本地 `ws://<asr-stream-host>:10096`，公网 `ws://<public-host>:<asr-stream-public-port>`
+- ASR 最终本地 `http://<asr-final-host>:50000/`，公网 `http://<public-host>:<asr-final-public-port>/`
 
 ## 1. TTS：CosyVoice
 
@@ -27,7 +27,7 @@
 - `GET /v1/voices`
 - `POST /v1/audio/speech`
 
-建议把服务挂在 `8188`，然后用 FRP 暴露到公网端口 `25304`。
+建议把服务挂在 `8188`，然后用 FRP 暴露到自己的公网端口。
 
 ### 1.2 推荐启动模板
 
@@ -57,7 +57,7 @@ file /tmp/tts.wav
 
 - `Voice not found`：先查 `GET /v1/voices`，优先用第一个 `custom_voices[].id`。
 - App 里 `ttsUrl` 只填根地址即可，例如 `http://<host>:8188/`。
-- 如果用了 FRP，就填公网地址，例如 `http://<public>:25304/`。
+- 如果用了 FRP，就填公网地址，例如 `http://<public-host>:<tts-public-port>/`。
 
 ## 2. ASR 快速流式：sherpa-onnx adapter
 
@@ -94,7 +94,7 @@ curl -F model=paraformer \
 ### 2.3 App 侧填写
 
 - `ASR 地址`：`ws://<host>:10096` 或 `http://<host>:10096/`
-- FRP 公网：`ws://<public>:15462`
+- FRP 公网：`ws://<public-host>:<asr-stream-public-port>`
 
 ### 2.4 FRP 示例
 
@@ -104,7 +104,7 @@ name = "asr_stream"
 type = "tcp"
 localIP = "127.0.0.1"
 localPort = 10096
-remotePort = 15462
+remotePort = <asr-stream-public-port>
 ```
 
 ## 3. ASR 最终校正：SenseVoice
@@ -117,7 +117,7 @@ remotePort = 15462
 - `GET /openapi.json`
 - `POST /api/v1/asr`
 
-建议本地端口 `50000`，FRP 公网端口 `11608`。
+建议本地端口 `50000`，FRP 公网端口按自己的穿透规则填写。
 
 ### 3.2 推荐启动模板
 
@@ -164,7 +164,7 @@ name = "asr_final"
 type = "tcp"
 localIP = "127.0.0.1"
 localPort = 50000
-remotePort = 11608
+remotePort = <asr-final-public-port>
 ```
 
 ## 4. App 侧最终填写

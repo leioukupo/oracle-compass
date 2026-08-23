@@ -1,8 +1,12 @@
 package com.magneo.compass;
 
 import android.content.Context;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.net.wifi.ScanResult;
 import android.net.wifi.WifiManager;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -22,10 +26,7 @@ import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
 
-/** WiFi/IP 辅助定位（GPS 硬件收不到卫星时兜底）：
- *  1) WiFi 扫描 BSSID -> Mozilla Location Services（WiFi 级，约百米精度；test key 失效时跳过）
- *  2) 兜底 ip-api.com 按出口 IP 定位（城市级，约 5km，国内可达无需 key）
- *  如日后申请到高德/腾讯定位 key，可在此把 WiFi 请求换到对应服务。 */
+/** 辅助定位：优先系统网络定位，再用 WiFi BSSID 定位；IP 只在用户显式配置时作为粗略兜底。 */
 public class WifiLocator {
     public interface Callback { void onResult(double lat, double lon, float accuracy, String source); }
 
@@ -34,6 +35,7 @@ public class WifiLocator {
 
     private final Context ctx;
     private final WifiManager wm;
+    private final LocationManager lm;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final OkHttpClient client = new OkHttpClient.Builder()
             .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
@@ -53,6 +55,7 @@ public class WifiLocator {
     public WifiLocator(Context ctx) {
         this.ctx = ctx.getApplicationContext();
         wm = (WifiManager) this.ctx.getSystemService(Context.WIFI_SERVICE);
+        lm = (LocationManager) this.ctx.getSystemService(Context.LOCATION_SERVICE);
     }
 
     public void start(Callback callback) {
@@ -69,11 +72,28 @@ public class WifiLocator {
     }
 
     private void locate() {
-        if (!Prefs.getB(ctx, Prefs.K_SHOW_LOC, true)) return;   // 定位显示开关关闭：不请求
+        if (!Prefs.getB(ctx, Prefs.K_SHOW_LOC, false)) return;  // 定位显示开关关闭：不请求
+        requestNetworkLocation();
         try { if (wm != null) wm.startScan(); } catch (Exception ignored) {}
         handler.postDelayed(new Runnable() {
             @Override public void run() { readAndQuery(); }
         }, 1500);
+    }
+
+    private void requestNetworkLocation() {
+        if (lm == null) return;
+        try {
+            Location last = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
+            if (last != null) fire(last, "系统网络");
+            if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                lm.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, new LocationListener() {
+                    @Override public void onLocationChanged(Location l) { fire(l, "系统网络"); }
+                    @Override public void onStatusChanged(String p, int st, Bundle b) {}
+                    @Override public void onProviderEnabled(String p) {}
+                    @Override public void onProviderDisabled(String p) {}
+                }, Looper.getMainLooper());
+            }
+        } catch (Exception ignored) {}
     }
 
     private void readAndQuery() {
@@ -98,38 +118,45 @@ public class WifiLocator {
                         .post(RequestBody.create(JSON, body.toString()))
                         .build();
                 client.newCall(req).enqueue(new okhttp3.Callback() {
-                    @Override public void onFailure(Call c, java.io.IOException e) { ipFallback(); }
+                    @Override public void onFailure(Call c, java.io.IOException e) { ipFallbackIfConfigured(); }
                     @Override public void onResponse(Call c, Response r) throws java.io.IOException {
                         try {
-                            String s = r.body().string();
+                            String s = r.body() == null ? "" : r.body().string();
                             JSONObject o = new JSONObject(s);
                             JSONObject loc = o.getJSONObject("location");
                             double lat = loc.getDouble("lat"), lng = loc.getDouble("lng");
                             float acc = (float) o.optDouble("accuracy", 500);
                             fire(lat, lng, acc, "WiFi");
-                        } catch (Exception e) { ipFallback(); }
+                        } catch (Exception e) { ipFallbackIfConfigured(); }
                     }
                 });
                 return;
             } catch (Exception ignored) {}
         }
-        ipFallback();
+        ipFallbackIfConfigured();
     }
 
-    private void ipFallback() {
-        String ipUrl = Prefs.get(ctx, Prefs.K_LOC_IP_URL, Prefs.DEFAULT_LOC_IP_URL);
+    private void ipFallbackIfConfigured() {
+        String ipUrl = Prefs.get(ctx, Prefs.K_LOC_IP_URL, "");
+        if (ipUrl == null || ipUrl.trim().isEmpty()) return;
         Request req = new Request.Builder().url(ipUrl).build();
         client.newCall(req).enqueue(new okhttp3.Callback() {
             @Override public void onFailure(Call c, java.io.IOException e) {}
             @Override public void onResponse(Call c, Response r) throws java.io.IOException {
                 try {
-                    JSONObject o = new JSONObject(r.body().string());
+                    JSONObject o = new JSONObject(r.body() == null ? "" : r.body().string());
                     if ("success".equals(o.optString("status"))) {
-                        fire(o.getDouble("lat"), o.getDouble("lon"), 5000f, "IP");
+                        fire(o.getDouble("lat"), o.getDouble("lon"), 5000f, "IP粗略");
                     }
                 } catch (Exception ignored) {}
             }
         });
+    }
+
+    private void fire(Location l, String src) {
+        if (l == null) return;
+        float acc = l.hasAccuracy() ? l.getAccuracy() : 1000f;
+        fire(l.getLatitude(), l.getLongitude(), acc, src);
     }
 
     private void fire(double lat, double lon, float acc, String src) {

@@ -57,12 +57,14 @@ public class FsManager {
         }
         if (!found) all.add(cn);
         write(c, all);
+        Prefs.exportBackup(c);
     }
 
     public static void remove(Context c, String id) {
         List<Conn> all = list(c);
         all.removeIf(x -> x.id.equals(id));
         write(c, all);
+        Prefs.exportBackup(c);
     }
 
     public static Conn byId(Context c, String id) {

@@ -39,12 +39,10 @@ public class SettingsActivity extends BaseActivity {
     private static final String[] CATS = {"模型", "语音", "视觉", "监听", "浏览", "桌面", "应用", "记录"};
     private static final int CAT_COUNT = CATS.length;
     private static final float SLOT_DEG = 360f / CAT_COUNT;
+    private static final float RING_RADIUS_RATIO = 0.448f;
 
     private int cat = 0;
-    private int offset = 0;
-    private float baseRot = 0;
-    private float dragRot = 0;
-    private int lastOffset = -1;
+    private int lastPreviewCat = -1;
     private RingPanel ring;
     private FrameLayout centerContent;
     private TextView homeStatusView;
@@ -80,29 +78,38 @@ public class SettingsActivity extends BaseActivity {
         ring.post(() -> selectCategory(0));
     }
 
+    @Override
+    protected void onVoiceToggleChanged(boolean enabled) {
+        if (cat == 3) selectCategory(cat);
+    }
+
     private void onDragAngle(float acc) {
-        dragRot = acc;
-        float total = baseRot + dragRot;
-        int k = (int) Math.floor(total / SLOT_DEG);
-        int off = ((k % CAT_COUNT) + CAT_COUNT) % CAT_COUNT;
-        float vis = total - k * SLOT_DEG;
-        if (off != lastOffset) {
-            lastOffset = off;
+        int steps = dragSteps(acc);
+        int preview = wrapCat(cat - steps);
+        float vis = acc - steps * SLOT_DEG;
+        if (preview != lastPreviewCat) {
+            lastPreviewCat = preview;
             ring.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
-            selectCategory(off);
+            showCategory(preview);
         }
-        renderRing(vis, off);
+        renderRing(vis, preview);
     }
 
     private void onDragEnd(float acc) {
-        dragRot = acc;
-        int k = Math.round((baseRot + dragRot) / SLOT_DEG);
-        baseRot = k * SLOT_DEG;
-        dragRot = 0;
-        offset = ((k % CAT_COUNT) + CAT_COUNT) % CAT_COUNT;
-        lastOffset = offset;
-        renderRing(0, offset);
-        selectCategory(offset);
+        int steps = dragSteps(acc);
+        int nextCat = wrapCat(cat - steps);
+        lastPreviewCat = -1;
+        selectCategory(nextCat);
+        renderRing(0, cat);
+    }
+
+    private int dragSteps(float deg) {
+        float slots = deg / SLOT_DEG;
+        return slots >= 0 ? (int) Math.floor(slots + 0.5f) : (int) Math.ceil(slots - 0.5f);
+    }
+
+    private int wrapCat(int i) {
+        return ((i % CAT_COUNT) + CAT_COUNT) % CAT_COUNT;
     }
 
     private float norm(float a) {
@@ -111,15 +118,19 @@ public class SettingsActivity extends BaseActivity {
         return a;
     }
 
-    private void renderRing(float visRot, int off) {
+    private float ringRadius(int w, int h) {
+        return Math.min(w, h) * RING_RADIUS_RATIO;
+    }
+
+    private void renderRing(float visRot, int centerCat) {
         ring.removeAllViews();
-        offset = off;
+        centerCat = wrapCat(centerCat);
         int w = ring.getWidth(), h = ring.getHeight();
         float cx = w / 2f, cy = h / 2f;
-        float r = Math.min(w, h) * 0.43f;
+        float r = ringRadius(w, h);
         int s = Ui.dp(this, 42);
         for (int i = 0; i < CAT_COUNT; i++) {
-            int idx = ((off + i) % CAT_COUNT + CAT_COUNT) % CAT_COUNT;
+            int idx = wrapCat(centerCat + i);
             boolean sel = i == 0;
             TextView tv = new TextView(this);
             tv.setText(CATS[idx]);
@@ -129,17 +140,13 @@ public class SettingsActivity extends BaseActivity {
             tv.setSingleLine(true);
             tv.setBackground(sel
                     ? ovalBg(Color.argb(96, 212, 175, 55), Ui.COLOR_GOLD, 2)
-                    : ovalBg(Color.argb(180, 28, 24, 16), Color.argb(120, 120, 98, 50), 1));
+                    : ovalBg(Color.argb(188, 28, 24, 16), Color.argb(165, 145, 116, 48), 2));
             tv.setLayoutParams(new LinearLayout.LayoutParams(s, s));
-            final int slot = i;
+            final int targetCat = idx;
             tv.setOnClickListener(v -> {
-                int idx2 = ((offset + slot) % CAT_COUNT + CAT_COUNT) % CAT_COUNT;
-                cat = idx2;
-                baseRot = 0;
-                dragRot = 0;
-                lastOffset = idx2;
-                renderRing(0, idx2);
-                selectCategory(cat);
+                lastPreviewCat = -1;
+                selectCategory(targetCat);
+                renderRing(0, cat);
             });
             float angle = (float) Math.toRadians(-90 + i * SLOT_DEG + visRot);
             int x = (int) (cx + r * Math.cos(angle) - s / 2f);
@@ -153,7 +160,12 @@ public class SettingsActivity extends BaseActivity {
     }
 
     private void selectCategory(int i) {
-        cat = i;
+        cat = wrapCat(i);
+        showCategory(cat);
+    }
+
+    private void showCategory(int i) {
+        i = wrapCat(i);
         centerContent.removeAllViews();
 
         CurvedScrollView sc = new CurvedScrollView(this);
@@ -203,15 +215,28 @@ public class SettingsActivity extends BaseActivity {
     }
 
     private void buildLlm(LinearLayout b) {
-        String provider = Prefs.get(this, Prefs.K_PROVIDER, "通义千问");
+        String provider = ProviderConfig.normalizeName(Prefs.get(this, Prefs.K_PROVIDER, ""));
+        ProviderConfig preset = ProviderConfig.byName(provider);
+        String baseUrl = Prefs.get(this, Prefs.K_BASE_URL, "");
+        if (baseUrl.trim().isEmpty() && ProviderConfig.PROVIDER_DEEPSEEK.equals(provider)) {
+            baseUrl = ProviderConfig.DEEPSEEK_BASE_URL;
+        }
+        String textModel = Prefs.get(this, Prefs.K_TEXT_MODEL, "").trim();
+        if (textModel.isEmpty()) textModel = preset.textModel;
+        String visionModel = Prefs.get(this, Prefs.K_VISION_MODEL, "").trim();
+        if (visionModel.isEmpty()) visionModel = preset.visionModel;
         summaryRow(b, "服务商", provider, this::chooseProvider);
         summaryRow(b, "API Key", maskSecret(Prefs.get(this, Prefs.K_API_KEY, "")),
                 () -> editString("API Key", Prefs.K_API_KEY, "", false, true, null));
-        summaryRow(b, "接口地址", compact(Prefs.get(this, Prefs.K_BASE_URL, "")),
-                () -> editString("Base URL", Prefs.K_BASE_URL, "", false, false, null));
-        summaryRow(b, "文本模型", compact(Prefs.get(this, Prefs.K_TEXT_MODEL, "")),
+        summaryRow(b, "公共地址", compact(baseUrl),
+                () -> editString("公共 Base URL", Prefs.K_BASE_URL, "", false, false, null));
+        summaryRow(b, "文本地址", optionalUrlSummary(Prefs.K_TEXT_BASE_URL),
+                () -> editString("文本 Base URL（留空=公共地址）", Prefs.K_TEXT_BASE_URL, "", false, false, null));
+        summaryRow(b, "文本模型", compact(textModel),
                 () -> editString("文本模型", Prefs.K_TEXT_MODEL, "", false, false, null));
-        summaryRow(b, "视觉模型", compact(Prefs.get(this, Prefs.K_VISION_MODEL, "")),
+        summaryRow(b, "视觉地址", optionalUrlSummary(Prefs.K_VISION_BASE_URL),
+                () -> editString("视觉 Base URL（留空=公共地址）", Prefs.K_VISION_BASE_URL, "", false, false, null));
+        summaryRow(b, "视觉模型", compact(visionModel),
                 () -> editString("视觉模型", Prefs.K_VISION_MODEL, "", false, false, null));
         summaryRow(b, "思考强度", reasoningSummary(),
                 this::chooseReasoningEffort);
@@ -249,6 +274,11 @@ public class SettingsActivity extends BaseActivity {
         return "复用大模型";
     }
 
+    private String optionalUrlSummary(String key) {
+        String v = Prefs.get(this, key, "").trim();
+        return v.isEmpty() ? "复用公共地址" : compact(v);
+    }
+
     private String reasoningSummary() {
         String v = Prefs.get(this, Prefs.K_REASONING_EFFORT, Prefs.DEFAULT_REASONING_EFFORT);
         if (v == null || v.trim().isEmpty() || "auto".equalsIgnoreCase(v)) return "自动";
@@ -261,6 +291,7 @@ public class SettingsActivity extends BaseActivity {
     }
 
     private void buildVision(LinearLayout b) {
+        summaryRow(b, "画面源", Prefs.visionFrameSourceLabel(this), this::chooseVisionFrameSource);
         toggleRow(b, "灵眼自动感知", Prefs.K_VISION_ENABLED, true);
         int cur = Prefs.getI(this, Prefs.K_VISION_INTERVAL, 2);
         segmentedInt(b, "感知间隔", Prefs.K_VISION_INTERVAL, cur,
@@ -271,9 +302,25 @@ public class SettingsActivity extends BaseActivity {
                 Prefs.K_SYS_PROMPT_VISION, Prefs.DEFAULT_SYS_PROMPT_VISION, true, false, null));
     }
 
+    private void chooseVisionFrameSource() {
+        String cur = Prefs.visionFrameSource(this);
+        new RoundDialog(this)
+                .title("灵眼画面源")
+                .item((Prefs.VISION_FRAME_SOURCE_HAL.equals(cur) ? "✓ " : "") + "HAL直出", () -> {
+                    Prefs.put(this, Prefs.K_VISION_FRAME_SOURCE, Prefs.VISION_FRAME_SOURCE_HAL);
+                    selectCategory(cat);
+                })
+                .item((Prefs.VISION_FRAME_SOURCE_RTSP.equals(cur) ? "✓ " : "") + "RTSP同源", () -> {
+                    Prefs.put(this, Prefs.K_VISION_FRAME_SOURCE, Prefs.VISION_FRAME_SOURCE_RTSP);
+                    selectCategory(cat);
+                })
+                .cancel()
+                .show();
+    }
+
     private void buildVad(LinearLayout b) {
-        boolean enabled = Prefs.getB(this, Prefs.K_VAD_ENABLED, false);
-        toggleRow(b, "常驻语音监听", Prefs.K_VAD_ENABLED, false);
+        boolean enabled = Prefs.vadEnabled(this);
+        toggleRow(b, "常驻语音监听", Prefs.K_VAD_ENABLED, Prefs.DEFAULT_VAD_ENABLED);
         int cur = Prefs.getI(this, Prefs.K_VAD_SENSITIVITY, 600);
         segmentedInt(b, "监听灵敏度", Prefs.K_VAD_SENSITIVITY, cur,
                 new int[]{900, 600, 350}, new String[]{"低", "中", "高"},
@@ -410,7 +457,13 @@ public class SettingsActivity extends BaseActivity {
             Prefs.putB(this, key, next);
             if (Prefs.K_VAD_ENABLED.equals(key)) {
                 if (next) startService(new Intent(this, VadService.class));
-                else stopService(new Intent(this, VadService.class));
+                else {
+                    stopService(new Intent(this, VadService.class));
+                    try {
+                        com.magneo.compass.voice.VoiceController.get(this, null)
+                                .stopContinuousListening();
+                    } catch (Throwable ignored) {}
+                }
             }
             selectCategory(cat);
         });
@@ -575,15 +628,12 @@ public class SettingsActivity extends BaseActivity {
     }
 
     private void chooseProvider() {
-        String cur = Prefs.get(this, Prefs.K_PROVIDER, "通义千问");
+        String cur = ProviderConfig.normalizeName(Prefs.get(this, Prefs.K_PROVIDER, ""));
         RoundDialog d = new RoundDialog(this).title("服务商");
         for (ProviderConfig pc : ProviderConfig.all()) {
             final ProviderConfig chosen = pc;
             d.item((pc.name.equals(cur) ? "✓ " : "") + pc.name, () -> {
-                Prefs.put(this, Prefs.K_PROVIDER, chosen.name);
-                putIfEmpty(Prefs.K_BASE_URL, chosen.baseUrl);
-                putIfEmpty(Prefs.K_TEXT_MODEL, chosen.textModel);
-                putIfEmpty(Prefs.K_VISION_MODEL, chosen.visionModel);
+                ProviderConfig.apply(this, chosen);
                 putIfEmpty(Prefs.K_ASR_URL, chosen.asrUrl);
                 putIfEmpty(Prefs.K_ASR_MODEL, chosen.asrModel);
                 putIfEmpty(Prefs.K_TTS_URL, chosen.ttsUrl);
@@ -870,21 +920,22 @@ public class SettingsActivity extends BaseActivity {
 
         @Override protected void onDraw(Canvas c) {
             super.onDraw(c);
-            float r = Math.min(getWidth(), getHeight()) * 0.43f;
+            float r = ringRadius(getWidth(), getHeight());
             p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(Ui.dpF(SettingsActivity.this, 1.2f));
-            p.setColor(Color.argb(92, 145, 116, 48));
+            p.setStrokeWidth(Ui.dpF(SettingsActivity.this, 2.0f));
+            p.setColor(Color.argb(150, 145, 116, 48));
             c.drawCircle(cx, cy, r, p);
-            p.setColor(Color.argb(42, 70, 210, 214));
-            c.drawCircle(cx, cy, r - Ui.dpF(SettingsActivity.this, 30), p);
-            p.setStrokeWidth(Ui.dpF(SettingsActivity.this, 0.8f));
-            p.setColor(Color.argb(70, 120, 98, 50));
+            p.setStrokeWidth(Ui.dpF(SettingsActivity.this, 1.1f));
+            p.setColor(Color.argb(54, 70, 210, 214));
+            c.drawCircle(cx, cy, r - Ui.dpF(SettingsActivity.this, 44), p);
+            p.setStrokeWidth(Ui.dpF(SettingsActivity.this, 1.1f));
+            p.setColor(Color.argb(98, 145, 116, 48));
             for (int i = 0; i < CAT_COUNT; i++) {
                 float a = (float) Math.toRadians(-90 + i * SLOT_DEG);
-                float x1 = cx + (r - Ui.dpF(SettingsActivity.this, 28)) * (float) Math.cos(a);
-                float y1 = cy + (r - Ui.dpF(SettingsActivity.this, 28)) * (float) Math.sin(a);
-                float x2 = cx + (r + Ui.dpF(SettingsActivity.this, 22)) * (float) Math.cos(a);
-                float y2 = cy + (r + Ui.dpF(SettingsActivity.this, 22)) * (float) Math.sin(a);
+                float x1 = cx + (r - Ui.dpF(SettingsActivity.this, 38)) * (float) Math.cos(a);
+                float y1 = cy + (r - Ui.dpF(SettingsActivity.this, 38)) * (float) Math.sin(a);
+                float x2 = cx + (r + Ui.dpF(SettingsActivity.this, 18)) * (float) Math.cos(a);
+                float y2 = cy + (r + Ui.dpF(SettingsActivity.this, 18)) * (float) Math.sin(a);
                 c.drawLine(x1, y1, x2, y2, p);
             }
         }
@@ -943,7 +994,7 @@ public class SettingsActivity extends BaseActivity {
                         float cx2 = w / 2f, cy2 = h / 2f;
                         float dx = ev.getX() - cx2, dy = ev.getY() - cy2;
                         float dist = (float) Math.sqrt(dx * dx + dy * dy);
-                        float r2 = Math.min(w, h) * 0.43f;
+                        float r2 = ringRadius(w, h);
                         if (dist > r2 * 0.7f && dist < r2 * 1.4f) {
                             float deg = (float) Math.toDegrees(Math.atan2(dy, dx));
                             int idx = sectorIdx(deg);

@@ -4,6 +4,7 @@ import android.content.Context;
 import android.util.Log;
 
 import com.magneo.compass.Prefs;
+import com.magneo.compass.ProviderConfig;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -34,8 +35,10 @@ public class LlmClient {
     private static final ConnectionPool SHARED_POOL = new ConnectionPool(8, 5, TimeUnit.MINUTES);
 
     private final OkHttpClient client;
-    public final String provider, baseUrl, apiKey, voiceApiKey, reasoningEffort, textModel, visionModel,
+    public final String provider, baseUrl, textBaseUrl, visionBaseUrl, apiKey, voiceApiKey, reasoningEffort, textModel, visionModel,
             asrUrl, asrFinalUrl, asrModel, ttsUrl, ttsModel, ttsVoice;
+    public final int textMaxTokens, voiceMaxTokens, visionMaxTokens;
+    public final float textTemperature, voiceTemperature, visionTemperature;
 
     public LlmClient(Context ctx) {
         OkHttpClient.Builder b = com.magneo.compass.netfs.Tls.builder(ctx)
@@ -44,13 +47,34 @@ public class LlmClient {
                 .readTimeout(120, TimeUnit.SECONDS)
                 .writeTimeout(90, TimeUnit.SECONDS);
         client = b.build();
-        provider = Prefs.get(ctx, Prefs.K_PROVIDER, "");
-        baseUrl = strip(Prefs.get(ctx, Prefs.K_BASE_URL, "https://dashscope.aliyuncs.com/compatible-mode/v1"));
+        provider = ProviderConfig.normalizeName(Prefs.get(ctx, Prefs.K_PROVIDER, ""));
+        ProviderConfig preset = ProviderConfig.byName(provider);
+        String commonBase = strip(Prefs.get(ctx, Prefs.K_BASE_URL, ""));
+        if (commonBase.isEmpty() && ProviderConfig.PROVIDER_DEEPSEEK.equals(provider)) {
+            commonBase = ProviderConfig.DEEPSEEK_BASE_URL;
+        }
+        baseUrl = commonBase;
+        String textBase = strip(Prefs.get(ctx, Prefs.K_TEXT_BASE_URL, ""));
+        String visionBase = strip(Prefs.get(ctx, Prefs.K_VISION_BASE_URL, ""));
+        textBaseUrl = textBase.isEmpty() ? baseUrl : textBase;
+        visionBaseUrl = visionBase.isEmpty() ? baseUrl : visionBase;
         apiKey = Prefs.get(ctx, Prefs.K_API_KEY, "");
         voiceApiKey = Prefs.get(ctx, Prefs.K_VOICE_API_KEY, "");
         reasoningEffort = normalizeReasoningEffort(Prefs.get(ctx, Prefs.K_REASONING_EFFORT, Prefs.DEFAULT_REASONING_EFFORT));
-        textModel = Prefs.get(ctx, Prefs.K_TEXT_MODEL, "qwen-plus");
-        visionModel = Prefs.get(ctx, Prefs.K_VISION_MODEL, "qwen-vl-max");
+        textMaxTokens = clampInt(Prefs.getI(ctx, Prefs.K_TEXT_MAX_TOKENS,
+                Prefs.DEFAULT_TEXT_MAX_TOKENS), 0, 8192);
+        voiceMaxTokens = clampInt(Prefs.getI(ctx, Prefs.K_VOICE_MAX_TOKENS,
+                Prefs.DEFAULT_VOICE_MAX_TOKENS), 0, 8192);
+        visionMaxTokens = clampInt(Prefs.getI(ctx, Prefs.K_VISION_MAX_TOKENS,
+                Prefs.DEFAULT_VISION_MAX_TOKENS), 0, 8192);
+        textTemperature = clampFloat(Prefs.getF(ctx, Prefs.K_TEXT_TEMPERATURE,
+                Prefs.DEFAULT_TEXT_TEMPERATURE), 0f, 2f);
+        voiceTemperature = clampFloat(Prefs.getF(ctx, Prefs.K_VOICE_TEMPERATURE,
+                Prefs.DEFAULT_VOICE_TEMPERATURE), 0f, 2f);
+        visionTemperature = clampFloat(Prefs.getF(ctx, Prefs.K_VISION_TEMPERATURE,
+                Prefs.DEFAULT_VISION_TEMPERATURE), 0f, 2f);
+        textModel = nonEmpty(Prefs.get(ctx, Prefs.K_TEXT_MODEL, ""), preset.textModel);
+        visionModel = nonEmpty(Prefs.get(ctx, Prefs.K_VISION_MODEL, ""), preset.visionModel);
         String asr = Prefs.get(ctx, Prefs.K_ASR_URL, "");
         if (asr.isEmpty() && !baseUrl.isEmpty()) asr = baseUrl; // 未单独配置时复用 Base URL
         asrUrl = asr;
@@ -67,8 +91,22 @@ public class LlmClient {
 
     private static String strip(String s) {
         if (s == null) return "";
+        s = s.trim();
         while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
         return s;
+    }
+
+    private static String nonEmpty(String value, String fallback) {
+        return value == null || value.trim().isEmpty() ? fallback : value;
+    }
+
+    private static int clampInt(int v, int lo, int hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+
+    private static float clampFloat(float v, float lo, float hi) {
+        if (Float.isNaN(v) || Float.isInfinite(v)) return lo;
+        return Math.max(lo, Math.min(hi, v));
     }
 
     private static String endpoint(String baseOrEndpoint, String suffix) {
@@ -129,15 +167,15 @@ public class LlmClient {
         return voiceApiKey.isEmpty() ? apiKey : voiceApiKey;
     }
 
-    private boolean isDeepSeekLike() {
+    private boolean isDeepSeekLike(String activeBaseUrl) {
         String p = provider == null ? "" : provider.toLowerCase(Locale.US);
-        String u = baseUrl == null ? "" : baseUrl.toLowerCase(Locale.US);
+        String u = activeBaseUrl == null ? "" : activeBaseUrl.toLowerCase(Locale.US);
         return p.contains("deepseek") || u.contains("deepseek");
     }
 
-    private boolean isOpenAiLike() {
+    private boolean isOpenAiLike(String activeBaseUrl) {
         String p = provider == null ? "" : provider.toLowerCase(Locale.US);
-        String u = baseUrl == null ? "" : baseUrl.toLowerCase(Locale.US);
+        String u = activeBaseUrl == null ? "" : activeBaseUrl.toLowerCase(Locale.US);
         return p.contains("openai") || u.contains("openai.com") || u.contains("api.openai.com");
     }
 
@@ -203,7 +241,8 @@ public class LlmClient {
         }
 
         public static ChatOptions voice() {
-            return new ChatOptions(0.2f, 120);
+            return new ChatOptions(Prefs.DEFAULT_VOICE_TEMPERATURE,
+                    Prefs.DEFAULT_VOICE_MAX_TOKENS);
         }
 
         public static ChatOptions gate() {
@@ -211,8 +250,17 @@ public class LlmClient {
         }
     }
 
+    public ChatOptions defaultOptions(boolean useVisionModel) {
+        return new ChatOptions(useVisionModel ? visionTemperature : textTemperature,
+                useVisionModel ? visionMaxTokens : textMaxTokens);
+    }
+
+    public ChatOptions voiceOptions() {
+        return new ChatOptions(voiceTemperature, voiceMaxTokens);
+    }
+
     public Call chat(java.util.List<Msg> msgs, boolean useVisionModel, StreamCallback cb) {
-        return chat(msgs, useVisionModel, ChatOptions.defaults(), cb);
+        return chat(msgs, useVisionModel, defaultOptions(useVisionModel), cb);
     }
 
     public Call chat(java.util.List<Msg> msgs, boolean useVisionModel,
@@ -224,6 +272,11 @@ public class LlmClient {
                     .put("model", useVisionModel ? visionModel : textModel)
                     .put("stream", true)
                     .put("messages", arr);
+            String chatBaseUrl = useVisionModel ? visionBaseUrl : textBaseUrl;
+            if (chatBaseUrl == null || chatBaseUrl.isEmpty()) {
+                cb.onError("未配置大模型 Base URL");
+                return null;
+            }
             if (opts != null) {
                 if (opts.temperature != null) body.put("temperature", opts.temperature.floatValue());
                 if (opts.maxTokens != null && opts.maxTokens.intValue() > 0) {
@@ -232,19 +285,19 @@ public class LlmClient {
             }
             String effort = reasoningEffort;
             if (!"auto".equals(effort)) {
-                if (isDeepSeekLike()) {
+                if (isDeepSeekLike(chatBaseUrl)) {
                     if ("none".equals(effort)) {
                         body.put("thinking", new JSONObject().put("type", "disabled"));
                     } else {
                         body.put("thinking", new JSONObject().put("type", "enabled"));
                         body.put("reasoning_effort", effort);
                     }
-                } else if (isOpenAiLike()) {
+                } else if (isOpenAiLike(chatBaseUrl)) {
                     body.put("reasoning_effort", effort);
                 }
             }
             Request req = new Request.Builder()
-                    .url(baseUrl + "/chat/completions")
+                    .url(chatBaseUrl + "/chat/completions")
                     .addHeader("Authorization", "Bearer " + apiKey)
                     .post(RequestBody.create(JSON, body.toString()))
                     .build();
@@ -365,6 +418,7 @@ public class LlmClient {
                     .put("response_format", "wav");
             Request req = new Request.Builder().url(endpoint(ttsUrl, "/audio/speech"))
                     .addHeader("Authorization", "Bearer " + audioApiKey())
+                    .addHeader("Connection", "close")
                     .post(RequestBody.create(JSON, body.toString())).build();
             Call call = client.newCall(req);
             call.enqueue(new Callback() {

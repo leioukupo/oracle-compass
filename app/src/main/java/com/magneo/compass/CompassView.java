@@ -57,6 +57,7 @@ public class CompassView extends View {
     private final Actions actions;
     private String status = "";
     private boolean detailMode = false;
+    private boolean detailDiagnostic = false;
     private boolean dragging = false;
     private int previewIdx = -1;
     private float downX, downY;
@@ -78,7 +79,11 @@ public class CompassView extends View {
     }
 
     public void setStatus(String s) { status = s == null ? "" : s; postInvalidate(); }
-    public void toggleDetail() { detailMode = !detailMode; postInvalidate(); }
+    public void toggleDetail() {
+        detailMode = !detailMode;
+        detailDiagnostic = false;
+        postInvalidate();
+    }
 
     @Override
     protected void onDraw(Canvas canvas) {
@@ -97,11 +102,10 @@ public class CompassView extends View {
         drawBatteryRing(canvas, cx, cy, rMax, scale);
         drawCompassRing(canvas, cx, cy, rMax * 0.50f, az, scale);
         drawClock(canvas, cx, cy, rMax * 0.36f, scale);
-        drawNeedle(canvas, cx, cy, rMax * 0.32f, az, scale);
 
         if (dragging && previewIdx >= 0) drawCenterPreview(canvas, cx, cy, rMax, scale);
         else if (detailMode) drawDetail(canvas, cx, cy, scale);
-        else drawCenter(canvas, cx, cy, rMax * 0.235f, scale);
+        else drawCenter(canvas, cx, cy, rMax * 0.235f, scale, hub.azimuth);
 
         drawStatus(canvas, cx, cy, rMax, scale);
     }
@@ -202,7 +206,7 @@ public class CompassView extends View {
 
     private void drawSectors(Canvas c, float cx, float cy, float r, float s, int highlight) {
         RectF outer = new RectF(cx - r, cy - r, cx + r, cy + r);
-        float innerR = r * 0.845f;
+        float innerR = r * 0.865f;
         RectF inner = new RectF(cx - innerR, cy - innerR, cx + innerR, cy + innerR);
         for (int i = 0; i < 8; i++) {
             float start = i * 45f - 90f;
@@ -245,7 +249,7 @@ public class CompassView extends View {
             c.rotate(midDeg + 90f, mx, my);
             pText.setStyle(Paint.Style.FILL);
             pText.setFakeBoldText(true);
-            pText.setTextSize(30f * s);
+            pText.setTextSize(ringTextSize(28f, r - innerR, 0.54f, 22f, s));
             pText.setColor(hot ? Color.rgb(255, 221, 96) : C_GOLD);
             drawTextCenteredOnPoint(c, SECTOR_NAMES[i], mx, my, pText);
             pText.setFakeBoldText(false);
@@ -352,19 +356,15 @@ public class CompassView extends View {
         int day = cal.get(Calendar.DAY_OF_MONTH);
         int hour = cal.get(Calendar.HOUR_OF_DAY);
 
-        int yearGan = ((year - 4) % 10 + 10) % 10;
-        int yearZhi = ((year - 4) % 12 + 12) % 12;
-        int monthZhi = ((month + 1) % 12 + 12) % 12;
         int a = (14 - month) / 12;
         int y2 = year + 4800 - a;
         int m = month + 12 * a - 3;
         int jdn = day + (153 * m + 2) / 5 + 365 * y2 + y2 / 4 - y2 / 100 + y2 / 400 - 32045;
         int dayGan = ((jdn + 9) % 10 + 10) % 10;
-        int dayZhi = ((jdn + 1) % 12 + 12) % 12;
         int hourZhi = ((hour + 1) / 2) % 12;
         int hourGan = ((dayGan % 5) * 2 + hourZhi) % 10;
 
-        float zhiOuter = rMax * 0.835f, zhiInner = rMax * 0.735f;
+        float zhiOuter = rMax * 0.865f, zhiInner = rMax * 0.715f;
         RectF zhiRingO = new RectF(cx - zhiOuter, cy - zhiOuter, cx + zhiOuter, cy + zhiOuter);
         RectF zhiRingI = new RectF(cx - zhiInner, cy - zhiInner, cx + zhiInner, cy + zhiInner);
         for (int i = 0; i < 12; i++) {
@@ -373,12 +373,12 @@ public class CompassView extends View {
             seg.arcTo(zhiRingO, start, 30f);
             seg.arcTo(zhiRingI, start + 30f, -30f);
             seg.close();
-            boolean hl = (i == yearZhi || i == monthZhi || i == dayZhi || i == hourZhi);
+            boolean hl = i == hourZhi;
             pFill.setStyle(Paint.Style.FILL);
-            pFill.setColor(hl ? Color.rgb(55, 39, 17) : Color.rgb(28, 21, 13));
+            pFill.setColor(hl ? Color.rgb(75, 50, 18) : Color.rgb(28, 21, 13));
             c.drawPath(seg, pFill);
-            c.drawPath(seg, pStroke(pStroke, hl ? a(C_GOLD, 210) : a(C_GOLD_DIM, 145), 1.25f * s));
-
+            c.drawPath(seg, pStroke(pStroke, hl ? a(C_GOLD, 245) : a(C_GOLD_DIM, 145),
+                    (hl ? 1.75f : 1.25f) * s));
             float mid = (float) Math.toRadians(start + 15f);
             float mr = (zhiOuter + zhiInner) / 2f;
             float mx = cx + (float) Math.cos(mid) * mr;
@@ -386,15 +386,15 @@ public class CompassView extends View {
             c.save();
             c.rotate(start + 15f + 90f, mx, my);
             pText.setStyle(Paint.Style.FILL);
-            pText.setTextSize(18.5f * s);
+            pText.setTextSize(ringTextSize(23f, zhiOuter - zhiInner, 0.50f, 17f, s));
             pText.setFakeBoldText(hl);
             pText.setColor(hl ? Color.rgb(244, 203, 76) : a(C_DIM, 220));
-            drawTextCentered(c, DI_ZHI[i], mx, my + 6f * s, pText);
+            drawTextCenteredOnPoint(c, DI_ZHI[i], mx, my, pText);
             pText.setFakeBoldText(false);
             c.restore();
         }
 
-        float ganOuter = rMax * 0.715f, ganInner = rMax * 0.625f;
+        float ganOuter = zhiInner, ganInner = rMax * 0.610f;
         RectF ganRingO = new RectF(cx - ganOuter, cy - ganOuter, cx + ganOuter, cy + ganOuter);
         RectF ganRingI = new RectF(cx - ganInner, cy - ganInner, cx + ganInner, cy + ganInner);
         for (int i = 0; i < 10; i++) {
@@ -403,11 +403,12 @@ public class CompassView extends View {
             seg.arcTo(ganRingO, start, 36f);
             seg.arcTo(ganRingI, start + 36f, -36f);
             seg.close();
-            boolean hl = (i == yearGan || i == dayGan || i == hourGan);
+            boolean hl = i == hourGan;
             pFill.setStyle(Paint.Style.FILL);
-            pFill.setColor(hl ? Color.rgb(48, 34, 16) : Color.rgb(22, 18, 13));
+            pFill.setColor(hl ? Color.rgb(60, 40, 16) : Color.rgb(22, 18, 13));
             c.drawPath(seg, pFill);
-            c.drawPath(seg, pStroke(pStroke, hl ? a(C_GOLD, 190) : a(C_GOLD_DIM, 120), 1.05f * s));
+            c.drawPath(seg, pStroke(pStroke, hl ? a(C_GOLD, 220) : a(C_GOLD_DIM, 120),
+                    (hl ? 1.35f : 1.05f) * s));
 
             float mid = (float) Math.toRadians(start + 18f);
             float mr = (ganOuter + ganInner) / 2f;
@@ -416,9 +417,9 @@ public class CompassView extends View {
             c.save();
             c.rotate(start + 18f + 90f, mx, my);
             pText.setStyle(Paint.Style.FILL);
-            pText.setTextSize(15.5f * s);
+            pText.setTextSize(ringTextSize(19f, ganOuter - ganInner, 0.50f, 15.5f, s));
             pText.setColor(hl ? Color.rgb(238, 196, 70) : a(C_MUTED, 220));
-            drawTextCentered(c, TIAN_GAN[i], mx, my + 5f * s, pText);
+            drawTextCenteredOnPoint(c, TIAN_GAN[i], mx, my, pText);
             c.restore();
         }
 
@@ -517,8 +518,11 @@ public class CompassView extends View {
         c.restore();
     }
 
-    private void drawCenter(Canvas c, float cx, float cy, float r, float s) {
-        RectF glow = new RectF(cx - r * 1.22f, cy - r * 1.22f, cx + r * 1.22f, cy + r * 1.22f);
+    private void drawCenter(Canvas c, float cx, float cy, float r, float s, float az) {
+        float ringR = r * 1.14f;
+        float diskR = r * 0.93f;
+        RectF glow = new RectF(cx - ringR * 1.18f, cy - ringR * 1.18f,
+                cx + ringR * 1.18f, cy + ringR * 1.18f);
         pStroke.setStrokeCap(Paint.Cap.BUTT);
         pStroke.setStyle(Paint.Style.STROKE);
         pStroke.setColor(a(C_CYAN, 110));
@@ -526,45 +530,83 @@ public class CompassView extends View {
         c.drawArc(glow, -26f, 52f, false, pStroke);
         c.drawArc(glow, 154f, 52f, false, pStroke);
 
+        pStroke.setColor(a(C_GOLD_DARK, 116));
+        pStroke.setStrokeWidth(1.6f * s);
+        c.drawCircle(cx, cy, ringR, pStroke);
+        pStroke.setColor(a(C_CYAN, 58));
+        pStroke.setStrokeWidth(1.0f * s);
+        c.drawCircle(cx, cy, ringR * 0.78f, pStroke);
+
+        pStroke.setColor(a(C_GOLD, 130));
+        pStroke.setStrokeWidth(1.2f * s);
+        for (int i = 0; i < 4; i++) {
+            float rad = (float) Math.toRadians(-90f + i * 90f);
+            float x1 = cx + (float) Math.cos(rad) * ringR * 0.90f;
+            float y1 = cy + (float) Math.sin(rad) * ringR * 0.90f;
+            float x2 = cx + (float) Math.cos(rad) * ringR * 1.03f;
+            float y2 = cy + (float) Math.sin(rad) * ringR * 1.03f;
+            c.drawLine(x1, y1, x2, y2, pStroke);
+        }
+
+        if (!Float.isNaN(az)) {
+            float showAz = az % 360f;
+            if (showAz < 0) showAz += 360f;
+            RectF azArc = new RectF(cx - ringR, cy - ringR, cx + ringR, cy + ringR);
+            pStroke.setColor(a(C_CYAN, 110));
+            pStroke.setStrokeWidth(2.0f * s);
+            pStroke.setStrokeCap(Paint.Cap.ROUND);
+            c.drawArc(azArc, -90f, showAz, false, pStroke);
+            pStroke.setStrokeCap(Paint.Cap.BUTT);
+
+            float rad = (float) Math.toRadians(showAz - 90f);
+            float px = cx + (float) Math.cos(rad) * ringR;
+            float py = cy + (float) Math.sin(rad) * ringR;
+            pFill.setStyle(Paint.Style.FILL);
+            pFill.setColor(C_GOLD);
+            c.drawCircle(px, py, 3.0f * s, pFill);
+        }
+
         pFill.setStyle(Paint.Style.FILL);
-        pFill.setColor(C_PANEL);
-        c.drawCircle(cx, cy, r, pFill);
+        pFill.setColor(Color.rgb(14, 12, 9));
+        c.drawCircle(cx, cy, diskR, pFill);
         pStroke.setColor(a(C_GOLD, 135));
-        pStroke.setStrokeWidth(8f * s);
-        c.drawCircle(cx, cy, r * 1.04f, pStroke);
+        pStroke.setStrokeWidth(7f * s);
+        c.drawCircle(cx, cy, diskR * 1.04f, pStroke);
         pStroke.setColor(C_GOLD);
-        pStroke.setStrokeWidth(3.0f * s);
-        c.drawCircle(cx, cy, r, pStroke);
+        pStroke.setStrokeWidth(2.6f * s);
+        c.drawCircle(cx, cy, diskR, pStroke);
 
+        float taijiR = diskR * 0.88f;
+        RectF taiji = new RectF(cx - taijiR, cy - taijiR, cx + taijiR, cy + taijiR);
+        float taijiAz = Float.isNaN(az) ? 0f : az;
         c.save();
-        c.rotate(90f, cx, cy);
-        Path p = new Path();
-        p.addArc(new RectF(cx - r, cy - r, cx + r, cy + r), 90, 180);
-        p.addArc(new RectF(cx - r / 2f, cy - r, cx + r / 2f, cy + r), 270, 180);
-        p.addArc(new RectF(cx - r / 2f, cy - r, cx + r / 2f, cy + r), 90, -180);
-        p.addArc(new RectF(cx - r, cy - r, cx + r, cy + r), 270, -180);
-        p.close();
-        pFill.setColor(a(C_RED, 182));
-        c.drawPath(p, pFill);
-        pFill.setColor(Color.rgb(246, 207, 80));
-        c.drawCircle(cx, cy - r / 2f, r * 0.105f, pFill);
-        pFill.setColor(Color.rgb(18, 16, 12));
-        c.drawCircle(cx, cy + r / 2f, r * 0.105f, pFill);
+        c.rotate(-taijiAz, cx, cy);
+        pFill.setColor(Color.rgb(197, 153, 40));
+        c.drawCircle(cx, cy, taijiR, pFill);
+
+        Path darkHalf = new Path();
+        darkHalf.moveTo(cx, cy - taijiR);
+        darkHalf.arcTo(taiji, -90f, 180f);
+        darkHalf.close();
+        pFill.setColor(Color.rgb(8, 7, 5));
+        c.drawPath(darkHalf, pFill);
+        c.drawCircle(cx, cy + taijiR / 2f, taijiR / 2f, pFill);
+
+        pFill.setColor(Color.rgb(197, 153, 40));
+        c.drawCircle(cx, cy - taijiR / 2f, taijiR / 2f, pFill);
+
+        pStroke.setColor(a(C_GOLD, 155));
+        pStroke.setStrokeWidth(1.6f * s);
+        c.drawCircle(cx, cy, taijiR, pStroke);
+        pStroke.setColor(a(C_GOLD, 62));
+        pStroke.setStrokeWidth(1f * s);
+        c.drawCircle(cx, cy, taijiR * 0.82f, pStroke);
+
+        pFill.setColor(Color.rgb(9, 8, 6));
+        c.drawCircle(cx, cy - taijiR / 2f, taijiR * 0.115f, pFill);
+        pFill.setColor(Color.rgb(230, 188, 55));
+        c.drawCircle(cx, cy + taijiR / 2f, taijiR * 0.115f, pFill);
         c.restore();
-
-        pStroke.setColor(a(C_CYAN, 135));
-        pStroke.setStrokeWidth(1.35f * s);
-        c.drawLine(cx - r * 0.48f, cy, cx + r * 0.48f, cy, pStroke);
-
-        pText.setStyle(Paint.Style.FILL);
-        pText.setFakeBoldText(true);
-        pText.setTextSize(32f * s);
-        pText.setColor(Color.rgb(246, 207, 80));
-        pText.setShadowLayer(6f * s, 0, 0, C_BG_DEEP);
-        String azs = Float.isNaN(hub.azimuth) ? "--" : String.format(Locale.US, "%.0f°", hub.azimuth);
-        drawTextCentered(c, azs, cx, cy + 10f * s, pText);
-        pText.clearShadowLayer();
-        pText.setFakeBoldText(false);
     }
 
     private void drawStatus(Canvas c, float cx, float cy, float rMax, float s) {
@@ -590,34 +632,182 @@ public class CompassView extends View {
     }
 
     private void drawDetail(Canvas c, float cx, float cy, float s) {
-        float rowGap = 35f * s;
-        float y = cy - 150f * s;
+        if (detailDiagnostic) drawDetailDiagnostic(c, cx, cy, s);
+        else drawEarthDetail(c, cx, cy, s);
+    }
+
+    private void drawEarthDetail(Canvas c, float cx, float cy, float s) {
+        float rMax = RoundScreen.R(getWidth(), getHeight()) - 4f;
+        float panelR = rMax * 0.51f;
+        float instR = rMax * 0.30f;
+        float instCy = cy - 6f * s;
+        float az = Float.isNaN(hub.azimuth) ? 0f : normalized360(hub.azimuth);
+        float pitch = Float.isNaN(hub.pitch) ? 0f : hub.pitch;
+        float roll = Float.isNaN(hub.roll) ? 0f : hub.roll;
+        float mag = magStrength();
+        String pose = (Math.abs(pitch) < 8f && Math.abs(roll) < 8f) ? "设备平稳" : "姿态倾斜";
+        String magnet = magneticStatus(mag);
+        String motion = motionState();
+        String summary = pose + " · " + magnet + " · " + motion;
+
+        pFill.setStyle(Paint.Style.FILL);
+        pFill.setColor(Color.argb(210, 13, 11, 8));
+        c.drawCircle(cx, cy, panelR, pFill);
+        pStroke.setStyle(Paint.Style.STROKE);
+        pStroke.setStrokeCap(Paint.Cap.BUTT);
+        pStroke.setColor(a(C_GOLD, 120));
+        pStroke.setStrokeWidth(2.1f * s);
+        c.drawCircle(cx, cy, panelR, pStroke);
+        pStroke.setColor(a(C_CYAN, 42));
+        pStroke.setStrokeWidth(1f * s);
+        c.drawCircle(cx, cy, panelR * 0.84f, pStroke);
+
+        pText.setStyle(Paint.Style.FILL);
+        pText.setFakeBoldText(true);
+        pText.setTextSize(24f * s);
+        pText.setColor(C_GOLD);
+        drawTextCentered(c, "坤 · 地盘", cx, cy - rMax * 0.36f, pText);
+        pText.setFakeBoldText(false);
+        pText.setTextSize(13f * s);
+        pText.setColor(C_DIM);
+        drawTextCentered(c, ellipsize(summary, pText, rMax * 1.05f), cx, cy - rMax * 0.30f, pText);
+
+        drawKunTexture(c, cx, instCy, instR, s);
+        drawEarthInstrument(c, cx, instCy, instR, az, pitch, roll, s);
+
+        float chipW = 155f * s;
+        float chipH = 42f * s;
+        float gap = 14f * s;
+        float row1 = cy + rMax * 0.31f;
+        float row2 = cy + rMax * 0.43f;
+        drawDetailChip(c, cx - chipW / 2f - gap / 2f, row1, chipW, chipH,
+                "电量", hub.battery >= 0 ? hub.battery + "%" : "--", s);
+        drawDetailChip(c, cx + chipW / 2f + gap / 2f, row1, chipW, chipH,
+                "姿态", poseValue(pitch, roll), s);
+        drawDetailChip(c, cx - chipW / 2f - gap / 2f, row2, chipW, chipH,
+                "动势", motionValue(), s);
+        drawDetailChip(c, cx + chipW / 2f + gap / 2f, row2, chipW, chipH,
+                "磁场", mag > 0 ? String.format(Locale.US, "%.0fuT", mag) : "--", s);
+    }
+
+    private void drawKunTexture(Canvas c, float cx, float cy, float r, float s) {
+        float barW = r * 1.18f;
+        float gap = r * 0.30f;
+        float barH = 7f * s;
+        float cut = r * 0.18f;
+        pFill.setStyle(Paint.Style.FILL);
+        pFill.setColor(a(C_GOLD, 42));
+        for (int i = -1; i <= 1; i++) {
+            float y = cy + i * gap;
+            c.drawRoundRect(new RectF(cx - barW / 2f, y - barH / 2f,
+                    cx - cut, y + barH / 2f), 3f * s, 3f * s, pFill);
+            c.drawRoundRect(new RectF(cx + cut, y - barH / 2f,
+                    cx + barW / 2f, y + barH / 2f), 3f * s, 3f * s, pFill);
+        }
+    }
+
+    private void drawEarthInstrument(Canvas c, float cx, float cy, float r, float az,
+                                     float pitch, float roll, float s) {
+        pStroke.setStyle(Paint.Style.STROKE);
+        pStroke.setStrokeCap(Paint.Cap.BUTT);
+        pStroke.setColor(a(C_GOLD_DARK, 150));
+        pStroke.setStrokeWidth(2f * s);
+        c.drawCircle(cx, cy, r, pStroke);
+        pStroke.setColor(a(C_CYAN, 65));
+        pStroke.setStrokeWidth(1f * s);
+        c.drawCircle(cx, cy, r * 0.75f, pStroke);
+
+        for (int i = 0; i < 12; i++) {
+            float rad = (float) Math.toRadians(-90f + i * 30f);
+            float inner = r * (i % 3 == 0 ? 0.86f : 0.91f);
+            float outer = r * 0.98f;
+            pStroke.setColor(i % 3 == 0 ? a(C_GOLD, 120) : a(C_GOLD_DIM, 82));
+            pStroke.setStrokeWidth((i % 3 == 0 ? 1.3f : 0.8f) * s);
+            c.drawLine(cx + (float) Math.cos(rad) * inner,
+                    cy + (float) Math.sin(rad) * inner,
+                    cx + (float) Math.cos(rad) * outer,
+                    cy + (float) Math.sin(rad) * outer,
+                    pStroke);
+        }
+
+        RectF ring = new RectF(cx - r, cy - r, cx + r, cy + r);
+        pStroke.setStrokeCap(Paint.Cap.ROUND);
+        pStroke.setColor(a(C_CYAN, 125));
+        pStroke.setStrokeWidth(2.3f * s);
+        c.drawArc(ring, -90f, az, false, pStroke);
+        float ar = (float) Math.toRadians(az - 90f);
+        pFill.setStyle(Paint.Style.FILL);
+        pFill.setColor(C_GOLD);
+        c.drawCircle(cx + (float) Math.cos(ar) * r,
+                cy + (float) Math.sin(ar) * r, 3.8f * s, pFill);
+
+        float shownRoll = clampF(roll, -28f, 28f);
+        float pitchOffset = clampF(pitch / 45f, -1f, 1f) * r * 0.28f;
+        c.save();
+        c.rotate(shownRoll, cx, cy);
+        pStroke.setStrokeCap(Paint.Cap.ROUND);
+        pStroke.setColor(a(C_GOLD, 190));
+        pStroke.setStrokeWidth(3.2f * s);
+        c.drawLine(cx - r * 0.58f, cy + pitchOffset,
+                cx + r * 0.58f, cy + pitchOffset, pStroke);
+        pStroke.setColor(a(C_CYAN, 82));
+        pStroke.setStrokeWidth(1.2f * s);
+        c.drawLine(cx - r * 0.42f, cy, cx + r * 0.42f, cy, pStroke);
+        c.restore();
+
+        pText.setStyle(Paint.Style.FILL);
+        pText.setFakeBoldText(true);
+        pText.setTextSize(30f * s);
+        pText.setColor(C_GOLD);
+        drawTextCentered(c, "坤", cx, cy + 10f * s, pText);
+        pText.setFakeBoldText(false);
+
+        pSmall.setStyle(Paint.Style.FILL);
+        pSmall.setTextSize(12f * s);
+        pSmall.setColor(C_DIM);
+        drawTextCentered(c, String.format(Locale.US, "%.0f°", az), cx, cy + r * 0.57f, pSmall);
+    }
+
+    private void drawDetailChip(Canvas c, float centerX, float centerY, float w, float h,
+                                String label, String value, float s) {
+        RectF rr = new RectF(centerX - w / 2f, centerY - h / 2f,
+                centerX + w / 2f, centerY + h / 2f);
+        pFill.setStyle(Paint.Style.FILL);
+        pFill.setColor(Color.argb(122, 17, 14, 10));
+        c.drawRoundRect(rr, 13f * s, 13f * s, pFill);
+        pStroke.setColor(a(C_GOLD_DIM, 88));
+        pStroke.setStrokeWidth(0.9f * s);
+        c.drawRoundRect(rr, 13f * s, 13f * s, pStroke);
+
+        pText.setStyle(Paint.Style.FILL);
+        pText.setFakeBoldText(false);
+        pText.setTextSize(11f * s);
+        pText.setColor(C_DIM);
+        drawTextCentered(c, label, centerX, centerY - 6f * s, pText);
+        pText.setTextSize(14f * s);
+        pText.setColor(C_TEXT);
+        drawTextCentered(c, ellipsize(value, pText, w - 16f * s), centerX, centerY + 12f * s, pText);
+    }
+
+    private void drawDetailDiagnostic(Canvas c, float cx, float cy, float s) {
+        float rowGap = 29f * s;
+        float y = cy - 158f * s;
         String[][] cells = {
                 {"方位", Float.isNaN(hub.azimuth) ? "--" : String.format(Locale.US, "%.0f°", hub.azimuth)},
                 {"俯仰", Float.isNaN(hub.pitch) ? "--" : String.format(Locale.US, "%.0f°", hub.pitch)},
                 {"横滚", Float.isNaN(hub.roll) ? "--" : String.format(Locale.US, "%.0f°", hub.roll)},
                 {"电量", hub.battery >= 0 ? hub.battery + "%" : "--"},
-                {"光线", hub.light >= 0 ? String.format(Locale.US, "%.0flx", hub.light) : "--"},
-                {"距离", hub.prox >= 0 ? String.format(Locale.US, "%.1fcm", hub.prox) : "--"},
+                {"动势", motionValue()},
+                {"角速", String.format(Locale.US, "%.0f°/s", angularSpeedDeg())},
                 {"加速", String.format(Locale.US, "%.2f / %.2f / %.2f", hub.ax, hub.ay, hub.az)},
                 {"陀螺", String.format(Locale.US, "%.2f / %.2f / %.2f", hub.gx, hub.gy, hub.gz)},
                 {"磁力", String.format(Locale.US, "%.1f / %.1f / %.1f", hub.mx, hub.my, hub.mz)},
         };
 
         pText.setStyle(Paint.Style.FILL);
-        pText.setTextSize(16f * s);
+        pText.setTextSize(17f * s);
         pText.setColor(C_GOLD);
-        drawTextCentered(c, "详情", cx, y - 27f * s, pText);
-
-        if (Prefs.getB(getContext(), Prefs.K_SHOW_LOC, true)) {
-            String gps = null;
-            if (!Double.isNaN(hub.lat)) gps = String.format(Locale.US, "GPS %.4f, %.4f", hub.lat, hub.lon);
-            else if (!Double.isNaN(hub.netLat)) gps = String.format(Locale.US, "%s %.4f, %.4f ±%.0fm", hub.netSrc, hub.netLat, hub.netLon, hub.netAcc);
-            if (gps != null) {
-                drawDetailRow(c, cx, y, "定位", gps, s);
-                y += rowGap;
-            }
-        }
+        drawTextCentered(c, "坤 · 诊断", cx, y - 25f * s, pText);
 
         for (String[] cell : cells) {
             drawDetailRow(c, cx, y, cell[0], cell[1], s);
@@ -627,28 +817,114 @@ public class CompassView extends View {
 
     private void drawDetailRow(Canvas c, float cx, float baseline, String label, String value, float s) {
         float half = RoundScreen.safeHalfWidthAt(getWidth(), getHeight(), baseline);
-        float rowW = Math.min(500f * s, half * 2f - 42f * s);
+        float rowW = Math.min(470f * s, half * 2f - 52f * s);
         if (rowW <= 0) return;
-        float rowH = 27f * s;
+        float rowH = 23f * s;
         RectF rr = new RectF(cx - rowW / 2f, baseline - rowH + 7f * s,
                 cx + rowW / 2f, baseline + 7f * s);
         pFill.setStyle(Paint.Style.FILL);
-        pFill.setColor(Color.argb(120, 12, 12, 12));
-        c.drawRoundRect(rr, 11f * s, 11f * s, pFill);
+        pFill.setColor(Color.argb(86, 12, 12, 12));
+        c.drawRoundRect(rr, 8f * s, 8f * s, pFill);
         pStroke.setColor(a(C_GOLD_DIM, 72));
         pStroke.setStrokeWidth(0.8f * s);
-        c.drawRoundRect(rr, 11f * s, 11f * s, pStroke);
+        c.drawRoundRect(rr, 8f * s, 8f * s, pStroke);
 
-        float labelW = 74f * s;
-        float startX = cx - rowW / 2f + 16f * s;
+        float labelW = 66f * s;
+        float startX = cx - rowW / 2f + 14f * s;
         pText.setStyle(Paint.Style.FILL);
-        pText.setTextSize(14f * s);
-        pText.setColor(C_GOLD);
+        pText.setTextSize(12.5f * s);
+        pText.setColor(a(C_GOLD, 210));
         c.drawText(label, startX, baseline, pText);
-        pText.setTextSize(14.5f * s);
-        pText.setColor(C_TEXT);
+        pText.setTextSize(12.8f * s);
+        pText.setColor(a(C_TEXT, 225));
         String shown = ellipsize(value, pText, rowW - labelW - 26f * s);
         c.drawText(shown, startX + labelW, baseline, pText);
+    }
+
+    private float normalized360(float v) {
+        float out = v % 360f;
+        return out < 0 ? out + 360f : out;
+    }
+
+    private float clampF(float v, float lo, float hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
+
+    private float ringTextSize(float preferred, float ringWidth, float fitRatio, float min, float s) {
+        return Math.max(min * s, Math.min(preferred * s, ringWidth * fitRatio));
+    }
+
+    private float magStrength() {
+        float v = (float) Math.sqrt(hub.mx * hub.mx + hub.my * hub.my + hub.mz * hub.mz);
+        return Float.isNaN(v) || v < 1f ? 0f : v;
+    }
+
+    private String magneticStatus(float mag) {
+        if (mag <= 0f) return "磁场未定";
+        if (mag < 25f) return "磁场偏弱";
+        if (mag > 85f) return "磁场偏强";
+        return "磁场正常";
+    }
+
+    private String locationState() {
+        if (!Prefs.getB(getContext(), Prefs.K_SHOW_LOC, true)) return "定位关闭";
+        if (!Double.isNaN(hub.lat)) return "GPS";
+        if (!Double.isNaN(hub.netLat)) {
+            String src = hub.netSrc == null || hub.netSrc.trim().isEmpty() ? "网络" : hub.netSrc.trim();
+            if (src.startsWith("IP")) return "粗定位";
+            return src.length() > 5 ? "网络" : src;
+        }
+        return "定位未定";
+    }
+
+    private String locationValue() {
+        if (!Prefs.getB(getContext(), Prefs.K_SHOW_LOC, true)) return "已关闭";
+        if (!Double.isNaN(hub.lat)) return hub.sats > 0 ? ("GPS " + hub.sats + "星") : "GPS";
+        if (!Double.isNaN(hub.netLat)) {
+            String src = hub.netSrc == null || hub.netSrc.trim().isEmpty() ? "网络" : hub.netSrc.trim();
+            float acc = hub.netAcc;
+            String accText = acc >= 1000f
+                    ? String.format(Locale.US, "±%.1fkm", acc / 1000f)
+                    : (acc > 0 ? String.format(Locale.US, "±%.0fm", acc) : "");
+            return (src.startsWith("IP") ? "粗略" : src) + (accText.isEmpty() ? "" : " " + accText);
+        }
+        return "未定";
+    }
+
+    private float accelMagnitude() {
+        return (float) Math.sqrt(hub.ax * hub.ax + hub.ay * hub.ay + hub.az * hub.az);
+    }
+
+    private float linearAccel() {
+        return Math.abs(accelMagnitude() - 9.80665f);
+    }
+
+    private float angularSpeedDeg() {
+        return (float) Math.sqrt(hub.gx * hub.gx + hub.gy * hub.gy + hub.gz * hub.gz) * 57.29578f;
+    }
+
+    private String motionState() {
+        if (hub.lastSensorMs <= 0) return "动势未定";
+        float spin = angularSpeedDeg();
+        float shake = linearAccel();
+        if (spin > 35f || shake > 1.6f) return "动势明显";
+        if (spin > 8f || shake > 0.45f) return "轻微移动";
+        return "地盘安定";
+    }
+
+    private String motionValue() {
+        if (hub.lastSensorMs <= 0) return "--";
+        float spin = angularSpeedDeg();
+        float shake = linearAccel();
+        if (spin > 6f) return String.format(Locale.US, "%.0f°/s", spin);
+        if (shake > 0.20f) return String.format(Locale.US, "%.1fm/s²", shake);
+        return "静置";
+    }
+
+    private String poseValue(float pitch, float roll) {
+        float tilt = Math.max(Math.abs(pitch), Math.abs(roll));
+        if (tilt < 8f) return "平稳";
+        return String.format(Locale.US, "倾斜 %.0f°", tilt);
     }
 
     @Override
@@ -691,6 +967,13 @@ public class CompassView extends View {
                     previewIdx = -1;
                     postInvalidate();
                     if (idx >= 0) actions.onSector(idx);
+                    return true;
+                }
+                // 详情页中央用于切换摘要/诊断，不触发语音。
+                if (detailMode && dist < r * 0.30f) {
+                    detailDiagnostic = !detailDiagnostic;
+                    performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+                    postInvalidate();
                     return true;
                 }
                 // 普通点按：中央=语音，外圈=直接打开

@@ -41,10 +41,13 @@ public class VoiceController {
     private static final long MANUAL_MAX_MS = 30_000;
     private static final long STREAM_END_SILENCE_MS = 700;
     private static final long STREAM_MIN_SPEECH_MS = 140;
-    private static final long STREAM_MIN_BARGE_MS = 120;
+    private static final long STREAM_MIN_BARGE_STEADY_MS = 420;
+    private static final long STREAM_MIN_BARGE_SENSITIVE_MS = 240;
+    private static final long BARGE_SHORT_NOISE_MS = 700;
     private static final long STREAM_MAX_UTTERANCE_MS = 15_000;
     private static final int BARGE_PREROLL_FRAMES = 6; // 360ms, avoid feeding a long TTS tail.
-    private static final int BARGE_THRESHOLD_MARGIN = 140;
+    private static final int BARGE_THRESHOLD_STEADY_MARGIN = 420;
+    private static final int BARGE_THRESHOLD_SENSITIVE_MARGIN = 240;
     private static final long ASR_RETRY_DELAY_MS = 3_000;
     private static final long ASR_RETRY_TIMEOUT_MS = 4_500;
     private static final long FINAL_ASR_WAIT_MS = 800;
@@ -81,6 +84,9 @@ public class VoiceController {
     private final Set<Call> activeCalls = Collections.synchronizedSet(new HashSet<Call>());
     private final Set<FunAsrStreamingClient> asrSessions =
             Collections.synchronizedSet(new HashSet<FunAsrStreamingClient>());
+    private final Set<Integer> bargeCandidateSessions =
+            Collections.synchronizedSet(new HashSet<Integer>());
+    private final AtomicInteger confirmedBargeSession = new AtomicInteger();
     private final LinkedBlockingQueue<TtsJob> ttsQueue = new LinkedBlockingQueue<>();
     private final LinkedBlockingQueue<PreparedTts> readyTtsQueue =
             new LinkedBlockingQueue<>();
@@ -126,11 +132,20 @@ public class VoiceController {
         final int sessionId;
         final byte[] pcm;
         final long boundaryAt;
+        final boolean bargeCandidate;
+        final long speechMs;
+        final long maxLevel;
+        final int threshold;
 
-        AsrTurn(int sessionId, byte[] pcm, long boundaryAt) {
+        AsrTurn(int sessionId, byte[] pcm, long boundaryAt,
+                boolean bargeCandidate, long speechMs, long maxLevel, int threshold) {
             this.sessionId = sessionId;
             this.pcm = pcm;
             this.boundaryAt = boundaryAt;
+            this.bargeCandidate = bargeCandidate;
+            this.speechMs = speechMs;
+            this.maxLevel = maxLevel;
+            this.threshold = threshold;
         }
     }
 
@@ -367,6 +382,8 @@ public class VoiceController {
         long voiceMs = 0;
         long silenceMs = 0;
         long speechMs = 0;
+        long maxSpeechLevel = 0;
+        int speechStartThreshold = 0;
         int baseThreshold = Math.max(250, Prefs.getI(ctx, Prefs.K_VAD_SENSITIVITY, 600));
         long noiseFloor = 0;
         int sessionId = 0;
@@ -387,6 +404,7 @@ public class VoiceController {
                 long frameMs = Math.max(10, n * 1000L / SAMPLE_RATE);
                 long level = rms(buf, n);
                 boolean ttsNow = ttsSpeaking.get();
+                String bargeMode = bargeMode();
                 byte[] pcm = shortsToBytes(buf, n);
 
                 if (!speechActive) {
@@ -395,27 +413,30 @@ public class VoiceController {
                         else noiseFloor = (noiseFloor * 31 + level) / 32;
                     }
                     int adaptiveThreshold = Math.max(baseThreshold, (int) Math.min(4000, noiseFloor * 2 + 100));
-                    boolean voiced = isVoiceFrame(level, adaptiveThreshold, ttsNow);
+                    boolean voiced = isVoiceFrame(level, adaptiveThreshold, ttsNow, bargeMode);
                     preRoll[preIdx] = pcm;
                     preIdx = (preIdx + 1) % preRoll.length;
                     if (preCount < preRoll.length) preCount++;
                     voiceMs = voiced ? voiceMs + frameMs : 0;
-                    long needMs = ttsNow ? STREAM_MIN_BARGE_MS : STREAM_MIN_SPEECH_MS;
+                    long needMs = ttsNow ? bargeStartMs(bargeMode) : STREAM_MIN_SPEECH_MS;
                     if (voiceMs >= needMs) {
                         boolean bargeAtStart = ttsNow;
                         bargeUtterance = bargeAtStart;
                         speechActive = true;
                         speechMs = voiceMs;
+                        maxSpeechLevel = level;
+                        speechStartThreshold = adaptiveThreshold;
                         silenceMs = 0;
                         utterancePcm.reset();
                         int speechPreCount = bargeAtStart
                                 ? Math.min(preCount, BARGE_PREROLL_FRAMES) : preCount;
                         int start = (preIdx - speechPreCount + preRoll.length) % preRoll.length;
                         if (bargeAtStart) {
-                            stopTtsPlayback();
-                            cancelActiveCalls();
                             ConversationLog.append(ctx, "system",
-                                    "Barge-in start level=" + level + " threshold=" + adaptiveThreshold);
+                                    "barge candidate mode=" + bargeMode
+                                            + " level=" + level
+                                            + " threshold=" + adaptiveThreshold
+                                            + " voiceMs=" + voiceMs);
                         }
                         for (int i = 0; i < speechPreCount; i++) {
                             byte[] b = preRoll[(start + i) % preRoll.length];
@@ -434,6 +455,9 @@ public class VoiceController {
                         }
                         latestUtteranceAsrSession.set(sessionId);
                         streamingAsr = currentSession;
+                        if (bargeAtStart) {
+                            bargeCandidateSessions.add(sessionId);
+                        }
                         for (int i = 0; i < speechPreCount; i++) {
                             byte[] b = preRoll[(start + i) % preRoll.length];
                             if (b != null) currentSession.sendPcm(b);
@@ -450,8 +474,9 @@ public class VoiceController {
                 if (currentSession != null) currentSession.sendPcm(pcm);
                 utterancePcm.write(pcm, 0, pcm.length);
                 speechMs += frameMs;
+                if (level > maxSpeechLevel) maxSpeechLevel = level;
                 int adaptiveThreshold = Math.max(baseThreshold, (int) Math.min(4000, noiseFloor * 2 + 100));
-                boolean voiced = isVoiceFrame(level, adaptiveThreshold, ttsNow);
+                boolean voiced = isVoiceFrame(level, adaptiveThreshold, ttsNow, bargeMode);
                 if (voiced) silenceMs = 0;
                 else silenceMs += frameMs;
 
@@ -462,9 +487,10 @@ public class VoiceController {
                 if (forceBoundary || endBySilence || endByLength) {
                     byte[] boundaryPcm = utterancePcm.toByteArray();
                     if (boundaryPcm.length > 0) lastBoundaryPcm = boundaryPcm;
-                    if (boundaryPcm.length > SAMPLE_RATE) {
+                    if (boundaryPcm.length > 0) {
                         asrTurns.put(sessionId, new AsrTurn(sessionId, boundaryPcm,
-                                System.currentTimeMillis()));
+                                System.currentTimeMillis(), bargeUtterance, speechMs,
+                                maxSpeechLevel, speechStartThreshold));
                     }
                     saveLastVoiceForDebug(boundaryPcm);
                     if (currentSession != null) currentSession.finishUtterance();
@@ -478,6 +504,8 @@ public class VoiceController {
                     voiceMs = 0;
                     silenceMs = 0;
                     speechMs = 0;
+                    maxSpeechLevel = 0;
+                    speechStartThreshold = 0;
                 }
             }
         } catch (SecurityException e) {
@@ -516,6 +544,10 @@ public class VoiceController {
                         streamPartial.setLength(0);
                         streamPartial.append(t);
                     }
+                    if (isBargeCandidateSession(sessionId) && ttsSpeaking.get()
+                            && shouldConfirmBargePartial(t, sessionId)) {
+                        confirmBarge(sessionId, "partial", t, null);
+                    }
                     if (!ttsSpeaking.get()) setStatus("听见：" + compact(t, 18));
                 }
             }
@@ -528,6 +560,7 @@ public class VoiceController {
                 handleStreamingFinal(text, sessionId);
                 clearStandbyAsrSession(ref[0]);
                 asrSessions.remove(ref[0]);
+                bargeCandidateSessions.remove(sessionId);
                 ref[0].close();
             }
 
@@ -535,12 +568,14 @@ public class VoiceController {
                 ConversationLog.append(ctx, "error", "ASR session " + sessionId + ": " + msg);
                 clearStandbyAsrSession(ref[0]);
                 asrSessions.remove(ref[0]);
+                bargeCandidateSessions.remove(sessionId);
                 if (sessionId == latestUtteranceAsrSession.get()) setStatus("正在重试识别...");
             }
 
             @Override public void onClosed() {
                 clearStandbyAsrSession(ref[0]);
                 asrSessions.remove(ref[0]);
+                bargeCandidateSessions.remove(sessionId);
                 Log.d(TAG, "ASR session closed " + sessionId);
             }
         });
@@ -575,11 +610,99 @@ public class VoiceController {
         }
     }
 
-    private boolean isVoiceFrame(long level, int threshold, boolean duringTts) {
+    private boolean isVoiceFrame(long level, int threshold, boolean duringTts, String bargeMode) {
         if (!duringTts) return level > threshold;
-        int bargeThreshold = Math.max(threshold + BARGE_THRESHOLD_MARGIN,
-                threshold * 4 / 3);
+        if (Prefs.BARGE_MODE_OFF.equals(bargeMode)) return false;
+        int bargeThreshold = bargeThreshold(threshold, bargeMode);
         return level > bargeThreshold;
+    }
+
+    private String bargeMode() {
+        String s = Prefs.get(ctx, Prefs.K_BARGE_MODE, Prefs.DEFAULT_BARGE_MODE);
+        if (s == null) return Prefs.DEFAULT_BARGE_MODE;
+        s = s.trim().toLowerCase(Locale.US);
+        if (Prefs.BARGE_MODE_OFF.equals(s) || Prefs.BARGE_MODE_SENSITIVE.equals(s)) return s;
+        return Prefs.BARGE_MODE_STEADY;
+    }
+
+    private long bargeStartMs(String mode) {
+        if (Prefs.BARGE_MODE_OFF.equals(mode)) return Long.MAX_VALUE;
+        if (Prefs.BARGE_MODE_SENSITIVE.equals(mode)) return STREAM_MIN_BARGE_SENSITIVE_MS;
+        return STREAM_MIN_BARGE_STEADY_MS;
+    }
+
+    private int bargeThreshold(int threshold, String mode) {
+        if (Prefs.BARGE_MODE_SENSITIVE.equals(mode)) {
+            return Math.max(threshold + BARGE_THRESHOLD_SENSITIVE_MARGIN, threshold * 3 / 2);
+        }
+        return Math.max(threshold + BARGE_THRESHOLD_STEADY_MARGIN, threshold * 2);
+    }
+
+    private boolean isBargeCandidateSession(int sessionId) {
+        return confirmedBargeSession.get() == sessionId || bargeCandidateSessions.contains(sessionId);
+    }
+
+    private boolean shouldConfirmBargePartial(String text, int sessionId) {
+        return confirmedBargeSession.get() == sessionId || isExplicitBargeCommand(text);
+    }
+
+    private boolean shouldConfirmBargeFinal(String text, AsrTurn turn, int sessionId) {
+        if (confirmedBargeSession.get() == sessionId) return true;
+        String mode = bargeMode();
+        if (Prefs.BARGE_MODE_OFF.equals(mode)) return false;
+        if (isExplicitBargeCommand(text)) return true;
+        if (isWeakBargeText(text)) return false;
+        if (turn == null || turn.speechMs < BARGE_SHORT_NOISE_MS) return false;
+        boolean addressed = looksAddressedOrQuestion(text) || looksLikeCurrentInterruption(text);
+        if (addressed) return true;
+        return Prefs.BARGE_MODE_SENSITIVE.equals(mode)
+                && turn.speechMs >= 900
+                && normalizeSpeechText(text).length() >= 4
+                && !looksLikeBackgroundSpeech(text);
+    }
+
+    private void confirmBarge(int sessionId, String stage, String text, AsrTurn turn) {
+        if (confirmedBargeSession.get() == sessionId) return;
+        confirmedBargeSession.set(sessionId);
+        ConversationLog.append(ctx, "system", "barge confirmed stage=" + stage
+                + " mode=" + bargeMode()
+                + (turn == null ? "" : " speechMs=" + turn.speechMs
+                + " maxLevel=" + turn.maxLevel + " threshold=" + turn.threshold)
+                + " text=" + compact(text, 70));
+        stopTtsPlayback();
+        cancelActiveCalls();
+        setStatus("收到打断...");
+    }
+
+    private boolean isExplicitBargeCommand(String text) {
+        String t = normalizeSpeechText(text);
+        if (t.isEmpty()) return false;
+        String[] commands = {"停一下", "暂停", "等等", "等一下", "别说了", "不要说了",
+                "先别说", "先停", "闭嘴", "打断", "我问你", "听我说", "真理罗盘",
+                "罗盘我问", "不是这样", "不对", "错了", "换一个", "重新说",
+                "讲慢点", "声音小点", "声音大点"};
+        for (String s : commands) if (t.contains(normalizeSpeechText(s))) return true;
+        return false;
+    }
+
+    private boolean looksLikeCurrentInterruption(String text) {
+        String t = normalizeSpeechText(text);
+        if (t.isEmpty()) return false;
+        String[] phrases = {"我说", "我问", "你先", "先停", "等会", "等下", "不是",
+                "不对", "错了", "别讲", "别念", "换个", "重新", "继续", "算了",
+                "可以了", "好了"};
+        for (String s : phrases) if (t.contains(normalizeSpeechText(s))) return true;
+        return false;
+    }
+
+    private boolean isWeakBargeText(String text) {
+        String t = normalizeSpeechText(text);
+        if (t.length() <= 1) return true;
+        String[] weak = {"嗯", "啊", "哦", "喔", "呃", "额", "诶", "唉", "好",
+                "好好", "好的", "行", "可以", "需要", "没有", "是的", "对的",
+                "谢谢", "哈哈", "呵呵", "喂"};
+        for (String s : weak) if (t.equals(normalizeSpeechText(s))) return true;
+        return false;
     }
 
     private void handleStreamingFinal(String rawText, int sessionId) {
@@ -592,6 +715,16 @@ public class VoiceController {
                 asrTurn == null ? System.currentTimeMillis() : asrTurn.boundaryAt);
         trace.fastFinalAt = System.currentTimeMillis();
         String text = applyHotwordCorrections(cleanupAsrText(rawText));
+        if (asrTurn != null && asrTurn.bargeCandidate && text.isEmpty()) {
+            ConversationLog.append(ctx, "system", "barge ignored reason=empty"
+                    + " speechMs=" + asrTurn.speechMs
+                    + " maxLevel=" + asrTurn.maxLevel
+                    + " threshold=" + asrTurn.threshold);
+            if (sessionId == latestUtteranceAsrSession.get()) {
+                setStatus(ttsSpeaking.get() ? "播报中..." : "常驻聆听中...");
+            }
+            return;
+        }
         if (text.isEmpty()) {
             ConversationLog.append(ctx, "system", "ASR final[" + sessionId + "]: empty");
             if (sessionId == latestUtteranceAsrSession.get()) setStatus("常驻聆听中...");
@@ -613,6 +746,19 @@ public class VoiceController {
             ConversationLog.append(ctx, "heard", "[回声过滤] " + text);
             setStatus("回声已过滤");
             return;
+        }
+        if (asrTurn != null && asrTurn.bargeCandidate) {
+            if (!shouldConfirmBargeFinal(text, asrTurn, sessionId)) {
+                ConversationLog.append(ctx, "system", "barge ignored reason=weak_or_noise"
+                        + " mode=" + bargeMode()
+                        + " speechMs=" + asrTurn.speechMs
+                        + " maxLevel=" + asrTurn.maxLevel
+                        + " threshold=" + asrTurn.threshold
+                        + " text=" + compact(text, 60));
+                setStatus(ttsSpeaking.get() ? "播报中..." : "常驻聆听中...");
+                return;
+            }
+            confirmBarge(sessionId, "final", text, asrTurn);
         }
         SpeechConsumer consumer = speechConsumer;
         if (consumer != null) {
@@ -741,9 +887,19 @@ public class VoiceController {
             return fastText;
         }
         refined = applyHotwordCorrections(cleanupAsrText(refined));
-        if (shouldUseRefinedAsr(fastText, refined)) return refined;
+        if (shouldUseRefinedAsr(fastText, refined)) {
+            ConversationLog.append(ctx, "system", "ASR final refine selected ms="
+                    + trace.finalAsrMs + " fastScore=" + asrCandidateScore(fastText)
+                    + " finalScore=" + asrCandidateScore(refined)
+                    + " fast=" + compact(fastText, 50)
+                    + " final=" + compact(refined, 70));
+            return refined;
+        }
         ConversationLog.append(ctx, "system", "ASR final refine kept fast ms="
-                + trace.finalAsrMs + " refined=" + compact(refined, 60));
+                + trace.finalAsrMs + " fastScore=" + asrCandidateScore(fastText)
+                + " finalScore=" + asrCandidateScore(refined)
+                + " fast=" + compact(fastText, 50)
+                + " final=" + compact(refined, 70));
         return fastText;
     }
 
@@ -753,10 +909,19 @@ public class VoiceController {
         if (refined.isEmpty()) return false;
         if (fast.isEmpty()) return true;
         if (refined.equals(fast)) return false;
-        if (refined.contains(fast) && refined.length() >= fast.length()) return true;
-        if (fast.contains(refined) && refined.length() + 2 < fast.length()) return false;
+        int fastScore = asrCandidateScore(fastText);
+        int refinedScore = asrCandidateScore(refinedText);
+        int fastBad = asrBadPhraseCount(fastText);
+        int refinedBad = asrBadPhraseCount(refinedText);
+        if (refinedScore >= fastScore + 2) return true;
+        if (refinedBad < fastBad && refinedScore >= fastScore - 1) return true;
+        if (hasAsrDomainTerm(refinedText) && !hasAsrDomainTerm(fastText)) return true;
         if (looksAddressedOrQuestion(refinedText) && !looksAddressedOrQuestion(fastText)) return true;
-        return refined.length() >= fast.length() + 2;
+        if (refined.contains(fast) && refined.length() >= fast.length()) return true;
+        if (fast.contains(refined) && refined.length() + 2 < fast.length()
+                && refinedScore <= fastScore && refinedBad >= fastBad) return false;
+        if (refinedScore > fastScore) return true;
+        return refined.length() >= fast.length() + 2 && refinedBad <= fastBad;
     }
 
     private void submitFinalText(String text, boolean autoMode) {
@@ -1200,7 +1365,7 @@ public class VoiceController {
         final String[] error = {null};
         final boolean[] hadDelta = {false};
         final long[] pendingStartedAt = {0L};
-        Call call = llm.chat(msgs, vision, LlmClient.ChatOptions.voice(), new LlmClient.StreamCallback() {
+        Call call = llm.chat(msgs, vision, llm.voiceOptions(), new LlmClient.StreamCallback() {
             @Override public void onDelta(String s) {
                 if (turnId != turnSerial.get() || s == null || s.isEmpty()) return;
                 List<String> segments;
@@ -1313,7 +1478,12 @@ public class VoiceController {
             ConversationLog.append(ctx, "system", "first_tts_enqueue_ms="
                     + trace.firstTtsEnqueueMs() + " text=" + compact(t, 24));
         }
-        ttsQueue.offer(new TtsJob(turnId, t));
+        TtsJob job = new TtsJob(turnId, t, System.currentTimeMillis());
+        ConversationLog.append(ctx, "system", "TTS segment enqueue turn=" + turnId
+                + " q=" + ttsQueue.size()
+                + " ready=" + readyTtsQueue.size()
+                + " text=" + compact(t, 32));
+        ttsQueue.offer(job);
     }
 
     private void startTtsWorker() {
@@ -1464,6 +1634,10 @@ public class VoiceController {
             ConversationLog.append(ctx, "system", "tts_audio_ms=" + trace.firstTtsAudioMs()
                     + " bytes=" + audio[0].length);
         }
+        ConversationLog.append(ctx, "system", "TTS segment audio ms="
+                + (System.currentTimeMillis() - job.queuedAt)
+                + " bytes=" + audio[0].length
+                + " text=" + compact(job.text, 28));
         return new PreparedTts(job, audio[0], contentType[0]);
     }
 
@@ -1534,6 +1708,9 @@ public class VoiceController {
             trace.firstPlayStartAt = System.currentTimeMillis();
             ConversationLog.append(ctx, "system", "play_start_ms=" + trace.playStartMs());
         }
+        ConversationLog.append(ctx, "system", "TTS segment play queued_ms="
+                + (System.currentTimeMillis() - job.queuedAt)
+                + " text=" + compact(job.text, 28));
         long deadline = System.currentTimeMillis() + 90_000;
         while (CloudTts.isPlaying() && job.turnId == turnSerial.get()
                 && !shuttingDown.get() && System.currentTimeMillis() < deadline) {
@@ -1659,25 +1836,109 @@ public class VoiceController {
                 {"真理螺盘", "真理罗盘"},
                 {"这里罗盘", "真理罗盘"},
                 {"正理罗盘", "真理罗盘"},
+                {"人理罗盘", "真理罗盘"},
+                {"人里罗盘", "真理罗盘"},
+                {"教理罗盘", "真理罗盘"},
+                {"经理罗盘", "真理罗盘"},
+                {"今儿李罗盘", "真理罗盘"},
+                {"今儿里罗盘", "真理罗盘"},
+                {"今儿理罗盘", "真理罗盘"},
+                {"这里螺盘", "真理罗盘"},
+                {"正里罗盘", "真理罗盘"},
+                {"治理罗盘", "真理罗盘"},
                 {"罗牌", "罗盘"},
                 {"螺盘", "罗盘"},
                 {"玲眼", "灵眼"},
                 {"灵验", "灵眼"},
                 {"零眼", "灵眼"},
+                {"凌眼", "灵眼"},
+                {"临眼", "灵眼"},
                 {"上一手", "上一首"},
                 {"上衣首", "上一首"},
+                {"上移首", "上一首"},
+                {"上一艘", "上一首"},
                 {"下一手", "下一首"},
                 {"下衣首", "下一首"},
+                {"下移首", "下一首"},
+                {"下一艘", "下一首"},
                 {"暂亭", "暂停"},
                 {"赞停", "暂停"},
+                {"暂停一下", "暂停"},
+                {"继序", "继续"},
+                {"即续", "继续"},
                 {"网判", "网盘"},
                 {"王盘", "网盘"},
-                {"社置", "设置"}
+                {"网版", "网盘"},
+                {"社置", "设置"},
+                {"涉置", "设置"}
         };
         for (String[] fix : fixes) {
             t = t.replace(fix[0], fix[1]);
         }
+        if (t.contains("罗盘") && t.contains("测试")) {
+            String[][] voiceTestFixes = {
+                    {"语音电路", "语音链路"},
+                    {"语音内路", "语音链路"},
+                    {"语音面路", "语音链路"},
+                    {"语音联络", "语音链路"},
+                    {"雨音链路", "语音链路"},
+                    {"雨音联络", "语音链路"},
+                    {"雨衣链路", "语音链路"},
+                    {"雨衣联络", "语音链路"},
+                    {"雨一链路", "语音链路"},
+                    {"雨一联络", "语音链路"},
+                    {"雨一列链路", "语音链路"},
+                    {"雨一列联络", "语音链路"},
+                    {"语一链路", "语音链路"},
+                    {"语一联络", "语音链路"},
+                    {"语言链路", "语音链路"},
+                    {"语言联络", "语音链路"},
+                    {"与内路", "语音链路"},
+                    {"尼面路", "语音链路"},
+                    {"与链路", "语音链路"}
+            };
+            for (String[] fix : voiceTestFixes) {
+                t = t.replace(fix[0], fix[1]);
+            }
+        }
         return t;
+    }
+
+    private int asrCandidateScore(String text) {
+        String t = text == null ? "" : text;
+        String n = normalizeSpeechText(t);
+        if (n.isEmpty()) return -20;
+        int score = Math.min(6, n.length() / 4);
+        String[] strongTerms = {"真理罗盘", "语音链路", "灵眼", "上一首", "下一首",
+                "暂停", "继续", "设置", "网盘"};
+        for (String term : strongTerms) {
+            if (t.contains(term) || n.contains(normalizeSpeechText(term))) score += 4;
+        }
+        if (looksAddressedOrQuestion(t)) score += 2;
+        if (t.matches(".*[。！？!?；;].*")) score += 1;
+        score -= asrBadPhraseCount(t) * 3;
+        if (n.length() <= 1) score -= 6;
+        return score;
+    }
+
+    private boolean hasAsrDomainTerm(String text) {
+        String t = text == null ? "" : text;
+        String n = normalizeSpeechText(t);
+        String[] terms = {"真理罗盘", "罗盘", "语音链路", "灵眼", "上一首", "下一首",
+                "暂停", "继续", "设置", "网盘"};
+        for (String term : terms) {
+            if (t.contains(term) || n.contains(normalizeSpeechText(term))) return true;
+        }
+        return false;
+    }
+
+    private int asrBadPhraseCount(String text) {
+        String t = text == null ? "" : text;
+        String[] bad = {"雨一列", "雨衣", "雨音", "语一", "联络测试", "语音联络",
+                "语音电路", "语音内路", "语音面路", "与内路", "尼面路"};
+        int count = 0;
+        for (String b : bad) if (t.contains(b)) count++;
+        return count;
     }
 
     private String normalizeSpeechText(String s) {
@@ -1746,10 +2007,12 @@ public class VoiceController {
     private static class TtsJob {
         final int turnId;
         final String text;
+        final long queuedAt;
 
-        TtsJob(int turnId, String text) {
+        TtsJob(int turnId, String text, long queuedAt) {
             this.turnId = turnId;
             this.text = text;
+            this.queuedAt = queuedAt;
         }
     }
 
