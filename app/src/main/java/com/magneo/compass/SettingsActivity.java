@@ -830,10 +830,10 @@ public class SettingsActivity extends BaseActivity {
         final String url = SettingsWebServer.url();
         new RoundDialog(this)
                 .title("网页设置")
-                .text("本机浏览器打开：" + url)
+                .text("同网络浏览器打开：" + url)
                 .text("可配置所有设置，并实时查看屏幕")
                 .text("如需远程访问，走 frpc 公网地址")
-                .item("在本机浏览器打开", () -> startActivity(new Intent(this,
+                .item("打开网页设置", () -> startActivity(new Intent(this,
                         com.magneo.compass.browser.BrowserActivity.class).putExtra("url", url)))
                 .item("知道了", null)
                 .show();
@@ -843,9 +843,9 @@ public class SettingsActivity extends BaseActivity {
         final String url = SettingsWebServer.url();
         new RoundDialog(this)
                 .title("网页查看记录")
-                .text("本机浏览器打开：" + url)
+                .text("同网络浏览器打开：" + url)
                 .text("页面底部显示对话记录")
-                .item("在本机浏览器打开", () -> startActivity(new Intent(this,
+                .item("打开网页记录", () -> startActivity(new Intent(this,
                         com.magneo.compass.browser.BrowserActivity.class).putExtra("url", url)))
                 .item("知道了", null)
                 .show();

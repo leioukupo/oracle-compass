@@ -1,6 +1,8 @@
 package com.magneo.compass.web;
 
 import android.content.Context;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 
 import com.magneo.compass.ConversationLog;
 import com.magneo.compass.Prefs;
@@ -35,7 +37,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** 本机网页设置服务：设备浏览器打开 http://127.0.0.1:8080 可配置应用（不含推流）。 */
+/** 本机网页设置服务：同网络浏览器打开当前设备 IP 的 8080 端口可配置应用（不含推流）。 */
 public class SettingsWebServer {
     public static final int PORT = 8080;
     private static final String LOOPBACK_HOST = "127.0.0.1";
@@ -65,11 +67,13 @@ public class SettingsWebServer {
     public static android.content.Context getAppContext() { return app; }
 
     public static String url() {
-        return "http://" + LOOPBACK_HOST + ":" + PORT + "/";
+        return "http://" + localIp() + ":" + PORT + "/";
     }
 
     public static String localIp() {
         String bestPrivate = null;
+        String wifi = wifiIp();
+        if (wifi != null) return wifi;
         try {
             Enumeration<NetworkInterface> ens = NetworkInterface.getNetworkInterfaces();
             while (ens.hasMoreElements()) {
@@ -88,6 +92,24 @@ public class SettingsWebServer {
             }
         } catch (Exception ignored) {}
         return bestPrivate != null ? bestPrivate : "127.0.0.1";
+    }
+
+    private static String wifiIp() {
+        try {
+            if (app == null) return null;
+            WifiManager wm = (WifiManager) app.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm == null) return null;
+            WifiInfo info = wm.getConnectionInfo();
+            if (info == null) return null;
+            int ip = info.getIpAddress();
+            if (ip == 0) return null;
+            String s = (ip & 0xff) + "." + ((ip >> 8) & 0xff) + "."
+                    + ((ip >> 16) & 0xff) + "." + ((ip >> 24) & 0xff);
+            if ("0.0.0.0".equals(s) || s.startsWith("127.")) return null;
+            return s;
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private static boolean isPrivate(String ip) {

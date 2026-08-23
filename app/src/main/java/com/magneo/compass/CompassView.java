@@ -24,7 +24,7 @@ public class CompassView extends View {
     }
 
     public static final String[] SECTOR_NAMES = {"乾", "坎", "艮", "震", "巽", "离", "兑", "坤"};
-    public static final String[] SECTOR_LABELS = {"应用", "网盘", "设置", "语音", "音乐", "灵眼", "浏览", "详情"};
+    public static final String[] SECTOR_LABELS = {"应用", "网盘", "设置", "系统", "音乐", "灵眼", "浏览", "详情"};
     // 卦象三爻（初爻→二爻→三爻，1=阳爻/连，0=阴爻/断），按 SECTOR_NAMES 顺序
     private static final int[][] TRIGRAMS = {
             {1, 1, 1},  // 乾 ☰

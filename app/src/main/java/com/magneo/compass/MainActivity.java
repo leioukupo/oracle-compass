@@ -203,7 +203,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
             case 0: startActivity(new Intent(this, AppDrawerActivity.class)); break;
             case 1: startActivity(new Intent(this, FileBrowserActivity.class)); break;
             case 2: startActivity(new Intent(this, SettingsActivity.class)); break;
-            case 3: voice.toggle(); break;
+            case 3: startActivity(new Intent(android.provider.Settings.ACTION_SETTINGS)); break;
             case 4: startActivity(new Intent(this, MusicPlayerActivity.class)); break;
             case 5: startActivity(new Intent(this, VisionActivity.class)); break;
             case 6: startActivity(new Intent(this, BrowserActivity.class)); break;
