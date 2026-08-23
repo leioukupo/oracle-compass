@@ -70,10 +70,12 @@ public class FileBrowserActivity extends com.magneo.compass.BaseActivity {
         FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(listSize, listSize, Gravity.CENTER);
         root.addView(list, llp);
         list.post(() -> {
-            int topPad = (int) (list.getHeight() * 0.07f);
-            int bottomPad = (int) (list.getHeight() * 0.16f);
-            list.setPadding(0, topPad, 0, bottomPad);
+            int sidePad = (int) (list.getWidth() * 0.10f);
+            int topPad = (int) (list.getHeight() * 0.09f);
+            int bottomPad = (int) (list.getHeight() * 0.23f);
+            list.setPadding(sidePad, topPad, sidePad, bottomPad);
         });
+        list.setVerticalScrollBarEnabled(false);
 
         headerCard = new LinearLayout(this);
         headerCard.setOrientation(LinearLayout.VERTICAL);
@@ -345,6 +347,7 @@ public class FileBrowserActivity extends com.magneo.compass.BaseActivity {
     }
 
     private void render() {
+        updateHeader(false);
         List<String> names = new ArrayList<>();
         if (!path.isEmpty()) names.add("◂ 返回上级");
         for (NetFs.Entry e : entries) names.add((e.dir ? "▸ " : "• ") + e.name + (e.dir ? "/" : ""));
@@ -398,6 +401,12 @@ public class FileBrowserActivity extends com.magneo.compass.BaseActivity {
             rd.cancel().show();
             return true;
         });
+    }
+
+    private void updateHeader(boolean isLoading) {
+        if (cur != null) connLabel.setText(cur.name + "（" + cur.type + "）");
+        String shown = path == null || path.isEmpty() ? "/" : "/" + path;
+        breadcrumb.setText(isLoading ? shown + " · 加载中…" : shown);
     }
 
     private String join(String p, String name) { return p.isEmpty() ? name : p + "/" + name; }
@@ -810,14 +819,12 @@ public class FileBrowserActivity extends com.magneo.compass.BaseActivity {
         return "video/*";
     }
 
-    /** 单行跑马灯文本：isFocused() 恒真让超长文本自动滚动，且不抢占列表项点击。 */
+    /** 单行安全文本：长文件名中间省略，避免在圆屏底部横穿出安全区。 */
     private static class MarqueeText extends TextView {
         MarqueeText(android.content.Context c) {
             super(c);
             setSingleLine(true);
-            setEllipsize(android.text.TextUtils.TruncateAt.MARQUEE);
-            setMarqueeRepeatLimit(-1);
+            setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
         }
-        @Override public boolean isFocused() { return true; }
     }
 }

@@ -730,6 +730,17 @@ public class VoiceController {
             if (sessionId == latestUtteranceAsrSession.get()) setStatus("常驻聆听中...");
             return;
         }
+        if (isIgnorableAsrText(text, asrTurn)) {
+            ConversationLog.append(ctx, "system", "ASR final ignored[" + sessionId + "]: "
+                    + compact(text, 60)
+                    + (asrTurn == null ? "" : " speechMs=" + asrTurn.speechMs
+                    + " maxLevel=" + asrTurn.maxLevel
+                    + " threshold=" + asrTurn.threshold));
+            if (sessionId == latestUtteranceAsrSession.get()) {
+                setStatus(ttsSpeaking.get() ? "播报中..." : "常驻聆听中...");
+            }
+            return;
+        }
         synchronized (streamPartial) { streamPartial.setLength(0); }
         asrFinalSerial.set(sessionId);
         Log.i(TAG, "ASR final[" + sessionId + "]: " + compact(text, 120));
@@ -819,14 +830,16 @@ public class VoiceController {
             @Override public void onPartial(String text) {}
 
             @Override public void onFinal(String text) {
-                String clean = cleanupAsrText(text);
+                String clean = applyHotwordCorrections(cleanupAsrText(text));
                 asrTerminalSerial.set(sessionId);
-                if (!clean.isEmpty() && asrFinalSerial.get() < sessionId) {
+                if (!clean.isEmpty() && !isIgnorableAsrText(clean, null)
+                        && asrFinalSerial.get() < sessionId) {
                     asrFinalSerial.set(sessionId);
                     ConversationLog.append(ctx, "system", "ASR retry final[" + sessionId + "]");
                     handleStreamingFinal(text, sessionId);
-                } else if (clean.isEmpty()) {
-                    ConversationLog.append(ctx, "system", "ASR retry final[" + sessionId + "]: empty");
+                } else if (clean.isEmpty() || isIgnorableAsrText(clean, null)) {
+                    ConversationLog.append(ctx, "system", "ASR retry final[" + sessionId
+                            + "]: ignored " + compact(clean, 40));
                 }
                 bufferedAsrInFlight.set(false);
                 asrSessions.remove(onceRef[0]);
@@ -887,6 +900,11 @@ public class VoiceController {
             return fastText;
         }
         refined = applyHotwordCorrections(cleanupAsrText(refined));
+        if (isIgnorableAsrText(refined, asrTurn)) {
+            ConversationLog.append(ctx, "system", "ASR final refine ignored ms="
+                    + trace.finalAsrMs + " text=" + compact(refined, 60));
+            return fastText;
+        }
         if (shouldUseRefinedAsr(fastText, refined)) {
             ConversationLog.append(ctx, "system", "ASR final refine selected ms="
                     + trace.finalAsrMs + " fastScore=" + asrCandidateScore(fastText)
@@ -907,6 +925,7 @@ public class VoiceController {
         String fast = normalizeSpeechText(fastText);
         String refined = normalizeSpeechText(refinedText);
         if (refined.isEmpty()) return false;
+        if (isIgnorableAsrText(refinedText, null)) return false;
         if (fast.isEmpty()) return true;
         if (refined.equals(fast)) return false;
         int fastScore = asrCandidateScore(fastText);
@@ -935,6 +954,11 @@ public class VoiceController {
     private void processFinalText(String heardText, boolean autoMode, VoiceTrace trace) {
         String text = applyHotwordCorrections(cleanupAsrText(heardText));
         if (text.isEmpty()) return;
+        if (isIgnorableAsrText(text, null)) {
+            ConversationLog.append(ctx, "heard", "[ASR过滤] " + text);
+            setStatus(continuousRunning.get() ? "常驻聆听中..." : "");
+            return;
+        }
         LlmClient llm = new LlmClient(ctx);
         if (trace == null) trace = new VoiceTrace(0, System.currentTimeMillis());
         if (autoMode && !shouldReply(llm, text, trace)) {
@@ -1299,6 +1323,42 @@ public class VoiceController {
                 "好的", "行", "可以", "谢谢", "哈哈", "呵呵", "喂", "thankyou", "thanks"};
         String lower = t.toLowerCase(Locale.US);
         for (String f : fillers) if (lower.equals(f.toLowerCase(Locale.US))) return true;
+        return false;
+    }
+
+    private boolean isIgnorableAsrText(String text, AsrTurn turn) {
+        String normalized = normalizeSpeechText(text);
+        if (normalized.isEmpty()) return true;
+        if (isExplicitBargeCommand(text) || hasAsrDomainTerm(text)
+                || looksAddressedOrQuestion(text) || looksLikeFollowup(text)) {
+            return false;
+        }
+        if (isFiller(text)) return true;
+        if (normalized.length() <= 1) return true;
+        if (!containsChineseAsciiOrDigit(normalized)) return true;
+        if (isKnownSilenceHallucination(normalized)) return true;
+        return turn != null && turn.speechMs < 450 && normalized.length() <= 2;
+    }
+
+    private boolean isKnownSilenceHallucination(String normalized) {
+        String t = normalized == null ? "" : normalized.toLowerCase(Locale.US);
+        String[] noise = {"그", "嗯嗯", "呃呃", "谢谢观看", "谢谢收看", "字幕", "字幕组",
+                "字幕提供", "字幕志愿者", "thankyou", "thanksforwatching"};
+        for (String s : noise) if (t.equals(normalizeSpeechText(s)) || t.contains(normalizeSpeechText(s))) return true;
+        return false;
+    }
+
+    private boolean containsChineseAsciiOrDigit(String s) {
+        if (s == null) return false;
+        for (int i = 0; i < s.length(); i++) {
+            char ch = s.charAt(i);
+            if ((ch >= '\u4e00' && ch <= '\u9fff')
+                    || (ch >= 'a' && ch <= 'z')
+                    || (ch >= 'A' && ch <= 'Z')
+                    || (ch >= '0' && ch <= '9')) {
+                return true;
+            }
+        }
         return false;
     }
 

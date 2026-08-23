@@ -1,6 +1,9 @@
 package com.magneo.compass.netfs;
 
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
@@ -74,6 +77,8 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
         root.addView(new com.magneo.compass.CompassBackground(this), 0);
 
         FrameLayout shell = new FrameLayout(this);
+        int minSide = Math.min(getResources().getDisplayMetrics().widthPixels,
+                getResources().getDisplayMetrics().heightPixels);
 
         titleView = new TextView(this);
         titleView.setSingleLine(true);
@@ -89,7 +94,11 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
         titleLp.topMargin = Ui.dp(this, 38);
         shell.addView(titleView, titleLp);
 
+        PlayerStage videoStage = new PlayerStage(this);
+        int stagePad = Ui.dp(this, 4);
+        videoStage.setPadding(stagePad, stagePad, stagePad, stagePad);
         FrameLayout videoArea = new FrameLayout(this);
+        videoArea.setBackgroundColor(Color.BLACK);
         vv = new VideoView(this);
         vv.setBackgroundColor(Color.BLACK);
         videoArea.addView(vv, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
@@ -129,8 +138,14 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
             }
             return true;
         });
-        shell.addView(videoArea, new FrameLayout.LayoutParams(
+        videoStage.addView(videoArea, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        int stageW = (int) (minSide * 0.82f);
+        int stageH = (int) (stageW * 9f / 16f);
+        int maxStageH = (int) (minSide * 0.48f);
+        if (stageH > maxStageH) stageH = maxStageH;
+        FrameLayout.LayoutParams stageLp = new FrameLayout.LayoutParams(stageW, stageH, Gravity.CENTER);
+        shell.addView(videoStage, stageLp);
 
         bottomBar = new LinearLayout(this);
         bottomBar.setOrientation(LinearLayout.HORIZONTAL);
@@ -152,12 +167,10 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         timeLp.leftMargin = Ui.dp(this, 8);
         bottomBar.addView(timeView, timeLp);
-        int minSide = Math.min(getResources().getDisplayMetrics().widthPixels,
-                getResources().getDisplayMetrics().heightPixels);
         FrameLayout.LayoutParams bLp = new FrameLayout.LayoutParams(
-                (int) (minSide * 0.54f), Ui.dp(this, 44),
+                (int) (minSide * 0.58f), Ui.dp(this, 40),
                 Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        bLp.bottomMargin = Ui.dp(this, 58);
+        bLp.bottomMargin = Ui.dp(this, 68);
         shell.addView(bottomBar, bLp);
 
         root.addView(shell);
@@ -333,7 +346,7 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     }
 
     private LinearLayout.LayoutParams toolLp() {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Ui.dp(this, 34), Ui.dp(this, 34));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(Ui.dp(this, 32), Ui.dp(this, 32));
         lp.rightMargin = Ui.dp(this, 6);
         return lp;
     }
@@ -379,5 +392,26 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     @Override protected void onDestroy() {
         ui.removeCallbacksAndMessages(null);
         super.onDestroy();
+    }
+
+    private static class PlayerStage extends FrameLayout {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF rect = new RectF();
+
+        PlayerStage(android.content.Context context) {
+            super(context);
+            setWillNotDraw(false);
+            setBackgroundColor(Color.argb(190, 2, 2, 2));
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float d = getResources().getDisplayMetrics().density;
+            rect.set(d, d, getWidth() - d, getHeight() - d);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(1.5f * d);
+            paint.setColor(Color.argb(175, 210, 171, 69));
+            canvas.drawRoundRect(rect, 12f * d, 12f * d, paint);
+        }
     }
 }
