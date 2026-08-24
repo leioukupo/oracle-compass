@@ -51,10 +51,13 @@ public class VoiceController {
     private static final long ASR_RETRY_DELAY_MS = 3_000;
     private static final long ASR_RETRY_TIMEOUT_MS = 4_500;
     private static final long FINAL_ASR_WAIT_MS = 800;
+    private static final long EMPTY_FAST_FINAL_ASR_WAIT_MS = 1_800;
     private static final long GATE_LLM_TIMEOUT_MS = 800;
     private static final long FIRST_SENTENCE_IDLE_CUT_MS = 500;
     private static final long TTS_START_HOLDOFF_MS = 350;
     private static final long TTS_END_HOLDOFF_MS = 900;
+    private static final long TTS_SEGMENT_TIMEOUT_MS = 12_000;
+    private static final long TTS_SEGMENT_RETRY_TIMEOUT_MS = 6_000;
     private static final long FOLLOWUP_WINDOW_MS = 22_000;
 
     public interface StatusListener { void onStatus(String s); }
@@ -715,38 +718,52 @@ public class VoiceController {
                 asrTurn == null ? System.currentTimeMillis() : asrTurn.boundaryAt);
         trace.fastFinalAt = System.currentTimeMillis();
         String text = applyHotwordCorrections(cleanupAsrText(rawText));
-        if (asrTurn != null && asrTurn.bargeCandidate && text.isEmpty()) {
-            ConversationLog.append(ctx, "system", "barge ignored reason=empty"
-                    + " speechMs=" + asrTurn.speechMs
-                    + " maxLevel=" + asrTurn.maxLevel
-                    + " threshold=" + asrTurn.threshold);
-            if (sessionId == latestUtteranceAsrSession.get()) {
-                setStatus(ttsSpeaking.get() ? "播报中..." : "常驻聆听中...");
-            }
-            return;
-        }
+        boolean rescuedWeakFast = false;
         if (text.isEmpty()) {
-            ConversationLog.append(ctx, "system", "ASR final[" + sessionId + "]: empty");
-            if (sessionId == latestUtteranceAsrSession.get()) setStatus("常驻聆听中...");
-            return;
+            String rescued = rescueWeakFastAsr(asrTurn, trace, sessionId, "empty");
+            if (rescued.isEmpty()) {
+                if (asrTurn != null && asrTurn.bargeCandidate) {
+                    ConversationLog.append(ctx, "system", "barge ignored reason=empty"
+                            + " speechMs=" + asrTurn.speechMs
+                            + " maxLevel=" + asrTurn.maxLevel
+                            + " threshold=" + asrTurn.threshold);
+                    if (sessionId == latestUtteranceAsrSession.get()) {
+                        setStatus(ttsSpeaking.get() ? "播报中..." : "常驻聆听中...");
+                    }
+                } else {
+                    ConversationLog.append(ctx, "system", "ASR final[" + sessionId + "]: empty");
+                    if (sessionId == latestUtteranceAsrSession.get()) setStatus("常驻聆听中...");
+                }
+                return;
+            }
+            text = rescued;
+            rescuedWeakFast = true;
         }
         if (isIgnorableAsrText(text, asrTurn)) {
-            ConversationLog.append(ctx, "system", "ASR final ignored[" + sessionId + "]: "
-                    + compact(text, 60)
-                    + (asrTurn == null ? "" : " speechMs=" + asrTurn.speechMs
-                    + " maxLevel=" + asrTurn.maxLevel
-                    + " threshold=" + asrTurn.threshold));
-            if (sessionId == latestUtteranceAsrSession.get()) {
-                setStatus(ttsSpeaking.get() ? "播报中..." : "常驻聆听中...");
+            String rescued = rescuedWeakFast ? "" : rescueWeakFastAsr(asrTurn, trace,
+                    sessionId, "ignored " + compact(text, 40));
+            if (rescued.isEmpty()) {
+                ConversationLog.append(ctx, "system", "ASR final ignored[" + sessionId + "]: "
+                        + compact(text, 60)
+                        + (asrTurn == null ? "" : " speechMs=" + asrTurn.speechMs
+                        + " maxLevel=" + asrTurn.maxLevel
+                        + " threshold=" + asrTurn.threshold));
+                if (sessionId == latestUtteranceAsrSession.get()) {
+                    setStatus(ttsSpeaking.get() ? "播报中..." : "常驻聆听中...");
+                }
+                return;
             }
-            return;
+            text = rescued;
+            rescuedWeakFast = true;
         }
         synchronized (streamPartial) { streamPartial.setLength(0); }
         asrFinalSerial.set(sessionId);
         Log.i(TAG, "ASR final[" + sessionId + "]: " + compact(text, 120));
         ConversationLog.append(ctx, "system", "ASR final[" + sessionId + "] fast_ms="
-                + trace.fastAsrMs() + ": " + compact(text, 120));
-        String refined = refineAsrFinal(text, asrTurn, trace);
+                + trace.fastAsrMs()
+                + (rescuedWeakFast ? " rescued_weak_fast" : "")
+                + ": " + compact(text, 120));
+        String refined = rescuedWeakFast ? text : refineAsrFinal(text, asrTurn, trace);
         if (!refined.equals(text)) {
             ConversationLog.append(ctx, "system", "ASR final corrected[" + sessionId + "]: "
                     + compact(text, 60) + " -> " + compact(refined, 80));
@@ -921,6 +938,39 @@ public class VoiceController {
         return fastText;
     }
 
+    private String rescueWeakFastAsr(AsrTurn asrTurn, VoiceTrace trace, int sessionId,
+                                    String reason) {
+        if (asrTurn == null || asrTurn.pcm == null || asrTurn.pcm.length <= SAMPLE_RATE) {
+            return "";
+        }
+        long started = System.currentTimeMillis();
+        String refined = transcribeBlocking(new LlmClient(ctx), toWav(asrTurn.pcm),
+                EMPTY_FAST_FINAL_ASR_WAIT_MS);
+        trace.finalAsrMs = System.currentTimeMillis() - started;
+        if (refined == null || refined.trim().isEmpty()) {
+            ConversationLog.append(ctx, "system", "ASR weak fast rescue empty[" + sessionId
+                    + "] reason=" + compact(reason, 40) + " ms=" + trace.finalAsrMs);
+            return "";
+        }
+        if (refined.startsWith("!")) {
+            ConversationLog.append(ctx, "system", "ASR weak fast rescue unavailable[" + sessionId
+                    + "] reason=" + compact(reason, 40) + " ms=" + trace.finalAsrMs
+                    + ": " + compact(refined.substring(1), 60));
+            return "";
+        }
+        refined = applyHotwordCorrections(cleanupAsrText(refined));
+        if (isIgnorableAsrText(refined, asrTurn)) {
+            ConversationLog.append(ctx, "system", "ASR weak fast rescue ignored[" + sessionId
+                    + "] reason=" + compact(reason, 40) + " ms=" + trace.finalAsrMs
+                    + " text=" + compact(refined, 60));
+            return "";
+        }
+        ConversationLog.append(ctx, "system", "ASR weak fast rescue selected[" + sessionId
+                + "] reason=" + compact(reason, 40) + " ms=" + trace.finalAsrMs
+                + ": " + compact(refined, 80));
+        return refined;
+    }
+
     private boolean shouldUseRefinedAsr(String fastText, String refinedText) {
         String fast = normalizeSpeechText(fastText);
         String refined = normalizeSpeechText(refinedText);
@@ -928,6 +978,7 @@ public class VoiceController {
         if (isIgnorableAsrText(refinedText, null)) return false;
         if (fast.isEmpty()) return true;
         if (refined.equals(fast)) return false;
+        if (containsCjkText(fastText) && isUntrustedLatinAsr(refinedText, null)) return false;
         int fastScore = asrCandidateScore(fastText);
         int refinedScore = asrCandidateScore(refinedText);
         int fastBad = asrBadPhraseCount(fastText);
@@ -990,7 +1041,7 @@ public class VoiceController {
             List<LlmClient.Msg> msgs = new ArrayList<>();
             msgs.add(new LlmClient.Msg("system",
                     Prefs.get(ctx, Prefs.K_SYS_PROMPT_VOICE, Prefs.DEFAULT_SYS_PROMPT_VOICE)
-                            + "\n常驻语音：该答才答，简短自然，勿提监听。"));
+                            + "\n" + voiceInteractionInstruction()));
             addRecentDialogHistory(msgs, looksLikeFollowup(text) ? 2 : 1);
             msgs.add(new LlmClient.Msg("user", text));
             trace.llmStartAt = System.currentTimeMillis();
@@ -1261,17 +1312,24 @@ public class VoiceController {
     private boolean shouldReply(LlmClient llm, String text, VoiceTrace trace) {
         long started = System.currentTimeMillis();
         String t = text == null ? "" : text.trim();
+        String mode = Prefs.interactionMode(ctx);
         boolean reply;
         if (t.isEmpty() || isFiller(t)) {
             reply = false;
-        } else if (looksAddressedOrQuestion(t) || looksLikeFollowup(t)) {
+        } else if (looksExplicitAddressOrCommand(t) || looksLikeFollowup(t)) {
             reply = true;
         } else if (looksLikeBackgroundSpeech(t)) {
             reply = false;
+        } else if (Prefs.INTERACTION_QUIET.equals(mode)) {
+            reply = looksAddressedOrQuestion(t);
+        } else if (Prefs.INTERACTION_ACTIVE.equals(mode) && looksLikeConversationOpening(t)) {
+            reply = true;
+        } else if (looksAddressedOrQuestion(t) && !Prefs.INTERACTION_ACTIVE.equals(mode)) {
+            reply = true;
         } else if (llm.apiKey.isEmpty()) {
             reply = false;
         } else {
-            String verdict = chatBlocking(llm, gateMessages(t), GATE_LLM_TIMEOUT_MS,
+            String verdict = chatBlocking(llm, gateMessages(t, mode), GATE_LLM_TIMEOUT_MS,
                     LlmClient.ChatOptions.gate()).toUpperCase(Locale.US);
             reply = verdict.contains("REPLY");
             if (verdict.isEmpty() || verdict.startsWith("!")) {
@@ -1283,15 +1341,56 @@ public class VoiceController {
         return reply;
     }
 
-    private List<LlmClient.Msg> gateMessages(String text) {
+    private List<LlmClient.Msg> gateMessages(String text, String mode) {
         List<LlmClient.Msg> msgs = new ArrayList<>();
+        String stance;
+        if (Prefs.INTERACTION_ACTIVE.equals(mode)) {
+            stance = "积极：只要闲聊中有可补充观点、建议、玩笑、解释、选择、吐槽或停顿空间，倾向 REPLY。";
+        } else if (Prefs.INTERACTION_QUIET.equals(mode)) {
+            stance = "安静：只有明显需要你回答、请求帮助、命令或延续刚才对话时才 REPLY。";
+        } else {
+            stance = "自然：像旁边坐着的人，听到开放问题、观点判断、求建议、犹豫求助、明显接话空档时 REPLY。";
+        }
         msgs.add(new LlmClient.Msg("system",
-                "你是常驻语音助手的门控，只能输出 REPLY 或 IGNORE。\n"
+                "你是常驻语音助手的插话门控，只能输出 REPLY 或 IGNORE。\n"
+                        + stance + "\n"
                         + "REPLY：用户明显在问你、叫你、命令你、请求帮助，或明确延续刚才和你的对话。\n"
-                        + "IGNORE：背景闲聊、电视/音乐/广告口播、旁人互相说话、自言自语、无意义语气词、听错片段。\n"
+                        + "IGNORE：电视/音乐/广告/主播口播、纯旁白、无意义短句、噪声、回声、寒暄应答、私密无关内容。\n"
                         + "不解释，不加标点。"));
         msgs.add(new LlmClient.Msg("user", "语音转写：" + text));
         return msgs;
+    }
+
+    private String voiceInteractionInstruction() {
+        String mode = Prefs.interactionMode(ctx);
+        if (Prefs.INTERACTION_QUIET.equals(mode)) {
+            return "常驻语音：少插话，主要回答明确问题、命令和追问；回复简短自然，勿提监听。";
+        }
+        if (Prefs.INTERACTION_ACTIVE.equals(mode)) {
+            return "常驻语音：你像在场的人，可以主动接入闲聊、补观点、给建议、轻松吐槽；每次先短句，勿提监听。";
+        }
+        return "常驻语音：你像在场的人，在合适的闲聊空档自然插一句；不要抢话，回复简短自然，勿提监听。";
+    }
+
+    private boolean looksExplicitAddressOrCommand(String text) {
+        String t = text.toLowerCase(Locale.US);
+        String[] hot = {"真理", "罗盘", "助手", "小罗", "ai", "帮我", "给我", "告诉我", "回答",
+                "解释", "总结", "翻译", "查一下", "搜一下", "打开", "关闭", "播放", "暂停",
+                "你好", "在吗", "嗨", "哈喽", "hello", "hi", "讲", "说", "请", "来一个",
+                "下一首", "上一首"};
+        for (String s : hot) if (t.contains(s)) return true;
+        return false;
+    }
+
+    private boolean looksLikeConversationOpening(String text) {
+        String t = normalizeSpeechText(text);
+        if (t.length() < 4 || looksLikeBackgroundSpeech(text)) return false;
+        String[] cues = {"我觉得", "我感觉", "我想", "我打算", "我准备", "我纠结",
+                "不知道", "要不要", "还是", "怎么办", "难受", "烦", "离谱", "有意思",
+                "好像", "感觉", "是不是", "能不能", "可不可以", "有没有", "为什么",
+                "怎么", "咋", "如果", "假如", "应该", "适合", "推荐", "选择"};
+        for (String s : cues) if (t.contains(normalizeSpeechText(s))) return true;
+        return t.length() >= 8 && t.length() <= 36 && containsCjkText(t);
     }
 
     private boolean looksAddressedOrQuestion(String text) {
@@ -1311,8 +1410,13 @@ public class VoiceController {
         String t = text.replaceAll("[\\s，。！？,.!?、~～…]", "");
         if (t.length() < 2 || t.length() > 40) return false;
         String[] starters = {"那", "然后", "继续", "还有", "这个", "那个", "它", "他", "她",
-                "刚才", "你刚才", "再说", "换个", "具体点", "详细点", "简单点"};
+                "刚才", "你刚才", "再说", "换个", "换一个", "不好听", "不喜欢", "不要",
+                "我不要", "我喜欢", "喜欢", "太短", "短了", "长点", "长一点", "短点",
+                "短一点", "再来", "重讲", "重新讲", "具体点", "详细点", "简单点"};
         for (String s : starters) if (t.startsWith(s)) return true;
+        String[] contains = {"换一个", "换个", "不好听", "不喜欢", "我喜欢", "太短",
+                "短了", "长点", "长一点", "详细点", "简单点"};
+        for (String s : contains) if (t.contains(s)) return true;
         return false;
     }
 
@@ -1320,7 +1424,8 @@ public class VoiceController {
         String t = text.replaceAll("[\\s，。！？,.!?、~～…]", "");
         if (t.length() <= 1) return true;
         String[] fillers = {"嗯", "啊", "哦", "喔", "呃", "额", "唉", "诶", "对", "是", "好",
-                "好的", "行", "可以", "谢谢", "哈哈", "呵呵", "喂", "thankyou", "thanks"};
+                "好的", "行", "可以", "谢谢", "哈哈", "呵呵", "喂", "thankyou", "thanks",
+                "yeah", "yah", "yes", "ok", "okay", "uh", "um"};
         String lower = t.toLowerCase(Locale.US);
         for (String f : fillers) if (lower.equals(f.toLowerCase(Locale.US))) return true;
         return false;
@@ -1337,13 +1442,30 @@ public class VoiceController {
         if (normalized.length() <= 1) return true;
         if (!containsChineseAsciiOrDigit(normalized)) return true;
         if (isKnownSilenceHallucination(normalized)) return true;
+        if (isUntrustedLatinAsr(text, turn)) return true;
         return turn != null && turn.speechMs < 450 && normalized.length() <= 2;
+    }
+
+    private boolean isUntrustedLatinAsr(String text, AsrTurn turn) {
+        String t = normalizeSpeechText(text);
+        if (t.isEmpty() || containsCjkText(t)) return false;
+        int latin = 0;
+        int digits = 0;
+        for (int i = 0; i < t.length(); i++) {
+            char ch = t.charAt(i);
+            if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) latin++;
+            else if (ch >= '0' && ch <= '9') digits++;
+        }
+        if (latin < 6 || latin < Math.max(4, digits * 2)) return false;
+        if (looksAddressedOrQuestion(text) || hasAsrDomainTerm(text)) return false;
+        return turn == null || turn.speechMs < 8_000;
     }
 
     private boolean isKnownSilenceHallucination(String normalized) {
         String t = normalized == null ? "" : normalized.toLowerCase(Locale.US);
         String[] noise = {"그", "嗯嗯", "呃呃", "谢谢观看", "谢谢收看", "字幕", "字幕组",
-                "字幕提供", "字幕志愿者", "thankyou", "thanksforwatching"};
+                "字幕提供", "字幕志愿者", "thankyou", "thanksforwatching", "yeah",
+                "yah", "yes", "ok", "okay", "uh", "um"};
         for (String s : noise) if (t.equals(normalizeSpeechText(s)) || t.contains(normalizeSpeechText(s))) return true;
         return false;
     }
@@ -1358,6 +1480,15 @@ public class VoiceController {
                     || (ch >= '0' && ch <= '9')) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    private boolean containsCjkText(String s) {
+        if (s == null) return false;
+        for (int i = 0; i < s.length(); i++) {
+            char ch = s.charAt(i);
+            if (ch >= '\u4e00' && ch <= '\u9fff') return true;
         }
         return false;
     }
@@ -1531,19 +1662,52 @@ public class VoiceController {
     private void enqueueTts(int turnId, String text) {
         String t = text == null ? "" : text.trim();
         if (t.isEmpty() || turnId != turnSerial.get()) return;
-        rememberSpoken(t);
+        String speech = prepareTtsText(t);
+        if (speech.isEmpty()) {
+            ConversationLog.append(ctx, "system", "TTS segment skipped empty after cleanup: "
+                    + compact(t, 32));
+            return;
+        }
+        rememberSpoken(speech);
         VoiceTrace trace = turnTraces.get(turnId);
         if (firstTtsQueuedTurn.getAndSet(turnId) != turnId && trace != null) {
             trace.firstTtsEnqueueAt = System.currentTimeMillis();
             ConversationLog.append(ctx, "system", "first_tts_enqueue_ms="
-                    + trace.firstTtsEnqueueMs() + " text=" + compact(t, 24));
+                    + trace.firstTtsEnqueueMs() + " text=" + compact(speech, 24));
         }
-        TtsJob job = new TtsJob(turnId, t, System.currentTimeMillis());
+        TtsJob job = new TtsJob(turnId, speech, System.currentTimeMillis());
         ConversationLog.append(ctx, "system", "TTS segment enqueue turn=" + turnId
                 + " q=" + ttsQueue.size()
                 + " ready=" + readyTtsQueue.size()
-                + " text=" + compact(t, 32));
+                + (speech.equals(t) ? "" : " cleaned_from=" + compact(t, 18))
+                + " text=" + compact(speech, 32));
         ttsQueue.offer(job);
+    }
+
+    private String prepareTtsText(String text) {
+        String s = text == null ? "" : text.trim();
+        if (s.isEmpty()) return "";
+        s = s.replace("**", "")
+                .replace("__", "")
+                .replace("`", "")
+                .replace("#", "")
+                .replace("→", "")
+                .replace("=", "就是")
+                .replace("+", "加")
+                .replaceAll("^\\s*[-•·]+\\s*", "")
+                .replaceAll("\\s+", " ")
+                .trim();
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("^(\\d{1,2})[\\.、]\\s*(.+)$")
+                .matcher(s);
+        if (m.matches()) {
+            s = "第" + m.group(1) + "，" + m.group(2).trim();
+        }
+        s = s.replaceAll("[\\*\\[\\]<>]+", "").trim();
+        if (s.length() <= 14 && !s.matches(".*[。！？!?；;，,]$")) {
+            s += "。";
+        }
+        return s;
     }
 
     private void startTtsWorker() {
@@ -1596,10 +1760,20 @@ public class VoiceController {
         }
         ConversationLog.append(ctx, "system", "TTS synth start: " + compact(job.text, 40));
         final String[] firstError = {null};
-        PreparedTts prepared = synthesizeCloudTtsOnce(llm, job, null, firstError);
+        PreparedTts prepared = synthesizeCloudTtsOnce(llm, job, null, firstError,
+                TTS_SEGMENT_TIMEOUT_MS);
         if (prepared != null || job.turnId != turnSerial.get()) return prepared;
 
         String msg = firstError[0] == null ? "无音频返回" : firstError[0];
+        if (isTransientTtsError(msg)) {
+            ConversationLog.append(ctx, "system", "TTS segment retry after transient error: "
+                    + compact(msg, 60) + " text=" + compact(job.text, 32));
+            final String[] retryError = {null};
+            prepared = synthesizeCloudTtsOnce(llm, job, null, retryError,
+                    TTS_SEGMENT_RETRY_TIMEOUT_MS);
+            if (prepared != null || job.turnId != turnSerial.get()) return prepared;
+            msg = retryError[0] == null ? msg : retryError[0];
+        }
         if (isTtsVoiceNotFound(msg)) {
             ConversationLog.append(ctx, "error", "TTS 失败：" + msg);
             String selectedVoice = selectReplacementTtsVoice(llm, job.turnId);
@@ -1613,7 +1787,8 @@ public class VoiceController {
                                 + compact(selectedVoice, 24));
                 setStatus("切换 TTS 音色...");
                 final String[] retryError = {null};
-                prepared = synthesizeCloudTtsOnce(llm, job, selectedVoice, retryError);
+                prepared = synthesizeCloudTtsOnce(llm, job, selectedVoice, retryError,
+                        TTS_SEGMENT_TIMEOUT_MS);
                 if (prepared != null) {
                     ConversationLog.append(ctx, "system",
                             "TTS voice fallback retry ok: " + selectedVoice);
@@ -1626,12 +1801,15 @@ public class VoiceController {
         }
 
         ConversationLog.append(ctx, "error", "TTS 失败：" + msg);
+        ConversationLog.append(ctx, "system", "TTS segment skipped turn=" + job.turnId
+                + " err=" + compact(msg, 60) + " text=" + compact(job.text, 40));
         setStatus("TTS 失败：" + compact(msg, 18));
         return null;
     }
 
     private PreparedTts synthesizeCloudTtsOnce(LlmClient llm, TtsJob job,
-                                               String voiceOverride, String[] errorOut) {
+                                               String voiceOverride, String[] errorOut,
+                                               long timeoutMs) {
         final byte[][] audio = {null};
         final String[] contentType = {""};
         final String[] error = {null};
@@ -1669,7 +1847,7 @@ public class VoiceController {
         });
         trackCall(call);
         if (!ttsSpeaking.get() && readyTtsQueue.isEmpty()) setStatus("合成中...");
-        long synthDeadline = System.currentTimeMillis() + 60_000;
+        long synthDeadline = System.currentTimeMillis() + Math.max(2_000, timeoutMs);
         synchronized (lock) {
             while (!done[0] && System.currentTimeMillis() < synthDeadline
                     && job.turnId == turnSerial.get()) {
@@ -1680,6 +1858,13 @@ public class VoiceController {
         if (job.turnId != turnSerial.get()) {
             ConversationLog.append(ctx, "system", "TTS 已被新一轮对话取消");
             if (errorOut != null && errorOut.length > 0) errorOut[0] = "cancelled";
+            return null;
+        }
+        if (!done[0]) {
+            if (call != null) {
+                try { call.cancel(); } catch (Throwable ignored) {}
+            }
+            if (errorOut != null && errorOut.length > 0) errorOut[0] = "TTS 合成超时";
             return null;
         }
         if (audio[0] == null || audio[0].length == 0) {
@@ -1699,6 +1884,17 @@ public class VoiceController {
                 + " bytes=" + audio[0].length
                 + " text=" + compact(job.text, 28));
         return new PreparedTts(job, audio[0], contentType[0]);
+    }
+
+    private boolean isTransientTtsError(String msg) {
+        String s = msg == null ? "" : msg.toLowerCase(Locale.US);
+        return s.contains("socket")
+                || s.contains("closed")
+                || s.contains("reset")
+                || s.contains("timeout")
+                || s.contains("超时")
+                || s.contains("无音频返回")
+                || s.contains("unexpected end");
     }
 
     private boolean isTtsVoiceNotFound(String msg) {
@@ -1904,6 +2100,10 @@ public class VoiceController {
                 {"今儿里罗盘", "真理罗盘"},
                 {"今儿理罗盘", "真理罗盘"},
                 {"这里螺盘", "真理罗盘"},
+                {"这理罗盘", "真理罗盘"},
+                {"这李罗盘", "真理罗盘"},
+                {"这陈丽罗盘", "真理罗盘"},
+                {"这陈丽罗牌", "真理罗盘"},
                 {"正里罗盘", "真理罗盘"},
                 {"治理罗盘", "真理罗盘"},
                 {"罗牌", "罗盘"},
@@ -1955,6 +2155,9 @@ public class VoiceController {
                     {"语言联络", "语音链路"},
                     {"与内路", "语音链路"},
                     {"尼面路", "语音链路"},
+                    {"与一列列路", "语音链路"},
+                    {"一列列路", "语音链路"},
+                    {"一列联路", "语音链路"},
                     {"与链路", "语音链路"}
             };
             for (String[] fix : voiceTestFixes) {

@@ -100,7 +100,14 @@ public class AdbManager {
     public static String ensureAutoStart(Context ctx) {
         try {
             if (!Prefs.getB(ctx, Prefs.K_ADB_TCP_AUTO, false)) return "adb tcp auto disabled";
-            return startPort(port(ctx));
+            int p = port(ctx);
+            String servicePort = prop("service.adb.tcp.port");
+            String persistPort = prop("persist.service.adb.tcp.port");
+            if (isListening(p) && String.valueOf(p).equals(servicePort)
+                    && String.valueOf(p).equals(persistPort)) {
+                return "adb tcp already running port=" + p;
+            }
+            return startPort(p);
         } catch (Exception e) {
             append("auto start failed: " + e.getMessage());
             return "adb tcp auto failed: " + e.getMessage();

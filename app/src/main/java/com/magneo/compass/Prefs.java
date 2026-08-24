@@ -42,6 +42,7 @@ public class Prefs {
     public static final String K_TTS_VOICE = "ttsVoice";
     public static final String K_LOCAL_TTS_FIRST = "localTtsFirst";
     public static final String K_BARGE_MODE = "bargeMode";
+    public static final String K_INTERACTION_MODE = "interactionMode";
     public static final String K_IGNORE_SSL = "ignoreSsl";
     public static final String K_NO_IMAGES = "noImages";
     public static final String K_UA_DESKTOP = "uaDesktop";
@@ -72,10 +73,19 @@ public class Prefs {
     public static final String K_CAM_AUTO_START = "camAutoStart";
     public static final String K_CONV_CLEAN_MIN = "convCleanMin";
     public static final String K_SYS_PROMPT_VOICE = "sysPromptVoice";
+    public static final String K_STREAM_MODE = "streamMode";
     public static final String K_STREAM_FPS = "streamFps";
     public static final String K_STREAM_QUALITY = "streamQuality";
     public static final String K_STREAM_SCALE = "streamScale";
     public static final String K_STREAM_BITRATE = "streamBitrate";
+    public static final String K_MAIN_RENDERER = "mainRenderer";
+    public static final String K_MAIN_FPS_MODE = "mainFpsMode";
+    public static final String K_MAG_CAL_X = "magCalX";
+    public static final String K_MAG_CAL_Y = "magCalY";
+    public static final String K_MAG_CAL_Z = "magCalZ";
+    public static final String K_MAG_CAL_QUALITY = "magCalQuality";
+    public static final String K_ORACLE_SHAKE_LEVEL = "oracleShakeLevel";
+    public static final String K_ORACLE_SHAKE_FORCE = "oracleShakeForce";
     public static final String K_SYS_PROMPT_VISION = "sysPromptVision";
     public static final String K_SHOW_LOC = "showLoc";
     public static final String K_LOC_WIFI_URL = "locWifiUrl";
@@ -89,9 +99,18 @@ public class Prefs {
     public static final String VISION_FRAME_SOURCE_HAL = "hal";
     public static final String VISION_FRAME_SOURCE_RTSP = "rtsp";
     public static final String DEFAULT_VISION_FRAME_SOURCE = VISION_FRAME_SOURCE_HAL;
+    public static final String MAIN_RENDERER_GL = "gl";
+    public static final String MAIN_RENDERER_CANVAS = "canvas";
+    public static final String DEFAULT_MAIN_RENDERER = MAIN_RENDERER_GL;
+    public static final String MAIN_FPS_ADAPTIVE = "adaptive";
+    public static final String MAIN_FPS_POWER = "power";
+    public static final String MAIN_FPS_SMOOTH = "smooth";
+    public static final String DEFAULT_MAIN_FPS_MODE = MAIN_FPS_ADAPTIVE;
     public static final int DEFAULT_TEXT_MAX_TOKENS = 1024;
     public static final int DEFAULT_VOICE_MAX_TOKENS = 800;
     public static final int DEFAULT_VISION_MAX_TOKENS = 512;
+    public static final int DEFAULT_ORACLE_SHAKE_LEVEL = 4;
+    public static final int DEFAULT_ORACLE_SHAKE_FORCE = 70;
     public static final float DEFAULT_TEXT_TEMPERATURE = 0.3f;
     public static final float DEFAULT_VOICE_TEMPERATURE = 0.2f;
     public static final float DEFAULT_VISION_TEMPERATURE = 0.2f;
@@ -99,6 +118,10 @@ public class Prefs {
     public static final String BARGE_MODE_STEADY = "steady";
     public static final String BARGE_MODE_SENSITIVE = "sensitive";
     public static final String DEFAULT_BARGE_MODE = BARGE_MODE_STEADY;
+    public static final String INTERACTION_QUIET = "quiet";
+    public static final String INTERACTION_NATURAL = "natural";
+    public static final String INTERACTION_ACTIVE = "active";
+    public static final String DEFAULT_INTERACTION_MODE = INTERACTION_NATURAL;
 
     private static SharedPreferences sp(Context c) {
         return c.getSharedPreferences("bagua", Context.MODE_PRIVATE);
@@ -123,6 +146,9 @@ public class Prefs {
     public static void putB(Context c, String k, boolean v) {
         sp(c).edit().putBoolean(k, v).apply();
         exportBackup(c);
+    }
+    public static boolean contains(Context c, String k) {
+        return sp(c).contains(k);
     }
     public static int getI(Context c, String k, int def) {
         try {
@@ -160,6 +186,45 @@ public class Prefs {
 
     public static String visionFrameSourceLabel(Context c) {
         return VISION_FRAME_SOURCE_RTSP.equals(visionFrameSource(c)) ? "RTSP同源" : "HAL直出";
+    }
+
+    public static String normalizeMainRenderer(String v) {
+        return MAIN_RENDERER_CANVAS.equalsIgnoreCase(v) ? MAIN_RENDERER_CANVAS : MAIN_RENDERER_GL;
+    }
+
+    public static String mainRenderer(Context c) {
+        return normalizeMainRenderer(get(c, K_MAIN_RENDERER, DEFAULT_MAIN_RENDERER));
+    }
+
+    public static boolean mainRendererGl(Context c) {
+        return MAIN_RENDERER_GL.equals(mainRenderer(c));
+    }
+
+    public static String normalizeMainFpsMode(String v) {
+        if (MAIN_FPS_POWER.equalsIgnoreCase(v)) return MAIN_FPS_POWER;
+        if (MAIN_FPS_SMOOTH.equalsIgnoreCase(v)) return MAIN_FPS_SMOOTH;
+        return MAIN_FPS_ADAPTIVE;
+    }
+
+    public static String mainFpsMode(Context c) {
+        return normalizeMainFpsMode(get(c, K_MAIN_FPS_MODE, DEFAULT_MAIN_FPS_MODE));
+    }
+
+    public static String normalizeInteractionMode(String v) {
+        if (INTERACTION_QUIET.equalsIgnoreCase(v)) return INTERACTION_QUIET;
+        if (INTERACTION_ACTIVE.equalsIgnoreCase(v)) return INTERACTION_ACTIVE;
+        return INTERACTION_NATURAL;
+    }
+
+    public static String interactionMode(Context c) {
+        return normalizeInteractionMode(get(c, K_INTERACTION_MODE, DEFAULT_INTERACTION_MODE));
+    }
+
+    public static String interactionModeLabel(Context c) {
+        String mode = interactionMode(c);
+        if (INTERACTION_QUIET.equals(mode)) return "安静";
+        if (INTERACTION_ACTIVE.equals(mode)) return "积极";
+        return "自然";
     }
 
     public static boolean restoreBackupIfPresent(Context c) {

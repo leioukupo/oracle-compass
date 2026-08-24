@@ -22,6 +22,8 @@ public class CircleBrowserLayout extends FrameLayout {
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint hintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF arcRect = new RectF();
+    private final Path arcPath = new Path();
 
     public interface OnUrlClickListener {
         void onUrlClick();
@@ -57,8 +59,8 @@ public class CircleBrowserLayout extends FrameLayout {
         float r = Math.min(w, h) / 2f;
 
         // 顶部圆弧路径（从左侧210°到右侧330°，即顶部120°弧段）
-        RectF arcRect = new RectF(cx - r * 0.85f, cy - r * 0.85f, cx + r * 0.85f, cy + r * 0.85f);
-        Path arcPath = new Path();
+        arcRect.set(cx - r * 0.85f, cy - r * 0.85f, cx + r * 0.85f, cy + r * 0.85f);
+        arcPath.reset();
         arcPath.addArc(arcRect, 210f, 120f);
 
         // 绘制圆弧边框

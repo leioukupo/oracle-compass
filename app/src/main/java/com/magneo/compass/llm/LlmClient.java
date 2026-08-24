@@ -248,6 +248,10 @@ public class LlmClient {
         public static ChatOptions gate() {
             return new ChatOptions(0.0f, 4);
         }
+
+        public static ChatOptions oracle() {
+            return new ChatOptions(0.45f, 360);
+        }
     }
 
     public ChatOptions defaultOptions(boolean useVisionModel) {

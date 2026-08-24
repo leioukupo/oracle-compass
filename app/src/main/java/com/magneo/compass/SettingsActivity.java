@@ -321,15 +321,48 @@ public class SettingsActivity extends BaseActivity {
     private void buildVad(LinearLayout b) {
         boolean enabled = Prefs.vadEnabled(this);
         toggleRow(b, "常驻语音监听", Prefs.K_VAD_ENABLED, Prefs.DEFAULT_VAD_ENABLED);
+        summaryRow(b, "参与模式", Prefs.interactionModeLabel(this), this::chooseInteractionMode);
         int cur = Prefs.getI(this, Prefs.K_VAD_SENSITIVITY, 600);
         segmentedInt(b, "监听灵敏度", Prefs.K_VAD_SENSITIVITY, cur,
                 new int[]{900, 600, 350}, new String[]{"低", "中", "高"},
                 () -> editInt("自定义灵敏度", Prefs.K_VAD_SENSITIVITY, 600, 1, 3000, ""));
         if (enabled) {
-            TextView warn = subtle("会持续识别外部语音，并由 AI 判断是否需要回复");
+            TextView warn = subtle(interactionHint());
             warn.setTextColor(Color.rgb(180, 76, 54));
             b.addView(warn, fullLp(3));
         }
+    }
+
+    private String interactionHint() {
+        String mode = Prefs.interactionMode(this);
+        if (Prefs.INTERACTION_QUIET.equals(mode)) {
+            return "少插话：主要回答明确问题、命令和追问";
+        }
+        if (Prefs.INTERACTION_ACTIVE.equals(mode)) {
+            return "积极旁听：闲聊中有观点、选择、吐槽和空档会更愿意接话";
+        }
+        return "自然旁听：持续听外部语音，在合适的闲聊空档插话";
+    }
+
+    private void chooseInteractionMode() {
+        String cur = Prefs.interactionMode(this);
+        new RoundDialog(this)
+                .title("参与模式")
+                .text("控制真理罗盘在旁听闲聊时的主动程度。")
+                .item((Prefs.INTERACTION_QUIET.equals(cur) ? "✓ " : "") + "安静", () -> {
+                    Prefs.put(this, Prefs.K_INTERACTION_MODE, Prefs.INTERACTION_QUIET);
+                    selectCategory(cat);
+                })
+                .item((Prefs.INTERACTION_NATURAL.equals(cur) ? "✓ " : "") + "自然", () -> {
+                    Prefs.put(this, Prefs.K_INTERACTION_MODE, Prefs.INTERACTION_NATURAL);
+                    selectCategory(cat);
+                })
+                .item((Prefs.INTERACTION_ACTIVE.equals(cur) ? "✓ " : "") + "积极", () -> {
+                    Prefs.put(this, Prefs.K_INTERACTION_MODE, Prefs.INTERACTION_ACTIVE);
+                    selectCategory(cat);
+                })
+                .cancel()
+                .show();
     }
 
     private void buildBrowser(LinearLayout b) {

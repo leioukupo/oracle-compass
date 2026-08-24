@@ -10,6 +10,7 @@ import android.view.Window;
 import android.view.WindowManager;
 
 import com.magneo.compass.browser.BrowserActivity;
+import com.magneo.compass.llm.LlmClient;
 import com.magneo.compass.netfs.FileBrowserActivity;
 import com.magneo.compass.netfs.MusicPlayerActivity;
 import com.magneo.compass.vision.VisionActivity;
@@ -17,18 +18,25 @@ import com.magneo.compass.voice.LocalTts;
 import com.magneo.compass.voice.VadService;
 import com.magneo.compass.voice.VoiceController;
 
+import java.util.ArrayList;
+import java.util.List;
+
+import okhttp3.Call;
+
 /** 真理罗盘桌面主屏：HOME 桌面 + 罗盘 + 传感器 + 语音/灵眼入口。 */
 public class MainActivity extends BaseActivity implements CompassView.Actions {
 
-    private CompassView view;
+    private CompassHostView view;
     private SensorHub hub;
     private VoiceController voice;
     private WifiLocator locator;
+    private Call oracleCall;
+    private long oracleUiUpdateMs = 0;
     private final Handler uiTicker = new Handler();
     private final Runnable uiTick = new Runnable() {
         @Override public void run() {
-            if (view != null) view.postInvalidate();   // 每秒心跳：时钟/读数保证刷新，不依赖传感器事件
-            uiTicker.postDelayed(this, 1000);
+            if (view != null) view.postInvalidate();   // 时钟/低频状态心跳，不依赖传感器事件
+            uiTicker.postDelayed(this, idleFrameDelayMs());
         }
     };
 
@@ -44,16 +52,33 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         if (Prefs.get(this, Prefs.K_PROVIDER, "").isEmpty()) {
             ProviderConfig.apply(this, ProviderConfig.openaiCompatible());
         }
-        // MT6580 软件渲染全屏罗盘较贵，传感器重绘限到约 8fps。
+        // MT6580 渲染全屏罗盘较贵：静置时交给 1fps 时钟，明显转动时再提升到约 8fps。
         long[] lastDraw = {0};
+        float[] lastAzimuth = {Float.NaN};
+        float[] lastPitch = {Float.NaN};
+        float[] lastRoll = {Float.NaN};
+        int[] lastBattery = {-1};
         hub = new SensorHub(this, () -> {
             long now = System.currentTimeMillis();
-            if (now - lastDraw[0] >= 120) {
+            float accelMove = (float) Math.abs(Math.sqrt(hub.ax * hub.ax + hub.ay * hub.ay + hub.az * hub.az) - 9.80665f);
+            boolean oracleMotion = view != null && view.isOracleDetailActive()
+                    && (view.isOracleCollecting() || accelMove > 0.25f);
+            boolean changed = angleChanged(hub.azimuth, lastAzimuth[0], 1.5f)
+                    || valueChanged(hub.pitch, lastPitch[0], 1.4f)
+                    || valueChanged(hub.roll, lastRoll[0], 1.4f)
+                    || hub.battery != lastBattery[0]
+                    || oracleMotion;
+            long minGap = activeFrameMinGapMs(oracleMotion);
+            if (changed && now - lastDraw[0] >= minGap) {
                 lastDraw[0] = now;
+                lastAzimuth[0] = hub.azimuth;
+                lastPitch[0] = hub.pitch;
+                lastRoll[0] = hub.roll;
+                lastBattery[0] = hub.battery;
                 view.postInvalidate();
             }
         });
-        view = new CompassView(this, hub, this);
+        view = new CompassHostView(this, hub, this);
         setContentView(view);
         // GPS 硬件不可用时用系统网络/WiFi 定位兜底（每 30s 更新一次，onResume 启动）
         locator = new WifiLocator(this);
@@ -101,7 +126,10 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         super.onResume();
         boolean showLoc = Prefs.getB(this, Prefs.K_SHOW_LOC, false);
         hub.gpsEnabled = showLoc;
+        view.applyRendererPrefs();
+        view.onHostResume();
         hub.start();
+        view.syncHardwareDemand();
         if (locator != null) {
             if (showLoc) {
                 locator.start((lat, lon, acc, src) -> {
@@ -121,6 +149,8 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
 
     @Override
     protected void onPause() {
+        cancelOracleAi();
+        if (view != null) view.onHostPause();
         hub.stop();
         if (locator != null) locator.stop();
         uiTicker.removeCallbacks(uiTick);
@@ -131,8 +161,32 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     protected void onDestroy() {
         uiTicker.removeCallbacks(uiTick);
         if (locator != null) locator.stop();
+        cancelOracleAi();
         voice.shutdown();
         super.onDestroy();
+    }
+
+    private long idleFrameDelayMs() {
+        String mode = Prefs.mainFpsMode(this);
+        if (renderPowerCapped()) return 1000L;
+        if (Prefs.MAIN_FPS_POWER.equals(mode)) return 1000L;
+        if (Prefs.MAIN_FPS_SMOOTH.equals(mode)) return 250L;
+        return 500L;
+    }
+
+    private long activeFrameMinGapMs(boolean oracleMotion) {
+        String mode = Prefs.mainFpsMode(this);
+        if (renderPowerCapped()) return oracleMotion ? 140L : 220L;
+        if (Prefs.MAIN_FPS_POWER.equals(mode)) return oracleMotion ? 140L : 180L;
+        if (Prefs.MAIN_FPS_SMOOTH.equals(mode)) return oracleMotion ? 55L : 55L;
+        return oracleMotion ? 70L : 70L;
+    }
+
+    private boolean renderPowerCapped() {
+        if (hub != null && hub.battery >= 0 && hub.battery < 15) return true;
+        return com.magneo.compass.web.ScreenStreamer.isActive()
+                || com.magneo.compass.web.H264Streamer.isActive()
+                || com.magneo.compass.web.H264SurfaceStreamer.isActive();
     }
 
     private void logAuto(String msg) {
@@ -143,6 +197,20 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
             pw.println(new java.util.Date() + " " + msg);
             pw.close();
         } catch (Exception ignored) {}
+    }
+
+    private static boolean valueChanged(float now, float old, float threshold) {
+        if (Float.isNaN(now)) return false;
+        if (Float.isNaN(old)) return true;
+        return Math.abs(now - old) >= threshold;
+    }
+
+    private static boolean angleChanged(float now, float old, float threshold) {
+        if (Float.isNaN(now)) return false;
+        if (Float.isNaN(old)) return true;
+        float d = Math.abs(now - old) % 360f;
+        if (d > 180f) d = 360f - d;
+        return d >= threshold;
     }
 
     private void syncVoiceServiceFromPrefs() {
@@ -214,6 +282,92 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     @Override
     public void onCenterTap() {
         voice.toggle();
+    }
+
+    @Override
+    public void onOracleReading(OracleReading reading) {
+        requestOracleAi(reading);
+    }
+
+    @Override
+    public void onOraclePageLeft() {
+        cancelOracleAi();
+    }
+
+    private void cancelOracleAi() {
+        if (oracleCall != null) {
+            oracleCall.cancel();
+            oracleCall = null;
+        }
+    }
+
+    private void requestOracleAi(final OracleReading reading) {
+        if (reading == null || view == null) return;
+        cancelOracleAi();
+        LlmClient llm = new LlmClient(this);
+        if (llm.apiKey == null || llm.apiKey.trim().isEmpty()
+                || llm.textBaseUrl == null || llm.textBaseUrl.trim().isEmpty()
+                || llm.textModel == null || llm.textModel.trim().isEmpty()) {
+            view.setOracleAiResult(reading.id, "", "AI 未配置，本地简解可用");
+            return;
+        }
+
+        List<LlmClient.Msg> msgs = new ArrayList<>();
+        msgs.add(new LlmClient.Msg("system",
+                "你是周易占筮解读助手。基于给定卦象，用中文克制解读，分象意、提醒、行动建议三点，总计不超过180字。不要宣称预测必然发生。"));
+        msgs.add(new LlmClient.Msg("user", reading.prompt()));
+        final StringBuilder full = new StringBuilder();
+        oracleUiUpdateMs = 0;
+        oracleCall = llm.chat(msgs, false, LlmClient.ChatOptions.oracle(), new LlmClient.StreamCallback() {
+            @Override public void onDelta(String s) {
+                if (s == null || s.isEmpty()) return;
+                full.append(s);
+                long now = System.currentTimeMillis();
+                if (now - oracleUiUpdateMs < 320) return;
+                oracleUiUpdateMs = now;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        if (view != null && view.isOracleDetailActive()) {
+                            view.setOracleAiResult(reading.id, full.toString(), "AI 解读中");
+                        }
+                    }
+                });
+            }
+
+            @Override public void onDone(final String done) {
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        if (view != null && view.isOracleDetailActive()) {
+                            String text = done == null || done.trim().isEmpty() ? full.toString() : done;
+                            text = text.trim();
+                            view.setOracleAiResult(reading.id, text, text.isEmpty() ? "AI 无返回" : "AI 已解读并播报");
+                            if (!text.isEmpty() && voice != null) {
+                                ConversationLog.append(MainActivity.this, "assistant",
+                                        "占卜：" + compactForLog(text, 220));
+                                voice.speakText("占卜解读。" + text);
+                            }
+                        }
+                    }
+                });
+            }
+
+            @Override public void onError(final String msg) {
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        if (view != null && view.isOracleDetailActive()) {
+                            String err = msg == null || msg.trim().isEmpty() ? "未知错误" : msg.trim();
+                            view.setOracleAiResult(reading.id, "", "AI 失败：" + err);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    private static String compactForLog(String s, int max) {
+        if (s == null) return "";
+        String t = s.replace('\n', ' ').replace('\r', ' ').trim();
+        return t.length() <= max ? t : t.substring(0, max) + "...";
     }
 
     @Override

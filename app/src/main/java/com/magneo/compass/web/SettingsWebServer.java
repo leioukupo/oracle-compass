@@ -383,11 +383,12 @@ public class SettingsWebServer {
                 .append(".card,.panel{border:1px solid rgba(181,139,48,.38);border-radius:14px;background:rgba(37,29,20,.72);box-shadow:0 12px 32px rgba(32,22,10,.22);padding:14px;margin:12px 0}.auth{max-width:560px;margin:20px auto}.tabs{position:sticky;top:0;z-index:5;display:flex;gap:8px;overflow-x:auto;background:rgba(27,21,15,.92);border-bottom:1px solid rgba(181,139,48,.25);padding:10px 0;margin-top:10px}.tab{background:rgba(41,32,20,.68);color:var(--dim);border:1px solid rgba(181,139,48,.34);border-radius:999px;padding:9px 14px;cursor:pointer;white-space:nowrap}.tab.active{color:#1b150f;background:var(--gold);border-color:var(--gold)}")
                 .append(".panel{display:none}.panel.active{display:block}.sectionTitle{display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid rgba(181,139,48,.22);margin:-2px 0 12px;padding-bottom:10px}.sectionTitle h2{margin:0;color:var(--gold);font-size:18px}.sectionTitle small{color:var(--dim)}")
                 .append(".cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.box{border:1px solid rgba(181,139,48,.24);border-radius:12px;background:rgba(32,25,17,.52);padding:12px}.box h3{margin:0 0 10px;color:#dec98f;font-size:15px}.row{display:grid;grid-template-columns:130px 1fr;gap:10px;align-items:center;margin:8px 0}.row label{color:var(--gold);font-size:13px}.hint{color:var(--dim);font-size:11px;line-height:1.5}.state{color:var(--cyan);font-size:12px}.danger{color:var(--bad)}")
-                .append("input,select,textarea{width:100%;background:rgba(29,22,15,.82);color:var(--text);border:1px solid rgba(181,139,48,.42);border-radius:9px;padding:8px;font:inherit;font-size:13px}textarea{min-height:92px;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace}.inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.inline input[type=checkbox]{width:auto}.checkrow{display:flex;gap:8px;align-items:center;color:var(--dim);font-size:13px;margin:8px 0}.checkrow input{width:auto}")
+                .append("input,select,textarea{width:100%;background:rgba(29,22,15,.82);color:var(--text);border:1px solid rgba(181,139,48,.42);border-radius:9px;padding:8px;font:inherit;font-size:13px}input[type=range]{accent-color:var(--gold);padding:0;border:0;background:transparent}textarea{min-height:92px;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace}.inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.inline input[type=checkbox]{width:auto}.checkrow{display:flex;gap:8px;align-items:center;color:var(--dim);font-size:13px;margin:8px 0}.checkrow input{width:auto}")
                 .append("button{background:var(--gold);color:#1b150f;border:0;border-radius:9px;padding:8px 13px;margin:3px;cursor:pointer;font-weight:600}button.secondary{background:rgba(41,32,20,.68);color:var(--gold);border:1px solid rgba(181,139,48,.42)}button.danger{background:#5d2a22;color:#f5d9d2;border:1px solid #925044}button:disabled{opacity:.45;cursor:default}")
                 .append("pre,.log{background:rgba(25,19,13,.72);border:1px solid rgba(181,139,48,.24);border-radius:10px;color:#9ed17d;padding:9px;max-height:220px;overflow:auto;white-space:pre-wrap;font-size:12px;line-height:1.45}.list{border:1px solid rgba(181,139,48,.24);border-radius:10px;overflow:hidden;background:rgba(27,21,15,.58)}.item{display:flex;gap:10px;align-items:center;padding:9px;border-bottom:1px solid rgba(181,139,48,.16)}.item:last-child{border-bottom:0}.item .main{flex:1;min-width:0}.item b{color:var(--gold)}.item small{display:block;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mini{font-size:11px;color:var(--dim)}")
-                .append("details{border:1px solid rgba(181,139,48,.24);border-radius:12px;background:rgba(32,25,17,.48);padding:9px;margin:10px 0}summary{cursor:pointer;color:var(--gold)}.preview{width:min(92mm,88vw);height:min(92mm,88vw);border-radius:50%;border:1px solid rgba(181,139,48,.42);background:#15110c;display:block;margin:10px auto;object-fit:cover}.savebar{position:fixed;left:0;right:0;bottom:0;background:rgba(29,23,16,.96);border-top:1px solid rgba(181,139,48,.34);padding:10px 18px;z-index:10}.savebar .inner{max-width:1180px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:10px}.hidden{display:none!important}a{color:var(--gold)}")
-                .append("@media(max-width:720px){body{padding:12px 12px 92px}.hero{display:block}.row{grid-template-columns:1fr}.tabs{top:0}.cols{grid-template-columns:1fr}.savebar .inner{align-items:flex-start;flex-direction:column}}")
+                .append(".sysdash{padding:16px}.sysbody{display:grid;grid-template-columns:1.05fr 1.5fr;gap:14px;align-items:stretch}.syssummary{border:1px solid rgba(181,139,48,.28);border-radius:12px;background:rgba(31,24,16,.58);padding:14px;min-height:132px}.systime{font-size:34px;line-height:1;color:var(--gold);font-weight:700;font-family:ui-monospace,Menlo,Consolas,monospace}.sysdate{font-size:12px;color:var(--text);margin-top:6px}.syscore{font-size:12px;color:var(--ok);margin-top:12px;line-height:1.55}.sysgps{font-size:12px;color:var(--dim);margin-top:4px;line-height:1.45}.tempring{display:grid;grid-template-columns:repeat(auto-fit,minmax(82px,1fr));gap:8px;margin-top:10px}.tempdot{border:1px solid rgba(181,139,48,.24);border-radius:10px;background:rgba(20,15,10,.62);padding:8px;text-align:center;min-width:0}.tempdot span{display:block;font-size:10px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tempdot b{display:block;font-size:16px;color:var(--gold);margin-top:3px}.sysmeters{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}.meter{border:1px solid rgba(181,139,48,.24);border-radius:12px;background:rgba(32,25,17,.48);padding:11px}.meter .top{display:flex;align-items:center;justify-content:space-between;color:var(--dim);font-size:12px}.meter b{color:var(--gold);font-size:16px}.bar{height:8px;border-radius:999px;background:rgba(16,12,8,.86);border:1px solid rgba(181,139,48,.22);overflow:hidden;margin-top:8px}.bar em{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--gold2),var(--gold));border-radius:999px}.bar.cyan em{background:linear-gradient(90deg,#2c7880,var(--cyan))}.bar.bad em{background:linear-gradient(90deg,#6f2b25,var(--bad))}")
+                .append("details{border:1px solid rgba(181,139,48,.24);border-radius:12px;background:rgba(32,25,17,.48);padding:9px;margin:10px 0}summary{cursor:pointer;color:var(--gold)}.preview{width:min(92mm,88vw);height:min(92mm,88vw);border-radius:50%;border:1px solid rgba(181,139,48,.42);background:#15110c;display:block;margin:10px auto;object-fit:cover}.screenwrap{position:relative;width:min(92mm,88vw);height:min(92mm,88vw);margin:10px auto}.screenwrap .preview{position:absolute;inset:0;width:100%;height:100%;margin:0}.touchpad{position:absolute;inset:0;border-radius:50%;display:none;z-index:3;cursor:crosshair;touch-action:none;user-select:none}.savebar{position:fixed;left:0;right:0;bottom:0;background:rgba(29,23,16,.96);border-top:1px solid rgba(181,139,48,.34);padding:10px 18px;z-index:10}.savebar .inner{max-width:1180px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:10px}.hidden{display:none!important}a{color:var(--gold)}")
+                .append("@media(max-width:720px){body{padding:12px 12px 92px}.hero{display:block}.row{grid-template-columns:1fr}.tabs{top:0}.cols,.sysbody{grid-template-columns:1fr}.savebar .inner{align-items:flex-start;flex-direction:column}}")
                 .append("</style></head><body><div class='wrap'>")
                 .append("<header class='hero'><div class='title'><h1>真理罗盘 · 远程控制台</h1><p>配置、链路测试、备份恢复和设备运维集中在这里。</p></div><div class='pill' id='authBadge'>未登录</div></header>")
                 .append("<div class='grid' id='overview'>")
@@ -406,6 +407,14 @@ public class SettingsWebServer {
                 .append("<div class='inline'><button type='button' onclick='appLogin()'>登录</button><button type='button' class='secondary' onclick='appSetup()'>设置/修改密码</button><span class='state' id='appAuth'></span></div>")
                 .append("</div>")
                 .append("<div id='console' class='hidden'>")
+                .append("<div class='card sysdash'><div class='sectionTitle'><h2>设备状态</h2><small id='sysUpdated'>等待刷新</small></div><div class='sysbody'>")
+                .append("<div class='syssummary'><div class='systime' id='sysTime'>--:--</div><div class='sysdate' id='sysDate'>--</div><div class='syscore' id='sysCore'>总 -- · App -- · Mali -- · 电 --</div><div class='sysgps' id='sysGps'></div><div class='tempring' id='sysTempRing'></div></div>")
+                .append("<div class='sysmeters'><div class='meter'><div class='top'><span>CPU</span><b id='sysCpu'>--</b></div><div class='bar'><em id='sysCpuBar'></em></div></div>")
+                .append("<div class='meter'><div class='top'><span>App CPU</span><b id='sysAppCpu'>--</b></div><div class='bar bad'><em id='sysAppCpuBar'></em></div></div>")
+                .append("<div class='meter'><div class='top'><span>RAM</span><b id='sysRam'>--</b></div><div class='bar'><em id='sysRamBar'></em></div></div>")
+                .append("<div class='meter'><div class='top'><span>Mali</span><b id='sysGpu'>--</b></div><div class='bar cyan'><em id='sysGpuBar'></em></div></div>")
+                .append("<div class='meter'><div class='top'><span>电量</span><b id='sysBat'>--</b></div><div class='bar'><em id='sysBatBar'></em></div></div>")
+                .append("<p class='hint' id='sysLoadNote'>CPU/RAM/温度来自设备实时采样；Mali clock off 表示内核节点未给出有效占用。</p></div></div><div class='box' style='margin-top:12px'><h3>硬件自检</h3><div id='hwDiag' class='list'></div></div></div>")
                 .append("<nav class='tabs'>")
                 .append("<button type='button' class='tab active' data-tab='model'>大模型</button>")
                 .append("<button type='button' class='tab' data-tab='voice'>语音链路</button>")
@@ -443,8 +452,10 @@ public class SettingsWebServer {
                 .append(rowInput("最终 ASR", "asrFinalUrl", "text", "http://host:port/ 或 /api/v1/asr"))
                 .append(rowInput("ASR 模型", "asrModel", "text", "whisper-1 / 服务默认"))
                 .append(rowCheckbox("常驻监听", "vadEnabled", "启动后持续听外部语音"))
+                .append(rowSelect("参与模式", "interactionMode", null, "<option value='quiet'>安静</option><option value='natural'>自然</option><option value='active'>积极</option>", null))
                 .append(rowInput("VAD 灵敏度", "vadSensitivity", "text", "600"))
                 .append(rowSelect("打断模式", "bargeMode", null, "<option value='steady'>稳健</option><option value='sensitive'>灵敏</option><option value='off'>关闭</option>", null))
+                .append("<p class='hint'>自然/积极模式会在闲聊中判断是否接话；安静模式更像传统语音助手。</p>")
                 .append("<div class='inline'><button type='button' onclick=\"runTest('asr')\">测试 Final ASR</button><span class='state' id='testAsr'></span></div>")
                 .append("</div><div class='box'><h3>TTS</h3>")
                 .append(rowInput("TTS 地址", "ttsUrl", "text", "http://host:port/"))
@@ -457,6 +468,12 @@ public class SettingsWebServer {
                 .append("<section class='panel' id='tab-vision'><div class='sectionTitle'><h2>视觉 / 摄像头</h2><small>默认折叠高开销推流预览</small></div><div class='cols'><div class='box'><h3>灵眼</h3>")
                 .append(rowInput("视觉间隔秒", "visionInterval", "text", "2"))
                 .append(rowSelect("灵眼画面源", "visionFrameSource", null, "<option value='hal'>HAL直出</option><option value='rtsp'>RTSP同源</option>", null))
+                .append("<h3 style='margin-top:16px'>显示性能</h3>")
+                .append(rowSelect("主屏渲染", "mainRenderer", null, "<option value='gl'>OpenGL</option><option value='canvas'>Canvas</option>", null))
+                .append(rowSelect("帧率策略", "mainFpsMode", null, "<option value='adaptive'>自适应</option><option value='power'>省电</option><option value='smooth'>流畅</option>", null))
+                .append("<p class='hint'>保存后回到主屏生效；Web 预览开启或低电量时会自动压低主屏刷新。</p>")
+                .append("<h3 style='margin-top:16px'>坤 · 占卜</h3>")
+                .append(rowRange("起卦力度", Prefs.K_ORACLE_SHAKE_FORCE, 0, 100, "0 最灵敏，100 最用力；数值越大越难触发"))
                 .append("<h3 style='margin-top:16px'>视觉系统提示词</h3><textarea name='sysPromptVision'></textarea>")
                 .append("</div><div class='box'><h3>摄像头推流</h3>")
                 .append(rowSelect("摄像头", "camId", null, "<option value='0'>后置</option><option value='1'>前置</option>", null))
@@ -474,7 +491,7 @@ public class SettingsWebServer {
                 .append(rowSelect("画质(MJPEG)", "streamQuality", null, "<option value='30'>低</option><option value='55'>中</option><option value='75'>高</option>", null))
                 .append(rowSelect("尺寸(MJPEG)", "streamScale", null, "<option value='2'>半尺寸</option><option value='1'>原始</option>", null))
                 .append("<div class='inline'><button type='button' onclick='toggleStream()' id='sbtn'>开始屏幕预览</button><button type='button' class='secondary' onclick='keyEvent(4)'>返回</button><button type='button' class='secondary' onclick='keyEvent(3)'>桌面</button><button type='button' class='secondary' onclick='keyEvent(187)'>最近</button></div><p class='state' id='sstate'></p>")
-                .append("</div><div class='box'><img id='screen' class='preview' style='display:none'><div id='touchpad' class='preview' style='display:none;cursor:crosshair;touch-action:none;user-select:none'></div><p class='hint' id='tstat'>MJPEG 兼容预览可远程点击/拖动圆面。</p></div></div></details>")
+                .append("</div><div class='box'><div class='screenwrap'><video id='h264v' class='preview' muted autoplay playsinline style='display:none'></video><img id='screen' class='preview' style='display:none'><div id='touchpad' class='touchpad'></div></div><p class='hint' id='tstat'>按当前推流方式预览；触摸层支持点击/拖动圆面。</p></div></div></details>")
                 .append("</section>")
                 .append("<section class='panel' id='tab-browser'><div class='sectionTitle'><h2>浏览器 / 网盘</h2><small>圆屏浏览和网络文件配置</small></div><div class='cols'><div class='box'><h3>浏览器</h3>")
                 .append(rowInput("搜索引擎", "searchEngine", "text", "https://www.bing.com/search?q=%s"))
@@ -507,6 +524,8 @@ public class SettingsWebServer {
                 .append("<div class='savebar hidden' id='savebar'><div class='inner'><div><b id='dirtyState'>未修改</b><div class='hint'>保存前自动导出备份；Key 留空不会覆盖旧值。</div></div><div><button type='button' onclick='save()'>保存设置</button><span class='state' id='msg'></span></div></div></div>")
                 .append("<script>")
                 .append("var token=sessionStorage.getItem('appmgrToken')||'',started=false,dirty=false,appApps=[],fsConns=[],convCache=null,streamOn=false;")
+                .append("var streamEnded=false,mse=null,sb=null,abortCtl=null,watchdog=null,sess=0,streamPoll=null;")
+                .append("var boxBuf=new Uint8Array(0),boxOff=0,initDone=false,appending=false,pending=[],gotData=false;")
                 .append("function q(s){return document.querySelector(s)}function qa(s){return document.querySelectorAll(s)}")
                 .append("function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\\"/g,'&quot;').replace(/'/g,'&#39;')}")
                 .append("function enc(o){var a=[];for(var k in o)a.push(encodeURIComponent(k)+'='+encodeURIComponent(o[k]==null?'':o[k]));return a.join('&')}")
@@ -520,12 +539,16 @@ public class SettingsWebServer {
                 .append("function appSetup(){api('POST','/appmgr/setup',enc({password:q('#appPwd').value,oldPassword:q('#appOldPwd').value}),function(d){if(d&&d.ok){token=d.token;sessionStorage.setItem('appmgrToken',token);q('#appPwd').value='';q('#appOldPwd').value='';msg('appAuth','管理密码已保存');authState()}else msg('appAuth',d&&d.err?d.err:'设置失败')},'application/x-www-form-urlencoded')}")
                 .append("function msg(id,t){var e=q('#'+id);if(e)e.textContent=t||''}")
                 .append("function publicStatus(){api('GET','/status',null,function(d){if(d){chip('ovVad',d.vadEnabled?'开启':'关闭',!!d.vadEnabled,!d.vadEnabled);chip('ovAsr',d.asrUrlSet?'已配置':'未配置',!!d.asrUrlSet,!d.asrUrlSet);chip('ovAsrFinal',d.asrFinalUrlSet?'已配置':'未配置',!!d.asrFinalUrlSet,false);chip('ovLlm',d.apiKeySet?d.apiKeyMask:'未设置',!!d.apiKeySet,!d.apiKeySet);chip('ovTts',d.ttsUrlSet?'已配置':'未配置',!!d.ttsUrlSet,!d.ttsUrlSet)}});api('GET','/frpc/status',null,function(d){if(d)chip('ovFrpc',d.status==='running'?'运行中':(d.status==='error'?'异常':'停止'),d.status==='running',d.status==='error')});api('GET','/adb/status',null,function(d){if(d)chip('ovAdb',d.running?'运行中':'未监听',!!d.running,false)})}")
-                .append("function initConsole(){loadStatus();frpcRefresh();camRefresh();adbStatus();appState();fsList();loadConv();setInterval(function(){frpcRefresh();camRefresh();adbStatus();appState()},3000);setInterval(loadConv,4000)}")
+                .append("function pct(v){v=Number(v);return v>=0?(Math.round(v)+'%'):'--'}function metric(v,t){return t?t:pct(v)}function meter(n,v,t){var e=q('#sys'+n),b=q('#sys'+n+'Bar');if(e)e.textContent=metric(v,t);if(b)b.style.width=(Number(v)>=0?Math.max(0,Math.min(100,Number(v))):0)+'%'}")
+                .append("function renderHwDiag(h){var box=q('#hwDiag');if(!box)return;h=h||{};var rows=[['传感器',h.sensors||'--'],['姿态',h.pose||'--'],['磁场',h.magnetic||'--'],['卫星',h.gps||'--'],['弱项',h.untrusted||'--'],['校准',h.magCalibration||'--']];var out='';for(var i=0;i<rows.length;i++)out+='<div class=\"item\"><div class=\"main\"><b>'+esc(rows[i][0])+'</b><small>'+esc(rows[i][1])+'</small></div></div>';box.innerHTML=out}")
+                .append("function systemStatus(){api('GET','/system_status',null,renderSystem)}function renderSystem(d){if(!d)return;q('#sysTime').textContent=d.time||'--:--';q('#sysDate').textContent=d.date||'';meter('Cpu',d.cpu);meter('AppCpu',d.appCpu);meter('Ram',d.memPct);meter('Gpu',d.gpu,d.gpuText);meter('Bat',d.battery);renderHwDiag(d.hardware);var gt=d.gpuText||pct(d.gpu),core=(d.cpuOnline&&d.cpuPossible)?(' · 核 '+d.cpuOnline+'/'+d.cpuPossible):'',appCore=(Number(d.appCpuCore)>=0?(' · 单核 '+pct(d.appCpuCore)):''),renderer=(d.mainRenderer==='canvas'?'Canvas':'OpenGL'),fps=d.mainFpsMode==='power'?'省电':(d.mainFpsMode==='smooth'?'流畅':'自适应');q('#sysCore').textContent='总 '+pct(d.cpu)+' · App '+pct(d.appCpu)+appCore+core+' · RAM '+pct(d.memPct)+' · Mali '+gt+' · 电 '+pct(d.battery)+' · '+renderer+'/'+fps;q('#sysGps').textContent=d.gps?('定位 '+d.gps):'';q('#sysUpdated').textContent='更新 '+(d.time||'');var note='CPU/RAM/温度来自设备实时采样；App 为在线核心总口径，单核用于看主线程压力。';if(d.streamActive)note='屏幕预览正在运行，会明显增加 CPU 和温度。';q('#sysLoadNote').textContent=note;var temps=d.temps||[],ring=q('#sysTempRing');if(!ring)return;ring.innerHTML='';for(var i=0;i<temps.length;i++){var el=document.createElement('div');el.className='tempdot';el.innerHTML='<span>'+esc(temps[i].name||'温度')+'</span><b>'+Number(temps[i].c||0).toFixed(0)+'°</b>';ring.appendChild(el)}if(!temps.length){var e=document.createElement('div');e.className='tempdot';e.innerHTML='<span>温度</span><b>--</b>';ring.appendChild(e)}}")
+                .append("function initConsole(){loadStatus();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();fsList();loadConv();setInterval(function(){frpcRefresh();camRefresh();adbStatus();appState()},3000);setInterval(systemStatus,2000);setInterval(loadConv,4000)}")
                 .append("function wireTabs(){var bs=qa('.tab');for(var i=0;i<bs.length;i++)bs[i].onclick=function(){var id=this.getAttribute('data-tab');var b=qa('.tab'),p=qa('.panel');for(var j=0;j<b.length;j++)b[j].classList.remove('active');for(var k=0;k<p.length;k++)p[k].classList.remove('active');this.classList.add('active');q('#tab-'+id).classList.add('active')}}")
                 .append("function wireDirty(){var f=q('#f');if(!f)return;var es=f.querySelectorAll('input,textarea,select');for(var i=0;i<es.length;i++){es[i].addEventListener('input',markDirty);es[i].addEventListener('change',markDirty)}}")
                 .append("function markDirty(){dirty=true;q('#dirtyState').textContent='有未保存修改';q('#dirtyState').style.color='var(--gold)'}function clean(){dirty=false;q('#dirtyState').textContent='已保存';q('#dirtyState').style.color='var(--ok)'}")
-                .append("function loadStatus(){api('GET','/status',null,function(d){if(!d||!d.authed){authState();return}for(var k in d){var e=q('[name=\"'+k+'\"]');if(!e)continue;if(e.type==='checkbox')e.checked=(d[k]===true||d[k]==='true');else if(k!=='apiKey'&&k!=='voiceApiKey')e.value=d[k]}q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';msg('apiKeyState',d.apiKeySet?'当前 '+d.apiKeyMask:'当前未设置');msg('voiceKeyState',d.voiceApiKeySet?'当前 '+d.voiceApiKeyMask:'当前未设置');clean()})}")
+                .append("function loadStatus(){api('GET','/status',null,function(d){if(!d||!d.authed){authState();return}for(var k in d){var e=q('[name=\"'+k+'\"]');if(!e)continue;if(e.type==='checkbox')e.checked=(d[k]===true||d[k]==='true');else if(k!=='apiKey'&&k!=='voiceApiKey')e.value=d[k]}q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';msg('apiKeyState',d.apiKeySet?'当前 '+d.apiKeyMask:'当前未设置');msg('voiceKeyState',d.voiceApiKeySet?'当前 '+d.voiceApiKeyMask:'当前未设置');syncRanges();clean()})}")
                 .append("function providerChanged(){var p=q('#provider').value;if(p==='deepseek'){q('[name=baseUrl]').value='https://api.deepseek.com/v1';q('[name=textModel]').value='deepseek-chat';if(!q('[name=visionModel]').value)q('[name=visionModel]').value='deepseek-chat';q('[name=textBaseUrl]').value='';q('[name=visionBaseUrl]').value=''}else{if(q('[name=baseUrl]').value==='https://api.deepseek.com/v1')q('[name=baseUrl]').value='';if(!q('[name=textModel]').value||q('[name=textModel]').value==='deepseek-chat')q('[name=textModel]').value='gpt-4.1-mini'}}")
+                .append("function oracleShakeLabel(v){v=Math.max(0,Math.min(100,Number(v||70)));var n=v<18?'轻摇':(v<38?'稍轻':(v<62?'正常':(v<82?'较重':'用力')));return Math.round(v)+' / 100 · '+n}function syncRanges(){var e=q('[name=oracleShakeForce]'),t=q('#oracleShakeForceText');if(e&&t)t.textContent=oracleShakeLabel(e.value)}")
                 .append("function save(){var fd=new FormData(q('#f')),b=new URLSearchParams(fd),c=q('#f').querySelectorAll('input[type=checkbox]');for(var i=0;i<c.length;i++)b.set(c[i].name,c[i].checked?'true':'false');textApi('POST','/save',b.toString(),function(t){msg('msg',t);if(t.indexOf('已保存')>=0){q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';q('[name=clearApiKey]').checked=false;q('[name=clearVoiceApiKey]').checked=false;clean();loadStatus()}},'application/x-www-form-urlencoded')}")
                 .append("function runTest(kind){var map={llm:['/test/llm','testLlm'],asr:['/test/asr_final','testAsr'],tts:['/test/tts','testTts'],voices:['/test/tts_voices','testTts']},m=map[kind];if(!m)return;msg(m[1],'测试中...');api('GET',m[0],null,function(d){if(kind==='voices'&&d&&d.ok){var dl=q('#ttsVoiceList');dl.innerHTML='';for(var i=0;i<(d.voices||[]).length;i++){var op=document.createElement('option');op.value=d.voices[i];dl.appendChild(op)}msg(m[1],'音色 '+(d.voices||[]).length+' 个 · '+d.ms+'ms');return}msg(m[1],d&&d.ok?('成功 '+(d.ms||0)+'ms '+(d.text||d.contentType||'')+(d.bytes?(' · '+fmtBytes(d.bytes)):'')+(d.retry?' · 已重试':'')+(d.note?' · '+d.note:'')):('失败 '+(d&&d.err?d.err:'未知错误')))})}")
                 .append("function openTtsSelfTest(){msg('testTts','正在打开设备页面...');api('POST','/open/tts_test','',function(d){msg('testTts',d&&d.ok?'已打开设备自检页':('打开失败 '+(d&&d.err?d.err:'未知错误')))},'application/x-www-form-urlencoded')}")
@@ -535,7 +558,14 @@ public class SettingsWebServer {
                 .append("function adbBody(){return enc({port:q('#adbPort').value,autoStart:q('#adbAuto').checked?'true':'false'})}function adbSave(){api('POST','/adb/save',adbBody(),function(d){msg('adbMsg',d&&d.ok?'已保存':(d&&d.err?d.err:'失败'));adbStatus()},'application/x-www-form-urlencoded')}function adbStart(){if(!confirm('启动 ADB TCP 会重启 adbd，继续？'))return;api('POST','/adb/start',adbBody(),function(d){msg('adbMsg',d&&d.ok?(d.msg||'已启动'):(d&&d.err?d.err:'失败'));adbStatus()},'application/x-www-form-urlencoded')}function adbStop(){if(!confirm('关闭 ADB TCP 会断开远程 ADB，继续？'))return;api('POST','/adb/stop','',function(d){msg('adbMsg',d&&d.ok?(d.msg||'已关闭'):(d&&d.err?d.err:'失败'));setTimeout(adbStatus,1500)},'application/x-www-form-urlencoded')}")
                 .append("function camRefresh(){api('GET','/cam/status',null,function(d){if(!d)return;msg('camState',d.status==='running'?('运行中 · '+(d.detail||'')):d.status);q('#camBtn').textContent=d.status==='running'?'停止推流':'启动推流';q('#camUrls').innerHTML=(d.rtsp?'<div>RTSP: '+esc(d.rtsp)+'</div>':'')+(d.rtmpUrl?'<div>RTMP: '+esc(d.rtmpUrl)+'</div>':'')+(d.webrtc?'<div>WebRTC: '+esc(d.webrtc)+'</div>':'')+(d.realFps?'<div>实际帧率: '+esc(d.realFps)+' fps</div>':'')})}")
                 .append("function camToggle(){api('GET','/cam/status',null,function(d){if(d&&d.status==='running')textApi('GET','/cam/stop',null,function(t){msg('camMsg',t);setTimeout(camRefresh,500)});else textApi('GET','/cam/start',null,function(t){msg('camMsg',t);setTimeout(camRefresh,1500)})})}")
-                .append("function toggleStream(){var img=q('#screen'),tp=q('#touchpad'),st=q('#sstate');streamOn=!streamOn;if(streamOn){img.src='/stream';img.style.display='block';tp.style.display='block';q('#sbtn').textContent='停止屏幕预览';st.textContent='MJPEG 预览中'}else{img.src='';img.style.display='none';tp.style.display='none';q('#sbtn').textContent='开始屏幕预览';st.textContent=''}}")
+                .append("function currentMode(){var e=q('[name=streamMode]'),m=e?e.value:'h264';return m==='h264fast'||m==='mjpeg'?m:'h264'}")
+                .append("function boxAt(pos){if(pos+8>boxBuf.length)return null;var size=((boxBuf[pos]<<24)|(boxBuf[pos+1]<<16)|(boxBuf[pos+2]<<8)|boxBuf[pos+3])>>>0;var type=String.fromCharCode(boxBuf[pos+4],boxBuf[pos+5],boxBuf[pos+6],boxBuf[pos+7]);return{size:size,type:type,start:pos}}")
+                .append("function flushBoxes(my){while(true){if(!initDone){var a=boxAt(boxOff),b=boxAt(boxOff+(a?a.size:0));if(!a||!b||a.type!=='ftyp'||b.type!=='moov'||boxOff+a.size+b.size>boxBuf.length)break;pending.push(boxBuf.slice(boxOff,boxOff+a.size+b.size).buffer);boxOff+=a.size+b.size;initDone=true}else{var c=boxAt(boxOff),d=boxAt(boxOff+(c?c.size:0));if(!c||!d||c.type!=='moof'||d.type!=='mdat'||boxOff+c.size+d.size>boxBuf.length)break;pending.push(boxBuf.slice(boxOff,boxOff+c.size+d.size).buffer);boxOff+=c.size+d.size}if(boxOff===boxBuf.length){boxBuf=new Uint8Array(0);boxOff=0}pumpSb(my)}}")
+                .append("function pumpSb(my){if(my!==sess||!mse||!sb||appending||!pending.length)return;try{appending=true;sb.appendBuffer(pending.shift())}catch(e){appending=false;pending=[];if(e.name!=='InvalidStateError')msg('sstate','MSE 追加失败：'+e)}}")
+                .append("function startH264(){var video=q('#h264v'),img=q('#screen'),st=q('#sstate');if(!window.MediaSource){var sel=q('[name=streamMode]');if(sel)sel.value='mjpeg';if(video)video.style.display='none';if(img){img.src='/stream';img.style.display='block'}if(st)st.textContent='浏览器不支持 H.264 MSE，已切到 MJPEG';return}var my=++sess;boxBuf=new Uint8Array(0);boxOff=0;initDone=false;appending=false;pending=[];gotData=false;streamEnded=false;mse=new MediaSource();video.src=URL.createObjectURL(mse);mse.addEventListener('sourceopen',function(){if(my!==sess)return;var mySb=null;try{mySb=mse.addSourceBuffer('video/mp4; codecs=\\\"avc1.42E01E\\\"')}catch(e){try{mySb=mse.addSourceBuffer('video/mp4; codecs=\\\"avc1.4D401E\\\"')}catch(e2){msg('sstate','无法创建 H.264 解码器');return}}sb=mySb;mySb.mode='segments';mySb.addEventListener('updateend',function(){if(my!==sess){appending=false;pending=[];return}appending=false;pumpSb(my)});mySb.addEventListener('error',function(){if(my===sess)msg('sstate','MSE 错误：浏览器拒绝该媒体数据')});abortCtl=new AbortController();fetch(currentMode()==='h264fast'?'/h264fast':'/h264',{signal:abortCtl.signal}).then(function(r){if(my!==sess)return;if(!r.ok||!r.body){msg('sstate','推流失败 '+r.status+'，请点停止后重试');return}var reader=r.body.getReader();function step(){reader.read().then(function(res){if(my!==sess)return;if(res.done){streamEnded=true;try{video.pause()}catch(e){}msg('sstate','推流已结束（保持最后一帧）');return}var nb=new Uint8Array(boxBuf.length+res.value.length);nb.set(boxBuf,0);nb.set(res.value,boxBuf.length);boxBuf=nb;flushBoxes(my);gotData=true;if(watchdog){clearTimeout(watchdog);watchdog=null}if(st&&st.textContent.indexOf('失败')<0&&st.textContent.indexOf('错误')<0)st.textContent=initDone?'H.264 推流中':'已连接，等待首帧…';video.play().catch(function(){});step()}).catch(function(e){if(e.name!=='AbortError'&&my===sess)msg('sstate','推流中断：'+e)})}step()}).catch(function(e){if(e.name!=='AbortError'&&my===sess)msg('sstate','推流失败：'+e)});watchdog=setTimeout(function(){if(my===sess&&!gotData&&streamOn)msg('sstate','12 秒未收到数据：设备端推流可能未启动，点停止后重试')},12000)})}")
+                .append("function stopH264(){sess++;if(abortCtl){try{abortCtl.abort()}catch(e){}abortCtl=null}if(watchdog){clearTimeout(watchdog);watchdog=null}if(mse){try{mse.endOfStream()}catch(e){}mse=null;sb=null}boxBuf=new Uint8Array(0);boxOff=0;initDone=false;appending=false;pending=[];gotData=false;var v=q('#h264v');if(v){v.removeAttribute('src');try{v.load()}catch(e){}}}")
+                .append("function streamState(){if(!streamOn)return;var vv=q('#h264v'),st=q('#sstate'),m=currentMode();if(vv&&(m==='h264'||m==='h264fast')&&gotData){if(vv.videoWidth>0){if(st.textContent.indexOf('已解码')<0)st.textContent='H.264 推流中 · 已解码 '+vv.videoWidth+'x'+vv.videoHeight}else if(st.textContent.indexOf('未解码')<0&&st.textContent.indexOf('推流中')>=0){st.textContent='H.264 推流中 · 浏览器尚未解码（readyState='+vv.readyState+'）'}if(!streamEnded&&vv.paused&&gotData)vv.play().catch(function(){})}api('GET','/stream_state',null,function(d){if(!d)return;if(d.mode==='mjpeg'&&m==='mjpeg')msg('sstate','MJPEG 推流中 · '+d.fps+'fps');else if(d.mode==='idle'&&streamOn)msg('sstate','设备端预览已停止，可重试')})}")
+                .append("function toggleStream(){var img=q('#screen'),video=q('#h264v'),tp=q('#touchpad'),st=q('#sstate'),btn=q('#sbtn');streamOn=!streamOn;if(streamOn){var m=currentMode();if(tp)tp.style.display='block';if(btn)btn.textContent='停止屏幕预览';if(streamPoll)clearInterval(streamPoll);streamPoll=setInterval(streamState,1500);if(m==='mjpeg'){stopH264();if(video)video.style.display='none';if(img){img.src='/stream';img.style.display='block'}if(st)st.textContent='MJPEG 预览中'}else{if(img){img.src='';img.style.display='none'}if(video)video.style.display='block';if(st)st.textContent=m==='h264fast'?'正在启动 H.264 高速…':'正在启动 H.264…';startH264()}}else{if(streamPoll){clearInterval(streamPoll);streamPoll=null}streamEnded=true;stopH264();if(img){img.src='';img.style.display='none'}if(video)video.style.display='none';if(tp)tp.style.display='none';if(btn)btn.textContent='开始屏幕预览';if(st)st.textContent=''}}")
                 .append("function keyEvent(code){textApi('GET','/key?code='+code,null,function(){msg('tstat','已发送按键 '+code);setTimeout(function(){msg('tstat','')},1200)})}")
                 .append("var tp=q('#touchpad'),td={on:false,moved:false,x:0,y:0,lx:0,ly:0,last:0};function tPos(ev){var r=tp.getBoundingClientRect(),cx=(ev.clientX-r.left)/r.width,cy=(ev.clientY-r.top)/r.height,dx=cx-.5,dy=cy-.5;if(dx*dx+dy*dy>.25)return null;return{x:Math.max(0,Math.min(800,Math.round(cx*800))),y:Math.max(0,Math.min(800,Math.round(cy*800)))}}function tSend(qs){textApi('GET','/touch?'+qs,null,function(){})}if(tp){tp.addEventListener('pointerdown',function(ev){ev.preventDefault();var p=tPos(ev);if(!p)return;td.on=true;td.moved=false;td.x=p.x;td.y=p.y;td.lx=p.x;td.ly=p.y;td.last=0});tp.addEventListener('pointermove',function(ev){ev.preventDefault();if(!td.on)return;var p=tPos(ev);if(!p)return;if(!td.moved&&Math.abs(p.x-td.x)+Math.abs(p.y-td.y)<10)return;td.moved=true;var now=Date.now();if(now-td.last>70){tSend('act=move&x='+p.x+'&y='+p.y+'&px='+td.lx+'&py='+td.ly);td.lx=p.x;td.ly=p.y;td.last=now}});function tend(){if(!td.on)return;td.on=false;if(!td.moved)tSend('act=tap&x='+td.x+'&y='+td.y)}tp.addEventListener('pointerup',tend);tp.addEventListener('pointercancel',tend)}")
                 .append("function fsBody(){return enc({id:q('#fsId').value,name:q('#fsName').value,type:q('#fsType').value,host:q('#fsHost').value,port:q('#fsPort').value,user:q('#fsUser').value,pass:q('#fsPass').value,root:q('#fsRoot').value,domain:q('#fsDomain').value})}")
@@ -573,6 +603,13 @@ public class SettingsWebServer {
     private static String rowCheckbox(String label, String name, String hint) {
         return "<label class='checkrow'><input type='checkbox' name='" + name + "'><b style='color:var(--gold)'>"
                 + label + "</b><span>" + hint + "</span></label>";
+    }
+
+    private static String rowRange(String label, String name, int min, int max, String hint) {
+        return "<div class='row'><label>" + label + "</label><div><input type='range' name='"
+                + name + "' min='" + min + "' max='" + max
+                + "' step='1' oninput='syncRanges()'><div class='hint'><span id='"
+                + name + "Text'></span> · " + hint + "</div></div></div>";
     }
 
     private static String fsRow(String label, String id, String placeholder) {
@@ -629,6 +666,8 @@ public class SettingsWebServer {
                 + "<span style='font-size:11px;color:#8a8272'>关闭时固定优先云端 TTS，云端失败不会偷偷换本地声音</span></div>"
                 + "<div class='row'><label>打断模式</label><select name='bargeMode' style='width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'>"
                 + "<option value='steady'>稳健</option><option value='sensitive'>灵敏</option><option value='off'>关闭</option></select></div>"
+                + "<div class='row'><label>参与模式</label><select name='interactionMode' style='width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'>"
+                + "<option value='quiet'>安静</option><option value='natural'>自然</option><option value='active'>积极</option></select></div>"
                 + "<div style='color:#8a8272;font-size:11px;margin:4px 0 8px 114px'>流式 ASR 填 ws://地址:端口 或 http://主机根地址；最终 ASR 这里填 SenseVoice 根地址或 /api/v1/asr，OpenAI 兼容则直接填 /v1/audio/transcriptions。</div>"
                 + "<div class='row' style='margin-top:10px'><label style='width:100%'>语音系统提示词</label></div>"
                 + "<textarea name='sysPromptVoice' style='width:calc(100% - 14px);height:64px;background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'></textarea>"
@@ -638,11 +677,16 @@ public class SettingsWebServer {
                 + "<div class='row'><label>常驻监听</label><input type='checkbox' name='vadEnabled' style='width:auto;vertical-align:middle'>"
                 + "<span style='font-size:11px;color:#8a8272'>持续识别外部语音，由 AI 判断是否需要回复</span></div>"
                 + "<div class='row'><label>VAD 灵敏度</label><input type='text' name='vadSensitivity'></div>"
+                + "<div class='row'><label>起卦力度</label><div style='width:calc(100% - 130px);display:inline-block;vertical-align:middle'><input type='range' name='oracleShakeForce' min='0' max='100' step='1' oninput='oracleShakeText()' style='width:100%'><div id='oracleShakeForceText' style='font-size:11px;color:#8a8272'>70 / 100 · 较重</div></div></div>"
                 + "<div class='row'><label>搜索引擎</label><input type='text' name='searchEngine'></div>"
                 + "<div class='row' style='margin-top:10px'><label style='width:100%'>视觉系统提示词</label></div>"
                 + "<textarea name='sysPromptVision' style='width:calc(100% - 14px);height:80px;background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'></textarea>"
                 + "<div class='row'><label>灵眼画面源</label><select name='visionFrameSource' style='width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'>"
                 + "<option value='hal'>HAL直出</option><option value='rtsp'>RTSP同源</option></select></div>"
+                + "<div class='row'><label>主屏渲染</label><select name='mainRenderer' style='width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'>"
+                + "<option value='gl'>OpenGL</option><option value='canvas'>Canvas</option></select></div>"
+                + "<div class='row'><label>帧率策略</label><select name='mainFpsMode' style='width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'>"
+                + "<option value='adaptive'>自适应</option><option value='power'>省电</option><option value='smooth'>流畅</option></select></div>"
                 + "</fieldset>"
                 + "<fieldset><legend>屏幕推流</legend>"
                 + "<div class='row'><label>推流方式</label><select name='streamMode'>"
@@ -774,6 +818,7 @@ public class SettingsWebServer {
                 + "get('/status',function(d){if(!d)return;for(var k in d){var e=document.querySelector('[name='+k+']');if(!e)continue;"
                 + "if(e.type==='checkbox'){e.checked=(d[k]===true||d[k]==='true');}else{e.value=d[k];}}"
                 + "document.getElementById('provider').value=normProvider(d.provider);"
+                + "oracleShakeText();"
                 + "document.getElementById('msg').textContent='已加载设备当前配置';});"
                 + "function normProvider(p){p=String(p||'').toLowerCase();return p.indexOf('deepseek')>=0?'deepseek':'openai兼容';}"
                 + "function providerChanged(){var p=document.getElementById('provider').value;"
@@ -783,6 +828,7 @@ public class SettingsWebServer {
                 + "else{var b=document.getElementById('baseUrl'),t=document.querySelector('[name=textModel]'),v=document.querySelector('[name=visionModel]');"
                 + "if(b.value==='https://api.deepseek.com/v1')b.value='';if(!t.value||t.value==='deepseek-chat')t.value='gpt-4.1-mini';"
                 + "if(!v.value||v.value==='deepseek-chat')v.value='gpt-4.1-mini';}}"
+                + "function oracleShakeText(){var e=document.querySelector('[name=oracleShakeForce]'),t=document.getElementById('oracleShakeForceText');if(e&&t){var v=Math.max(0,Math.min(100,Number(e.value||70))),n=v<18?'轻摇':(v<38?'稍轻':(v<62?'正常':(v<82?'较重':'用力'));t.textContent=Math.round(v)+' / 100 · '+n+' · 数值越大越难触发';}}"
                 + "function save(){var b=new URLSearchParams(new FormData(document.getElementById('f')));"
                 + "var cbs=document.querySelectorAll('#f input[type=checkbox]');for(var i=0;i<cbs.length;i++){b.set(cbs[i].name,cbs[i].checked?'true':'false');}"
                 + "var x=new XMLHttpRequest();x.open('POST','/save',true);"
@@ -948,7 +994,8 @@ public class SettingsWebServer {
                 + "function renderSystem(d){if(!d)return;"
                 + "document.getElementById('statTime').textContent=d.time||'--:--';"
                 + "document.getElementById('statDate').textContent=d.date||'';"
-                + "document.getElementById('statCore').textContent='CPU '+(d.cpu>=0?d.cpu+'%':'--')+' · 内存 '+(d.memPct>=0?d.memPct+'%':'--')+' · GPU '+(d.gpu>=0?d.gpu+'%':'--')+' · 电 '+(d.battery>=0?d.battery+'%':'--');"
+                + "var core=(d.cpuOnline&&d.cpuPossible)?(' · 核 '+d.cpuOnline+'/'+d.cpuPossible):'',app=(d.appCpu>=0?(' · App '+d.appCpu+'%'):'');"
+                + "document.getElementById('statCore').textContent='CPU '+(d.cpu>=0?d.cpu+'%':'--')+app+core+' · 内存 '+(d.memPct>=0?d.memPct+'%':'--')+' · GPU '+(d.gpu>=0?d.gpu+'%':'--')+' · 电 '+(d.battery>=0?d.battery+'%':'--');"
                 + "var sg=document.getElementById('statGps');if(sg)sg.textContent=d.gps?'GPS '+d.gps:'';"
                 + "var temps=d.temps||[];var ring=document.getElementById('ring');ring.innerHTML='';"
                 + "var n=Math.max(1,temps.length),cw=ring.clientWidth||346,cx=cw/2,cy=cw/2,r=cw*0.42;"
@@ -1229,10 +1276,15 @@ public class SettingsWebServer {
             o.put("ttsVoice", Prefs.get(app, Prefs.K_TTS_VOICE, ""));
             o.put("localTtsFirst", Prefs.getB(app, Prefs.K_LOCAL_TTS_FIRST, false));
             o.put("bargeMode", Prefs.get(app, Prefs.K_BARGE_MODE, Prefs.DEFAULT_BARGE_MODE));
+            o.put("interactionMode", Prefs.interactionMode(app));
             o.put("visionInterval", String.valueOf(Prefs.getI(app, Prefs.K_VISION_INTERVAL, 2)));
             o.put("visionFrameSource", Prefs.visionFrameSource(app));
             o.put("vadEnabled", Prefs.vadEnabled(app));
             o.put("vadSensitivity", String.valueOf(Prefs.getI(app, Prefs.K_VAD_SENSITIVITY, 600)));
+            int oracleShakeForce = oracleShakeForce();
+            o.put("oracleShakeForce", String.valueOf(oracleShakeForce));
+            o.put("oracleShakeLevel", String.valueOf(Math.max(1, Math.min(5,
+                    Math.round(oracleShakeForce / 25f) + 1))));
             o.put("searchEngine", Prefs.get(app, Prefs.K_SEARCH_ENGINE, "https://www.bing.com/search?q=%s"));
             o.put("ignoreSsl", Prefs.getB(app, Prefs.K_IGNORE_SSL, false));
             o.put("uaDesktop", Prefs.getB(app, Prefs.K_UA_DESKTOP, false));
@@ -1242,10 +1294,13 @@ public class SettingsWebServer {
             o.put("convCleanMin", String.valueOf(Prefs.getI(app, Prefs.K_CONV_CLEAN_MIN, 60)));
             o.put("sysPromptVoice", Prefs.get(app, Prefs.K_SYS_PROMPT_VOICE, Prefs.DEFAULT_SYS_PROMPT_VOICE));
             o.put("sysPromptVision", Prefs.get(app, Prefs.K_SYS_PROMPT_VISION, Prefs.DEFAULT_SYS_PROMPT_VISION));
+            o.put("streamMode", normalizeStreamMode(Prefs.get(app, Prefs.K_STREAM_MODE, "h264")));
             o.put("streamFps", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_FPS, 1)));
             o.put("streamQuality", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_QUALITY, 55)));
             o.put("streamScale", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_SCALE, 2)));
             o.put("streamBitrate", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_BITRATE, 1500)));
+            o.put("mainRenderer", Prefs.mainRenderer(app));
+            o.put("mainFpsMode", Prefs.mainFpsMode(app));
             o.put("locWifiUrl", Prefs.get(app, Prefs.K_LOC_WIFI_URL, Prefs.DEFAULT_LOC_WIFI_URL));
             o.put("locIpUrl", Prefs.get(app, Prefs.K_LOC_IP_URL, Prefs.DEFAULT_LOC_IP_URL));
             o.put("showLoc", Prefs.getB(app, Prefs.K_SHOW_LOC, false));
@@ -1284,14 +1339,29 @@ public class SettingsWebServer {
                 }
                 if (k.equals("visionInterval") || k.equals("vadSensitivity")) {
                     try { Prefs.putI(app, k, Integer.parseInt(v)); } catch (Exception ignored) {}
+                } else if (k.equals(Prefs.K_ORACLE_SHAKE_FORCE)) {
+                    try { Prefs.putI(app, k, clamp(Integer.parseInt(v), 0, 100)); } catch (Exception ignored) {}
+                } else if (k.equals(Prefs.K_ORACLE_SHAKE_LEVEL)) {
+                    try {
+                        int old = clamp(Integer.parseInt(v), 1, 5);
+                        Prefs.putI(app, Prefs.K_ORACLE_SHAKE_FORCE, clamp(old * 18 - 2, 0, 100));
+                    } catch (Exception ignored) {}
                 } else if (k.equals(Prefs.K_VISION_FRAME_SOURCE)) {
                     Prefs.put(app, k, Prefs.normalizeVisionFrameSource(v));
+                } else if (k.equals(Prefs.K_MAIN_RENDERER)) {
+                    Prefs.put(app, k, Prefs.normalizeMainRenderer(v));
+                } else if (k.equals(Prefs.K_MAIN_FPS_MODE)) {
+                    Prefs.put(app, k, Prefs.normalizeMainFpsMode(v));
                 } else if (isMaxTokenKey(k)) {
                     try { Prefs.putI(app, k, clamp(Integer.parseInt(v), 0, 8192)); } catch (Exception ignored) {}
                 } else if (isTemperatureKey(k)) {
                     try { Prefs.putF(app, k, clampF(Float.parseFloat(v), 0f, 2f)); } catch (Exception ignored) {}
                 } else if (k.equals(Prefs.K_BARGE_MODE)) {
                     Prefs.put(app, k, normalizeBargeMode(v));
+                } else if (k.equals(Prefs.K_INTERACTION_MODE)) {
+                    Prefs.put(app, k, Prefs.normalizeInteractionMode(v));
+                } else if (k.equals(Prefs.K_STREAM_MODE)) {
+                    Prefs.put(app, k, normalizeStreamMode(v));
                 } else if (k.equals("convMaxKb")) {
                     try { Prefs.putI(app, k, Math.max(100, Math.min(20480, Integer.parseInt(v)))); } catch (Exception ignored) {}
                 } else if (k.equals("convCleanMin")) {
@@ -1857,6 +1927,22 @@ public class SettingsWebServer {
         return Prefs.BARGE_MODE_STEADY;
     }
 
+    private static int oracleShakeForce() {
+        if (Prefs.contains(app, Prefs.K_ORACLE_SHAKE_FORCE)) {
+            return clamp(Prefs.getI(app, Prefs.K_ORACLE_SHAKE_FORCE,
+                    Prefs.DEFAULT_ORACLE_SHAKE_FORCE), 0, 100);
+        }
+        int old = clamp(Prefs.getI(app, Prefs.K_ORACLE_SHAKE_LEVEL,
+                Prefs.DEFAULT_ORACLE_SHAKE_LEVEL), 1, 5);
+        return clamp(old * 18 - 2, 0, 100);
+    }
+
+    private static String normalizeStreamMode(String v) {
+        String s = v == null ? "" : v.trim().toLowerCase(Locale.US);
+        if ("h264fast".equals(s) || "mjpeg".equals(s)) return s;
+        return "h264";
+    }
+
     private static void serveConversations(OutputStream out) throws IOException {
         JSONObject o = new JSONObject();
         try {
@@ -1882,12 +1968,25 @@ public class SettingsWebServer {
         try {
             o.put("time", new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(new java.util.Date()));
             o.put("date", new java.text.SimpleDateFormat("yyyy-MM-dd EEE", java.util.Locale.getDefault()).format(new java.util.Date()));
+            int cpuOnline = readOnlineCpuCount();
+            int cpuPossible = readPossibleCpuCount();
             o.put("cpu", readCpuPct());
+            o.put("appCpu", readAppCpuPct(cpuOnline));
+            o.put("appCpuCore", lastAppCoreCpuPct);
+            o.put("cpuOnline", cpuOnline);
+            o.put("cpuPossible", cpuPossible);
             long[] mem = readMem();
             o.put("memTotalMb", mem[0] / 1024);
             o.put("memUsedMb", mem[1] / 1024);
             o.put("memPct", mem[0] > 0 ? (int) Math.round(mem[1] * 100.0 / mem[0]) : -1);
-            o.put("gpu", readGpuPct());
+            GpuInfo gpu = readGpuInfo();
+            o.put("gpu", gpu.pct);
+            o.put("gpuText", gpu.text);
+            o.put("streamActive", ScreenStreamer.isActive() || H264Streamer.isActive() || H264SurfaceStreamer.isActive());
+            o.put("streamMode", H264SurfaceStreamer.isActive() ? "h264fast"
+                    : (H264Streamer.isActive() ? "h264" : (ScreenStreamer.isActive() ? "mjpeg" : "idle")));
+            o.put("mainRenderer", Prefs.mainRenderer(app));
+            o.put("mainFpsMode", Prefs.mainFpsMode(app));
             o.put("temps", readTemps());
             com.magneo.compass.SensorHub h = com.magneo.compass.SensorHub.instance;
             String gpsTxt = Prefs.getB(app, Prefs.K_SHOW_LOC, false) ? "无" : "已关闭";
@@ -1899,10 +1998,88 @@ public class SettingsWebServer {
             }
             o.put("gps", gpsTxt);
             o.put("battery", h == null ? -1 : h.battery);
+            o.put("hardware", hardwareStatus(h));
         } catch (Exception ignored) {}
         byte[] b = o.toString().getBytes("UTF-8");
         writeHead(out, "application/json; charset=utf-8", b.length);
         out.write(b);
+    }
+
+    private static JSONObject hardwareStatus(com.magneo.compass.SensorHub h) {
+        JSONObject o = new JSONObject();
+        try {
+            if (h == null) {
+                o.put("sensors", "等待 App 前台采样");
+                o.put("pose", "--");
+                o.put("magnetic", "--");
+                o.put("gps", "--");
+                o.put("untrusted", "--");
+                o.put("magCalibration", "--");
+                return o;
+            }
+            long now = System.currentTimeMillis();
+            String sensors = "加 " + sensorState(h.hasAccelSensor, true, h.lastAccelMs, now)
+                    + " · 陀 " + sensorState(h.hasGyroSensor, h.gyroSampling, h.lastGyroMs, now)
+                    + " · 磁 " + sensorState(h.hasMagSensor, true, h.lastMagMs, now);
+            float tilt = Math.max(Math.abs(h.pitch), Math.abs(h.roll));
+            String pose = (tilt < 8f ? "设备平稳" : String.format(Locale.US, "倾斜 %.0f°", tilt))
+                    + " · 动势 " + motionText(h);
+            float mag = (float) Math.sqrt(h.mx * h.mx + h.my * h.my + h.mz * h.mz);
+            String magnetic = mag > 1f ? String.format(Locale.US, "%.0fuT · %s", mag, magText(mag)) : "无磁力数据";
+            String gps = h.gpsEnabled
+                    ? h.gpsStatus + " · " + h.usedSats + "/" + h.visibleSats
+                    + " 星 · SNR " + (h.maxSnr > 0f ? String.format(Locale.US, "%.0f", h.maxSnr) : "--")
+                    : "卫星关闭";
+            String untrusted = "光 " + sensorValue(h.hasLightSensor, h.rawDiagnosticSampling, h.lastLightMs, h.light, now, true)
+                    + " · 近 " + sensorValue(h.hasProximitySensor, h.rawDiagnosticSampling, h.lastProximityMs, h.proximity, now, true)
+                    + " · 气压 " + sensorValue(h.hasPressureSensor, h.rawDiagnosticSampling, h.lastPressureMs, h.pressure, now, false);
+            String cal = h.magCalQuality + String.format(Locale.US, " · 偏移 %.0f/%.0f/%.0f",
+                    h.magOffsetX, h.magOffsetY, h.magOffsetZ);
+            o.put("sensors", sensors);
+            o.put("pose", pose);
+            o.put("magnetic", magnetic);
+            o.put("gps", gps);
+            o.put("untrusted", untrusted);
+            o.put("magCalibration", cal);
+        } catch (Exception ignored) {}
+        return o;
+    }
+
+    private static String sensorState(boolean exists, boolean active, long lastMs, long now) {
+        if (!exists) return "无";
+        if (!active) return "未启用";
+        if (lastMs <= 0) return "待采样";
+        long age = Math.max(0L, now - lastMs);
+        return age < 5000L ? "正常" : ("停 " + (age / 1000L) + "s");
+    }
+
+    private static String sensorValue(boolean exists, boolean active, long lastMs, float value, long now, boolean zeroUntrusted) {
+        if (!exists) return "无硬件";
+        if (!active) return "未启用";
+        if (lastMs <= 0) return "无事件";
+        if (Float.isNaN(value)) return "无数据";
+        String out = Math.abs(value) >= 10f
+                ? String.format(Locale.US, "%.0f", value)
+                : String.format(Locale.US, "%.1f", value);
+        long age = Math.max(0L, now - lastMs);
+        if (age >= 10000L) out += " 停" + (age / 1000L) + "s";
+        if (zeroUntrusted && Math.abs(value) < 0.001f) out += " 不可信";
+        return out;
+    }
+
+    private static String magText(float mag) {
+        if (mag < 25f) return "偏弱";
+        if (mag > 85f) return "偏强";
+        return "正常";
+    }
+
+    private static String motionText(com.magneo.compass.SensorHub h) {
+        float acc = (float) Math.sqrt(h.ax * h.ax + h.ay * h.ay + h.az * h.az);
+        float shake = Math.abs(acc - 9.80665f);
+        float spin = (float) Math.sqrt(h.gx * h.gx + h.gy * h.gy + h.gz * h.gz) * 57.29578f;
+        if (spin > 35f || shake > 1.6f) return "明显";
+        if (spin > 8f || shake > 0.45f) return "轻微";
+        return "静置";
     }
 
     private static String qParam(String qs, String name) {
@@ -1952,6 +2129,16 @@ public class SettingsWebServer {
 
     private static long[] prevCpuTicks;
     private static int lastCpuPct = 0;
+    private static long prevAppProcTicks = -1;
+    private static long prevAppTotalTicks = -1;
+    private static int lastAppCpuPct = 0;
+    private static int lastAppCoreCpuPct = 0;
+    private static final int[] cpuSmooth = new int[4];
+    private static final int[] cpuSmoothState = new int[2];
+    private static final int[] appCpuSmooth = new int[4];
+    private static final int[] appCpuSmoothState = new int[2];
+    private static final int[] appCoreCpuSmooth = new int[4];
+    private static final int[] appCoreCpuSmoothState = new int[2];
 
     private static int readCpuPct() {
         try {
@@ -1968,7 +2155,8 @@ public class SettingsWebServer {
             }
             prevCpuTicks = cur;
             if (glitch || total <= 0) return lastCpuPct;
-            lastCpuPct = (int) Math.min(100, Math.round(busy * 100.0 / total));
+            int raw = (int) Math.min(100, Math.round(busy * 100.0 / total));
+            lastCpuPct = smooth(raw, cpuSmooth, cpuSmoothState);
             return lastCpuPct;
         } catch (Exception e) { return lastCpuPct; }
     }
@@ -1982,6 +2170,115 @@ public class SettingsWebServer {
         long[] v = new long[7];
         for (int i = 1; i < p.length && i <= 7; i++) v[i - 1] = Long.parseLong(p[i]);
         return v;
+    }
+
+    private static long readCpuTotalTicks() throws Exception {
+        long[] ticks = readCpuTicks();
+        if (ticks == null) return -1;
+        long total = 0;
+        for (long t : ticks) total += t;
+        return total;
+    }
+
+    private static int readAppCpuPct(int onlineCores) {
+        try {
+            long proc = readSelfProcTicks();
+            long total = readCpuTotalTicks();
+            if (proc < 0 || total <= 0) return lastAppCpuPct;
+            if (prevAppProcTicks < 0 || prevAppTotalTicks < 0) {
+                prevAppProcTicks = proc;
+                prevAppTotalTicks = total;
+                return 0;
+            }
+            long dProc = proc - prevAppProcTicks;
+            long dTotal = total - prevAppTotalTicks;
+            prevAppProcTicks = proc;
+            prevAppTotalTicks = total;
+            if (dProc < 0 || dTotal <= 0) return lastAppCpuPct;
+            int online = Math.max(1, onlineCores);
+            int rawTotal = Math.max(0, Math.min(100, (int) Math.round(dProc * 100.0 / dTotal)));
+            int rawCore = Math.max(0, Math.min(999, (int) Math.round(dProc * 100.0 * online / dTotal)));
+            lastAppCpuPct = smooth(rawTotal, appCpuSmooth, appCpuSmoothState);
+            lastAppCoreCpuPct = smooth(rawCore, appCoreCpuSmooth, appCoreCpuSmoothState);
+            return lastAppCpuPct;
+        } catch (Exception e) {
+            return lastAppCpuPct;
+        }
+    }
+
+    private static int smooth(int raw, int[] samples, int[] state) {
+        int pos = state[0];
+        int count = state[1];
+        samples[pos] = raw;
+        pos = (pos + 1) % samples.length;
+        if (count < samples.length) count++;
+        state[0] = pos;
+        state[1] = count;
+        int sum = 0;
+        for (int i = 0; i < count; i++) sum += samples[i];
+        return count <= 0 ? raw : Math.round(sum / (float) count);
+    }
+
+    private static int readOnlineCpuCount() {
+        String s = readFile("/sys/devices/system/cpu/online", 128);
+        int n = countCpuRange(s);
+        return n > 0 ? n : 1;
+    }
+
+    private static int readPossibleCpuCount() {
+        String s = readFile("/sys/devices/system/cpu/possible", 128);
+        int n = countCpuRange(s);
+        if (n > 0) return n;
+        File dir = new File("/sys/devices/system/cpu");
+        File[] files = dir.listFiles();
+        if (files == null) return Math.max(1, Runtime.getRuntime().availableProcessors());
+        int count = 0;
+        for (File f : files) {
+            String name = f.getName();
+            if (name.startsWith("cpu") && name.length() > 3) {
+                boolean digits = true;
+                for (int i = 3; i < name.length(); i++) {
+                    char ch = name.charAt(i);
+                    if (ch < '0' || ch > '9') { digits = false; break; }
+                }
+                if (digits) count++;
+            }
+        }
+        return count > 0 ? count : Math.max(1, Runtime.getRuntime().availableProcessors());
+    }
+
+    private static int countCpuRange(String s) {
+        if (s == null) return 0;
+        int count = 0;
+        String[] parts = s.trim().split(",");
+        for (String part : parts) {
+            part = part.trim();
+            if (part.length() == 0) continue;
+            try {
+                int dash = part.indexOf('-');
+                if (dash >= 0) {
+                    int lo = Integer.parseInt(part.substring(0, dash).trim());
+                    int hi = Integer.parseInt(part.substring(dash + 1).trim());
+                    if (hi >= lo) count += hi - lo + 1;
+                } else {
+                    Integer.parseInt(part);
+                    count++;
+                }
+            } catch (Exception ignored) {}
+        }
+        return count;
+    }
+
+    private static long readSelfProcTicks() throws Exception {
+        String s = readFile("/proc/self/stat", 4096);
+        if (s == null) return -1;
+        int end = s.lastIndexOf(')');
+        if (end < 0 || end + 2 >= s.length()) return -1;
+        String[] p = s.substring(end + 2).trim().split("\\s+");
+        if (p.length < 13) return -1;
+        long utime = Long.parseLong(p[11]);
+        long stime = Long.parseLong(p[12]);
+        return utime + stime;
     }
 
     private static long[] readMem() {
@@ -2006,18 +2303,33 @@ public class SettingsWebServer {
         try { return Long.parseLong(p[1]); } catch (Exception e) { return 0; }
     }
 
-    private static int readGpuPct() {
+    private static GpuInfo readGpuInfo() {
         try {
             String s = readFile("/proc/mali/utilization");
-            if (s == null) return -1;
-            if (s.contains("clock off") || s.trim().isEmpty()) return 0;
+            if (s == null || s.trim().isEmpty()) return new GpuInfo(-1, "--");
+            if (s.contains("clock off")) return new GpuInfo(-1, "clock off");
             // 实际格式: "GPU/GP/PP: 60/17/59, Frequency: 500500"（GPU 为第一个数字）
             java.util.regex.Matcher m = java.util.regex.Pattern.compile("GPU/GP/PP:\\s*(\\d+)").matcher(s);
-            if (m.find()) return clampPct(Integer.parseInt(m.group(1)));
+            if (m.find()) {
+                int pct = clampPct(Integer.parseInt(m.group(1)));
+                return new GpuInfo(pct, pct + "%");
+            }
             m = java.util.regex.Pattern.compile("\\d+").matcher(s);
-            if (m.find()) return clampPct(Integer.parseInt(m.group()));
-            return 0;
-        } catch (Exception e) { return -1; }
+            if (m.find()) {
+                int pct = clampPct(Integer.parseInt(m.group()));
+                return new GpuInfo(pct, pct + "%");
+            }
+            return new GpuInfo(-1, "--");
+        } catch (Exception e) { return new GpuInfo(-1, "--"); }
+    }
+
+    private static final class GpuInfo {
+        final int pct;
+        final String text;
+        GpuInfo(int pct, String text) {
+            this.pct = pct;
+            this.text = text;
+        }
     }
 
     private static int clampPct(int v) {
@@ -2051,9 +2363,13 @@ public class SettingsWebServer {
     }
 
     private static String readFile(String path) {
+        return readFile(path, 128);
+    }
+
+    private static String readFile(String path, int maxBytes) {
         try {
             java.io.FileInputStream in = new java.io.FileInputStream(path);
-            byte[] b = new byte[128];
+            byte[] b = new byte[Math.max(128, maxBytes)];
             int n = in.read(b);
             in.close();
             return n > 0 ? new String(b, 0, n, "UTF-8").trim() : "";
