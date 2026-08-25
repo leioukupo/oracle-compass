@@ -89,13 +89,8 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         // 自动启动 ADB TCP / frpc（按网页配置）；摄像头推流不再随主屏冷启，改由 Vision 前后 onResume/onPause 或 web /cam/start|stop 按需启停，避免冷启即占 CPU
         new Thread(() -> {
             try {
-                String adb = com.magneo.compass.web.AdbManager.ensureAutoStart(getApplicationContext());
-                boolean hasCfg = !Prefs.get(MainActivity.this, Prefs.K_FRPC_CONFIG, "").trim().isEmpty();
-                String r1 = "adb auto: " + adb + "\nfrpc auto: cfg=" + hasCfg + " run=" + com.magneo.compass.frp.FrpcManager.isRunning();
-                if (hasCfg && !com.magneo.compass.frp.FrpcManager.isRunning()) {
-                    r1 += " -> " + com.magneo.compass.frp.FrpcManager.start(getApplicationContext());
-                }
-                logAuto(r1);
+                logAuto(RemoteAccessWatchdog.tickOnce(getApplicationContext()));
+                RemoteAccessWatchdog.start(getApplicationContext());
             } catch (Throwable t) {
                 logAuto("frpc auto FAILED: " + t);
             }

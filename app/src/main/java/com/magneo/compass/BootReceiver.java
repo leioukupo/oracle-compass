@@ -15,7 +15,8 @@ public class BootReceiver extends BroadcastReceiver {
         final Context app = context.getApplicationContext();
         new Thread(() -> {
             try {
-                com.magneo.compass.web.AdbManager.ensureAutoStart(app);
+                RemoteAccessWatchdog.tickOnce(app);
+                RemoteAccessWatchdog.start(app);
             } finally {
                 pr.finish();
             }

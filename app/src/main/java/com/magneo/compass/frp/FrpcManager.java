@@ -54,6 +54,23 @@ public class FrpcManager {
         }
     }
 
+    public static String ensureStarted(Context ctx) {
+        synchronized (LOCK) {
+            if (rootRunning(true)) {
+                if (proc != null && alive(proc)) {
+                    try { proc.destroy(); } catch (Exception ignored) {}
+                    proc = null;
+                }
+                return "frpc root already running";
+            }
+            if (proc != null && alive(proc)) {
+                try { proc.destroy(); } catch (Exception ignored) {}
+                proc = null;
+            }
+        }
+        return start(ctx);
+    }
+
     public static String status() { return snapshot().status; }
 
     public static String detail() { return snapshot().detail; }
@@ -69,8 +86,10 @@ public class FrpcManager {
                 stopLocked();
                 File dir = prepareAppFiles(ctx);
                 File bin = new File(dir, "frpc");
-                String cfg = Prefs.get(ctx, Prefs.K_FRPC_CONFIG, "");
-                if (cfg.trim().isEmpty()) return "配置为空：请先在网页填写 frpc.toml";
+                String rawCfg = Prefs.get(ctx, Prefs.K_FRPC_CONFIG, "");
+                if (rawCfg.trim().isEmpty()) return "配置为空：请先在网页填写 frpc.toml";
+                String cfg = normalizeConfig(rawCfg);
+                if (!cfg.equals(rawCfg)) Prefs.put(ctx, Prefs.K_FRPC_CONFIG, cfg);
                 File conf = new File(dir, "frpc.toml");
                 try (FileOutputStream fo = new FileOutputStream(conf)) {
                     fo.write(cfg.getBytes(StandardCharsets.UTF_8));
@@ -164,6 +183,29 @@ public class FrpcManager {
         }
     }
 
+    private static String normalizeConfig(String cfg) {
+        if (cfg == null) return "";
+        String out = cfg.replace("\r\n", "\n").replace('\r', '\n');
+        out = out.replaceAll("(?m)^(\\s*localIP\\s*=\\s*)[\"']0\\.0\\.0\\.0[\"']", "$1\"127.0.0.1\"");
+
+        java.util.regex.Pattern hb = java.util.regex.Pattern.compile(
+                "(?m)^\\s*transport\\.heartbeatInterval\\s*=\\s*\\d+\\s*$");
+        java.util.regex.Matcher m = hb.matcher(out);
+        if (m.find()) {
+            out = m.replaceAll("transport.heartbeatInterval = 20");
+        } else {
+            String line = "transport.heartbeatInterval = 20\n";
+            int idx = out.indexOf("[[proxies]]");
+            if (idx >= 0) {
+                out = out.substring(0, idx) + line + out.substring(idx);
+            } else {
+                if (!out.endsWith("\n") && out.length() > 0) out += "\n";
+                out += line;
+            }
+        }
+        return out;
+    }
+
     private static File prepareAppFiles(Context ctx) throws Exception {
         File dir = new File(ctx.getFilesDir(), "frp");
         if (!dir.exists() && !dir.mkdirs()) throw new IOException("无法创建 frp 目录");
@@ -196,12 +238,13 @@ public class FrpcManager {
             }
 
             stopRootDaemon();
-            String start = "cd " + q(ROOT_DIR) + " && "
+            String start = "rm -f " + q(ROOT_PID) + "; cd " + q(ROOT_DIR) + " && ("
                     + "if command -v nohup >/dev/null 2>&1; then "
                     + "nohup " + q(ROOT_BIN) + " -c " + q(ROOT_CONF)
-                    + " >> " + q(ROOT_LOG) + " 2>&1 & echo $! > " + q(ROOT_PID) + "; "
+                    + " >> " + q(ROOT_LOG) + " 2>&1 & "
                     + "else " + q(ROOT_BIN) + " -c " + q(ROOT_CONF)
-                    + " >> " + q(ROOT_LOG) + " 2>&1 & echo $! > " + q(ROOT_PID) + "; fi";
+                    + " >> " + q(ROOT_LOG) + " 2>&1 & fi; "
+                    + "echo $! > " + q(ROOT_PID) + "; chmod 644 " + q(ROOT_PID) + ")";
             String startOut = runSu(start);
             if (startOut.startsWith("!")) {
                 Log.w(TAG, "root start failed: " + startOut);
@@ -236,17 +279,13 @@ public class FrpcManager {
 
     private static String rootStatusCmd(boolean cleanStalePid) {
         StringBuilder sb = new StringBuilder();
+        sb.append(oracleFrpcPredicateCmd());
         sb.append("PID=$(cat ").append(q(ROOT_PID)).append(" 2>/dev/null); ");
-        sb.append("if [ -n \"$PID\" ] && [ -d /proc/$PID ]; then ");
-        sb.append("C=$(tr '\\000' ' ' < /proc/$PID/cmdline 2>/dev/null); ");
-        sb.append("E=$(readlink /proc/$PID/exe 2>/dev/null); ");
-        sb.append("case \"$C $E\" in *").append(ROOT_BIN).append("*|*").append(ROOT_CONF)
-                .append("*|*frpc*) echo running; exit 0;; esac; fi; ");
+        sb.append("if is_oracle_frpc \"$PID\"; then echo running; exit 0; fi; ");
         sb.append("for P in /proc/[0-9]*; do ");
-        sb.append("C=$(tr '\\000' ' ' < \"$P/cmdline\" 2>/dev/null); ");
-        sb.append("E=$(readlink \"$P/exe\" 2>/dev/null); ");
-        sb.append("case \"$C $E\" in *").append(ROOT_BIN).append("*|*").append(ROOT_CONF)
-                .append("*|*frpc*) echo running; exit 0;; esac; ");
+        sb.append("PID=${P##*/}; ");
+        sb.append("if is_oracle_frpc \"$PID\"; then echo \"$PID\" > ").append(q(ROOT_PID))
+                .append("; chmod 644 ").append(q(ROOT_PID)).append("; echo running; exit 0; fi; ");
         sb.append("done; ");
         if (cleanStalePid) {
             sb.append("rm -f ").append(q(ROOT_PID)).append("; ");
@@ -255,18 +294,34 @@ public class FrpcManager {
         return sb.toString();
     }
 
+    private static String oracleFrpcPredicateCmd() {
+        return "is_oracle_frpc(){ "
+                + "[ -n \"$1\" ] || return 1; "
+                + "[ -d /proc/$1 ] || return 1; "
+                + "E=$(readlink /proc/$1/exe 2>/dev/null); "
+                + "C=$(tr '\\000' ' ' < /proc/$1/cmdline 2>/dev/null); "
+                + "A=${C%% *}; "
+                + "case \"$E\" in *" + ROOT_BIN + "*) return 0;; esac; "
+                + "case \"$A\" in " + ROOT_BIN + ") return 0;; esac; "
+                + "case \"$E\" in */frpc) case \"$C\" in *" + ROOT_CONF + "*) return 0;; esac;; esac; "
+                + "return 1; "
+                + "}; ";
+    }
+
     private static boolean rootRunning(boolean cleanStalePid) {
         String out = runSu(rootStatusCmd(cleanStalePid));
         return out != null && out.trim().equals("running");
     }
 
     private static void stopRootDaemon() {
-        String cmd = "PID=$(cat " + q(ROOT_PID) + " 2>/dev/null); "
-                + "if [ -n \"$PID\" ] && [ -d /proc/$PID ]; then "
-                + "kill $PID 2>/dev/null; sleep 1; kill -9 $PID 2>/dev/null; fi; "
+        String cmd = oracleFrpcPredicateCmd()
+                + "PID=$(cat " + q(ROOT_PID) + " 2>/dev/null); "
+                + "if is_oracle_frpc \"$PID\"; then kill $PID 2>/dev/null; fi; "
                 + "for P in /proc/[0-9]*; do "
-                + "PID=${P##*/}; C=$(tr '\\000' ' ' < \"$P/cmdline\" 2>/dev/null); "
-                + "case \"$C\" in *" + ROOT_BIN + "*) kill $PID 2>/dev/null;; esac; "
+                + "PID=${P##*/}; if is_oracle_frpc \"$PID\"; then kill $PID 2>/dev/null; fi; "
+                + "done; sleep 1; "
+                + "for P in /proc/[0-9]*; do "
+                + "PID=${P##*/}; if is_oracle_frpc \"$PID\"; then kill -9 $PID 2>/dev/null; fi; "
                 + "done; rm -f " + q(ROOT_PID);
         runSu(cmd);
     }
