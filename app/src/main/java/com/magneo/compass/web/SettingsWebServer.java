@@ -5,9 +5,12 @@ import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 
 import com.magneo.compass.ConversationLog;
+import com.magneo.compass.DebugLog;
 import com.magneo.compass.Prefs;
 import com.magneo.compass.ProviderConfig;
 import com.magneo.compass.llm.LlmClient;
+import com.magneo.compass.mcp.McpManager;
+import com.magneo.compass.mcp.McpServerConfig;
 import com.magneo.compass.netfs.FsManager;
 import com.magneo.compass.netfs.NetFs;
 
@@ -152,6 +155,14 @@ public class SettingsWebServer {
                 if (!requireAuth(out, authed)) return;
                 serveClearConv(out);
             }
+            else if (path.equals("/debug_log")) {
+                if (!requireAuth(out, authed)) return;
+                serveDebugLog(out);
+            }
+            else if (path.equals("/clear_debug")) {
+                if (!requireAuth(out, authed)) return;
+                serveClearDebug(out);
+            }
             else if (path.equals("/stream")) { serveStream(s); return; }
             else if (path.equals("/h264")) { serveH264(s); return; }
             else if (path.equals("/h264fast")) { serveH264Fast(s); return; }
@@ -257,6 +268,18 @@ public class SettingsWebServer {
             else if (path.equals("/test/tts_voices")) {
                 if (!requireAuth(out, authed)) return;
                 serveTtsVoices(out);
+            }
+            else if (path.equals("/mcp/status")) {
+                if (!requireAuth(out, authed)) return;
+                serveMcpStatus(out, false);
+            }
+            else if (path.equals("/mcp/refresh")) {
+                if (!requireAuth(out, authed)) return;
+                serveMcpStatus(out, true);
+            }
+            else if (path.equals("/mcp/test")) {
+                if (!requireAuth(out, authed)) return;
+                serveMcpStatus(out, true);
             }
             else if (path.equals("/open/tts_test")) {
                 if (!requireAuth(out, authed)) return;
@@ -422,10 +445,12 @@ public class SettingsWebServer {
                 .append("<nav class='tabs'>")
                 .append("<button type='button' class='tab active' data-tab='model'>大模型</button>")
                 .append("<button type='button' class='tab' data-tab='voice'>语音链路</button>")
+                .append("<button type='button' class='tab' data-tab='mcp'>MCP 工具</button>")
                 .append("<button type='button' class='tab' data-tab='vision'>视觉/摄像头</button>")
                 .append("<button type='button' class='tab' data-tab='browser'>浏览器/网盘</button>")
                 .append("<button type='button' class='tab' data-tab='remote'>FRP/ADB</button>")
                 .append("<button type='button' class='tab' data-tab='apps'>应用管理</button>")
+                .append("<button type='button' class='tab' data-tab='debug'>链路调试</button>")
                 .append("<button type='button' class='tab' data-tab='records'>记录/备份</button>")
                 .append("</nav>")
                 .append("<form id='f' onsubmit='save();return false'>")
@@ -468,6 +493,23 @@ public class SettingsWebServer {
                 .append(rowCheckbox("本地优先", "localTtsFirst", "关闭时不静默切本地 TTS"))
                 .append("<div class='inline'><button type='button' onclick=\"runTest('voices')\">查询音色</button><button type='button' onclick=\"runTest('tts')\">测试 TTS</button><button type='button' class='secondary' onclick='openTtsSelfTest()'>打开设备自检页</button><span class='state' id='testTts'></span></div>")
                 .append("<h3 style='margin-top:16px'>语音系统提示词</h3><textarea name='sysPromptVoice'></textarea>")
+                .append("</div></div></section>")
+                .append("<section class='panel' id='tab-mcp'><div class='sectionTitle'><h2>MCP 工具</h2><small>远程 Streamable HTTP 工具由模型自动调用</small></div><div class='cols'><div class='box'><h3>总控</h3>")
+                .append(rowCheckbox("启用 MCP", Prefs.K_MCP_ENABLED, "语音对话和 Web 测试允许模型调用工具"))
+                .append(rowInput("最大工具轮次", Prefs.K_MCP_MAX_TOOL_ROUNDS, "text", "3"))
+                .append(rowCheckbox("慢工具提示", Prefs.K_MCP_SLOW_HINT_ENABLED, "工具慢时用 TTS 播短提示"))
+                .append(rowInput("首次提示(ms)", Prefs.K_MCP_SLOW_HINT_MS, "text", "900"))
+                .append(rowInput("提示节点(ms)", Prefs.K_MCP_SLOW_HINT_SCHEDULE_MS, "text", "900,2600,3800,4700,5300"))
+                .append(rowInput("最多提示", Prefs.K_MCP_SLOW_HINT_MAX_COUNT, "text", "5"))
+                .append("<h3 style='margin-top:16px'>提示语池</h3><textarea name='")
+                .append(Prefs.K_MCP_SLOW_HINT_PHRASES)
+                .append("' style='min-height:220px' placeholder='一行一句'></textarea><p class='hint'>提示语不会写入对话记忆，只用于等待工具结果时缓解空档。</p>")
+                .append("</div><div class='box'><h3>远程服务器</h3>")
+                .append(mcpServerBox(1))
+                .append(mcpServerBox(2))
+                .append(mcpServerBox(3))
+                .append("<div class='inline'><button type='button' onclick=\"runMcp('refresh')\">刷新工具</button><button type='button' class='secondary' onclick=\"runMcp('test')\">测试连接</button><span class='state' id='mcpState'></span></div><pre id='mcpTools'></pre>")
+                .append("<p class='hint'>URL 可填 http(s)://host:port 或完整 /mcp；Bearer Token 留空表示保存时保持旧值。</p>")
                 .append("</div></div></section>")
                 .append("<section class='panel' id='tab-vision'><div class='sectionTitle'><h2>视觉 / 摄像头</h2><small>默认折叠高开销推流预览</small></div><div class='cols'><div class='box'><h3>灵眼</h3>")
                 .append(rowInput("视觉间隔秒", "visionInterval", "text", "2"))
@@ -524,6 +566,12 @@ public class SettingsWebServer {
                 .append("<div class='box'><h3>ADB TCP</h3><div class='row'><label>ADB 端口</label><input type='text' id='adbPort' value='5555'></div><label class='checkrow'><input type='checkbox' id='adbAuto'>开机自启 ADB TCP</label><div class='inline'><button type='button' onclick='adbSave()'>保存自启</button><button type='button' onclick='adbStart()'>启动 ADB TCP</button><button type='button' class='secondary' onclick='adbStop()'>关闭 ADB TCP</button><span class='state' id='adbMsg'></span></div><p class='hint'>状态：<span id='adbState'>未知</span><span id='adbDetail'></span></p><pre id='adbLog'></pre></div></div></section>")
                 .append("<section class='panel' id='tab-apps'><div class='sectionTitle'><h2>应用管理</h2><small>上传 APK 后设备本地安装</small></div><div class='cols'><div class='box'><h3>安装 APK</h3><div class='row'><label>APK 文件</label><input type='file' id='appApk' accept='.apk,application/vnd.android.package-archive'></div><div class='row'><label>APK 下载地址</label><input type='text' id='appFetchUrl' placeholder='https://.../app.apk 或 ftp://...'></div><div class='inline'><button type='button' onclick='appUpload()'>上传 APK</button><button type='button' class='secondary' onclick='appFetch()'>从 URL 拉取</button><button type='button' id='appInstallBtn' onclick='appInstall()' disabled>安装上传的 APK</button></div><p class='state' id='appUploadMsg'></p><p class='hint' id='appUploadInfo'></p><pre id='appTaskLog'></pre></div>")
                 .append("<div class='box'><h3>已安装应用</h3><div class='row'><label>搜索应用</label><input type='text' id='appSearch' oninput='renderApps()'></div><div class='inline'><button type='button' class='secondary' onclick='loadApps()'>刷新应用</button><span class='hint' id='appCount'></span></div><div id='appList' class='list'></div></div></div></section>")
+                .append("<section class='panel' id='tab-debug'><div class='sectionTitle'><h2>链路调试</h2><small>按时间记录 ASR / LLM / MCP / TTS</small></div><div class='cols'><div class='box'><h3>调试模式</h3>")
+                .append(rowCheckbox("开启调试", Prefs.K_DEBUG_MODE, "记录语音文本、LLM 请求摘要、工具调用和返回结果"))
+                .append(rowInput("日志上限(KB)", Prefs.K_DEBUG_MAX_KB, "text", "4096"))
+                .append("<p class='hint'>调试日志可能包含你说的话、模型请求内容和工具返回内容；不用排障时建议关闭。</p>")
+                .append("<div class='inline'><button type='button' onclick='loadDebugLog()'>刷新日志</button><button type='button' class='danger' onclick='clearDebugLog()'>清空调试日志</button><span class='state' id='debugMsg'></span></div>")
+                .append("</div><div class='box'><h3>时间线</h3><div id='debugLog' class='log' style='max-height:560px'></div></div></div></section>")
                 .append("<section class='panel' id='tab-records'><div class='sectionTitle'><h2>记录 / 备份</h2><small>排障与恢复</small></div><div class='cols'><div class='box'><h3>对话记录</h3>")
                 .append(rowInput("大小上限(KB)", "convMaxKb", "text", "1024"))
                 .append(rowInput("清理间隔(分钟)", "convCleanMin", "text", "60"))
@@ -553,15 +601,16 @@ public class SettingsWebServer {
                 .append("function renderHwDiag(h){var box=q('#hwDiag');if(!box)return;h=h||{};var rows=[['传感器',h.sensors||'--'],['姿态',h.pose||'--'],['磁场',h.magnetic||'--'],['GPS请求',h.gpsRequest||'--'],['GPS驱动',h.gpsDriver||'--'],['GPS动作',h.gpsAction||'--'],['卫星',h.gps||'--'],['弱项',h.untrusted||'--'],['校准',h.magCalibration||'--']];var out='';for(var i=0;i<rows.length;i++)out+='<div class=\"item\"><div class=\"main\"><b>'+esc(rows[i][0])+'</b><small>'+esc(rows[i][1])+'</small></div></div>';box.innerHTML=out}")
                 .append("function gpsReset(){if(!confirm('清理 GPS 辅助数据并重新搜星？建议在室外空旷处使用。'))return;msg('gpsResetMsg','正在触发...');api('POST','/gps/reset','',function(d){msg('gpsResetMsg',d&&d.ok?(d.msg||'已触发'):(d&&d.err?d.err:'失败'));setTimeout(systemStatus,800)},'application/x-www-form-urlencoded')}")
                 .append("function systemStatus(){api('GET','/system_status',null,renderSystem)}function renderSystem(d){if(!d)return;q('#sysTime').textContent=d.time||'--:--';q('#sysDate').textContent=d.date||'';meter('Cpu',d.cpu);meter('AppCpu',d.appCpu);meter('Ram',d.memPct);meter('Gpu',d.gpu,d.gpuText);meter('Bat',d.battery,d.batteryText);renderHwDiag(d.hardware);var bat=d.batteryText||pct(d.battery),gt=d.gpuText||pct(d.gpu),core=(d.cpuOnline&&d.cpuPossible)?(' · 核 '+d.cpuOnline+'/'+d.cpuPossible):'',appCore=(Number(d.appCpuCore)>=0?(' · 单核 '+pct(d.appCpuCore)):''),renderer=(d.mainRenderer==='canvas'?'Canvas':'OpenGL'),fps=d.mainFpsMode==='power'?'省电':(d.mainFpsMode==='smooth'?'流畅':'自适应');q('#sysCore').textContent='总 '+pct(d.cpu)+' · App '+pct(d.appCpu)+appCore+core+' · RAM '+pct(d.memPct)+' · Mali '+gt+' · 电 '+bat+' · '+renderer+'/'+fps;q('#sysGps').textContent=d.gps||'';q('#sysUpdated').textContent='更新 '+(d.time||'');var note='CPU/RAM/温度来自设备实时采样；App 为在线核心总口径，单核用于看主线程压力。';if(d.streamActive)note='屏幕预览正在运行，会明显增加 CPU 和温度。';q('#sysLoadNote').textContent=note;var temps=d.temps||[],ring=q('#sysTempRing');if(!ring)return;ring.innerHTML='';for(var i=0;i<temps.length;i++){var el=document.createElement('div');el.className='tempdot';el.innerHTML='<span>'+esc(temps[i].name||'温度')+'</span><b>'+Number(temps[i].c||0).toFixed(0)+'°</b>';ring.appendChild(el)}if(!temps.length){var e=document.createElement('div');e.className='tempdot';e.innerHTML='<span>温度</span><b>--</b>';ring.appendChild(e)}}")
-                .append("function initConsole(){loadStatus();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();fsList();loadConv();setInterval(function(){frpcRefresh();camRefresh();adbStatus();appState()},3000);setInterval(systemStatus,2000);setInterval(loadConv,4000)}")
+                .append("function initConsole(){loadStatus();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();fsList();loadConv();loadDebugLog();setInterval(function(){frpcRefresh();camRefresh();adbStatus();appState()},3000);setInterval(systemStatus,2000);setInterval(loadConv,4000)}")
                 .append("function wireTabs(){var bs=qa('.tab');for(var i=0;i<bs.length;i++)bs[i].onclick=function(){var id=this.getAttribute('data-tab');var b=qa('.tab'),p=qa('.panel');for(var j=0;j<b.length;j++)b[j].classList.remove('active');for(var k=0;k<p.length;k++)p[k].classList.remove('active');this.classList.add('active');q('#tab-'+id).classList.add('active')}}")
                 .append("function wireDirty(){var f=q('#f');if(!f)return;var es=f.querySelectorAll('input,textarea,select');for(var i=0;i<es.length;i++){es[i].addEventListener('input',markDirty);es[i].addEventListener('change',markDirty)}}")
                 .append("function markDirty(){dirty=true;q('#dirtyState').textContent='有未保存修改';q('#dirtyState').style.color='var(--gold)'}function clean(){dirty=false;q('#dirtyState').textContent='已保存';q('#dirtyState').style.color='var(--ok)'}")
-                .append("function loadStatus(){api('GET','/status',null,function(d){if(!d||!d.authed){authState();return}for(var k in d){var e=q('[name=\"'+k+'\"]');if(!e)continue;if(e.type==='checkbox')e.checked=(d[k]===true||d[k]==='true');else if(k!=='apiKey'&&k!=='voiceApiKey')e.value=d[k]}q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';msg('apiKeyState',d.apiKeySet?'当前 '+d.apiKeyMask:'当前未设置');msg('voiceKeyState',d.voiceApiKeySet?'当前 '+d.voiceApiKeyMask:'当前未设置');syncRanges();clean()})}")
+                .append("function loadStatus(){api('GET','/status',null,function(d){if(!d||!d.authed){authState();return}for(var k in d){var e=q('[name=\"'+k+'\"]');if(!e)continue;var mcpTok=k.indexOf('mcpServer')===0&&k.indexOf('Token')>=0;if(e.type==='checkbox')e.checked=(d[k]===true||d[k]==='true');else if(k!=='apiKey'&&k!=='voiceApiKey'&&!mcpTok)e.value=d[k]}q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';msg('apiKeyState',d.apiKeySet?'当前 '+d.apiKeyMask:'当前未设置');msg('voiceKeyState',d.voiceApiKeySet?'当前 '+d.voiceApiKeyMask:'当前未设置');for(var i=1;i<=3;i++){var p='mcpServer'+i,s=q('[name='+p+'Token]');if(s)s.value='';msg(p+'TokenState',d[p+'TokenSet']?'当前 '+d[p+'TokenMask']:'当前未设置')}syncRanges();clean()})}")
                 .append("function providerChanged(){var p=q('#provider').value;if(p==='deepseek'){q('[name=baseUrl]').value='https://api.deepseek.com/v1';q('[name=textModel]').value='deepseek-chat';if(!q('[name=visionModel]').value)q('[name=visionModel]').value='deepseek-chat';q('[name=textBaseUrl]').value='';q('[name=visionBaseUrl]').value=''}else{if(q('[name=baseUrl]').value==='https://api.deepseek.com/v1')q('[name=baseUrl]').value='';if(!q('[name=textModel]').value||q('[name=textModel]').value==='deepseek-chat')q('[name=textModel]').value='gpt-4.1-mini'}}")
                 .append("function oracleShakeLabel(v){v=Math.max(0,Math.min(100,Number(v||70)));var n=v<18?'轻摇':(v<38?'稍轻':(v<62?'正常':(v<82?'较重':'用力')));return Math.round(v)+' / 100 · '+n}function syncRanges(){var e=q('[name=oracleShakeForce]'),t=q('#oracleShakeForceText');if(e&&t)t.textContent=oracleShakeLabel(e.value)}")
-                .append("function save(){var fd=new FormData(q('#f')),b=new URLSearchParams(fd),c=q('#f').querySelectorAll('input[type=checkbox]');for(var i=0;i<c.length;i++)b.set(c[i].name,c[i].checked?'true':'false');textApi('POST','/save',b.toString(),function(t){msg('msg',t);if(t.indexOf('已保存')>=0){q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';q('[name=clearApiKey]').checked=false;q('[name=clearVoiceApiKey]').checked=false;clean();loadStatus()}},'application/x-www-form-urlencoded')}")
+                .append("function save(){var fd=new FormData(q('#f')),b=new URLSearchParams(fd),c=q('#f').querySelectorAll('input[type=checkbox]');for(var i=0;i<c.length;i++)b.set(c[i].name,c[i].checked?'true':'false');textApi('POST','/save',b.toString(),function(t){msg('msg',t);if(t.indexOf('已保存')>=0){q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';for(var j=1;j<=3;j++){var te=q('[name=mcpServer'+j+'Token]');if(te)te.value=''}q('[name=clearApiKey]').checked=false;q('[name=clearVoiceApiKey]').checked=false;clean();loadStatus()}},'application/x-www-form-urlencoded')}")
                 .append("function runTest(kind){var map={llm:['/test/llm','testLlm'],asr:['/test/asr_final','testAsr'],tts:['/test/tts','testTts'],voices:['/test/tts_voices','testTts']},m=map[kind];if(!m)return;msg(m[1],'测试中...');api('GET',m[0],null,function(d){if(kind==='voices'&&d&&d.ok){var dl=q('#ttsVoiceList');dl.innerHTML='';for(var i=0;i<(d.voices||[]).length;i++){var op=document.createElement('option');op.value=d.voices[i];dl.appendChild(op)}msg(m[1],'音色 '+(d.voices||[]).length+' 个 · '+d.ms+'ms');return}msg(m[1],d&&d.ok?('成功 '+(d.ms||0)+'ms '+(d.text||d.contentType||'')+(d.bytes?(' · '+fmtBytes(d.bytes)):'')+(d.retry?' · 已重试':'')+(d.note?' · '+d.note:'')):('失败 '+(d&&d.err?d.err:'未知错误')))})}")
+                .append("function runMcp(kind){var u=kind==='refresh'?'/mcp/refresh':'/mcp/test';msg('mcpState',kind==='refresh'?'刷新中...':'测试中...');api('POST',u,'',function(d){if(!d){msg('mcpState','无返回');return}var ts=d.tools||[],ss=d.servers||[],lines=[];for(var i=0;i<ss.length;i++){lines.push((ss[i].ok===false?'! ':'✓ ')+(ss[i].name||ss[i].id)+' · '+(ss[i].url||'')+' · 工具 '+(ss[i].toolCount||0)+(ss[i].err?(' · '+ss[i].err):''))}for(var j=0;j<ts.length;j++){lines.push('  - '+ts[j].name+' · '+(ts[j].description||''))}if(d.errors&&d.errors.length)lines.push('错误: '+d.errors.join('；'));q('#mcpTools').textContent=lines.join('\\n')||'未发现工具';msg('mcpState',d.ok?('完成 · '+ts.length+' 个工具 · '+(d.ms||0)+'ms'):(d.err||'失败'))},'application/x-www-form-urlencoded')}")
                 .append("function openTtsSelfTest(){msg('testTts','正在打开设备页面...');api('POST','/open/tts_test','',function(d){msg('testTts',d&&d.ok?'已打开设备自检页':('打开失败 '+(d&&d.err?d.err:'未知错误')))},'application/x-www-form-urlencoded')}")
                 .append("function frpcRefresh(){api('GET','/frpc/status',null,function(d){if(!d)return;msg('frpcState',d.status==='running'?'运行中':(d.status==='error'?'异常':'已停止'));msg('frpcStateDetail',d.detail?' · '+d.detail:'');var l=q('#frpcLog');if(l){l.textContent=d.log||'';l.scrollTop=l.scrollHeight}})}")
                 .append("function frpcStart(){textApi('GET','/frpc/start',null,function(t){msg('frpcMsg',t);frpcRefresh()})}function frpcStop(){textApi('GET','/frpc/stop',null,function(t){msg('frpcMsg',t);frpcRefresh()})}")
@@ -591,6 +640,7 @@ public class SettingsWebServer {
                 .append("function appFetch(){var u=q('#appFetchUrl').value.trim();if(!u){appMsg('请输入 APK 下载地址');return}api('POST','/appmgr/fetch',enc({url:u}),function(d){if(d&&d.ok){appMsg('拉取完成');renderUpload(d.upload);appState()}else appMsg(appErr(d))},'application/x-www-form-urlencoded')}function appInstall(){if(!confirm('安装上传的 APK？安装当前应用时网页会短暂断开。'))return;api('POST','/appmgr/install','',function(d){if(d&&d.ok){appMsg('安装任务已开始');renderTask(d.task);setTimeout(appState,1000)}else appMsg(appErr(d))},'application/x-www-form-urlencoded')}")
                 .append("function loadApps(){api('GET','/appmgr/apps',null,function(d){if(d&&d.ok){appApps=d.apps||[];renderApps();appMsg('应用列表已刷新')}else appMsg(appErr(d))})}function renderApps(){var box=q('#appList'),cnt=q('#appCount'),s=q('#appSearch').value.toLowerCase(),h='',n=0;for(var i=0;i<appApps.length;i++){var a=appApps[i],hay=((a.label||'')+' '+(a.packageName||'')).toLowerCase();if(s&&hay.indexOf(s)<0)continue;n++;h+='<div class=\"item\"><div class=\"main\"><b>'+esc(a.label||a.packageName)+'</b><small>'+esc(a.packageName)+'</small><small>'+esc(a.versionName||'')+' · '+(a.system?'系统':'第三方')+' · '+(a.enabled?'启用':'停用')+(a.self?' · 当前管理':'')+'</small></div><button type=\"button\" '+(a.self?'disabled ':'')+'onclick=\"appUninstall(\\''+esc(a.packageName)+'\\','+(a.system?'true':'false')+',\\''+esc(a.label||a.packageName)+'\\')\">卸载</button></div>'}box.innerHTML=h||'<div class=\"item\"><div class=\"main\"><b>没有匹配应用</b></div></div>';cnt.textContent='显示 '+n+' / '+appApps.length+' 个'}function appUninstall(pkg,sys,label){if(sys){var p=prompt('系统应用卸载风险高，请输入包名确认：'+pkg);if(p!==pkg)return}else if(!confirm('卸载 '+label+' ?'))return;api('POST','/appmgr/uninstall',enc({packageName:pkg}),function(d){if(d&&d.ok){appMsg('卸载任务已开始');renderTask(d.task);setTimeout(loadApps,1200)}else appMsg(appErr(d))},'application/x-www-form-urlencoded')}")
                 .append("function convHtml(d){convCache=d;var arr=d.entries||[],f=q('#convFilter').value,h='';for(var i=Math.max(0,arr.length-250);i<arr.length;i++){var e=arr[i];if(f!=='all'&&e.role!==f)continue;var who=e.role==='user'?'用户':(e.role==='assistant'?'AI':(e.role==='heard'?'听见':(e.role==='error'?'错误':'系统')));h+='<div><span class=\"mini\">'+esc(e.ts)+'</span> <b>'+who+':</b> '+esc(e.text)+'</div>'}if(!h)h='<div class=\"hint\">暂无匹配记录</div>';h+='<div class=\"mini\">共 '+arr.length+' 条 · 文件 '+d.sizeKb+' KB / 上限 '+d.maxKb+' KB</div>';return h}function loadConv(){api('GET','/conversations',null,function(d){if(!d||!d.entries)return;var v=q('#conv');v.innerHTML=convHtml(d);v.scrollTop=v.scrollHeight})}function clearConv(){if(!confirm('清空对话记录？'))return;textApi('POST','/clear_conv','',function(){msg('convMsg','已清空');loadConv()})}")
+                .append("function debugHtml(d){var arr=d.entries||[],h='';for(var i=Math.max(0,arr.length-400);i<arr.length;i++){var e=arr[i];h+='<div style=\"border-bottom:1px solid rgba(181,139,48,.14);padding:5px 0\"><span class=\"mini\">'+esc(e.ts)+'</span> <b>'+esc(e.stage||'debug')+':</b><pre style=\"margin:4px 0 0;border:0;background:transparent;padding:0;color:#9ed17d;max-height:none\">'+esc(e.text||'')+'</pre></div>'}if(!h)h='<div class=\"hint\">暂无调试日志。打开调试模式并保存后，再复现一次天气查询。</div>';h+='<div class=\"mini\">共 '+arr.length+' 条 · 文件 '+(d.sizeKb||0)+' KB / 上限 '+(d.maxKb||0)+' KB · '+(d.enabled?'调试已开启':'调试已关闭')+'</div>';return h}function loadDebugLog(){api('GET','/debug_log',null,function(d){if(!d||!d.ok)return;var v=q('#debugLog');if(!v)return;v.innerHTML=debugHtml(d);v.scrollTop=v.scrollHeight;msg('debugMsg',d.enabled?'调试已开启':'调试已关闭')})}function clearDebugLog(){if(!confirm('清空链路调试日志？'))return;textApi('POST','/clear_debug','',function(){msg('debugMsg','已清空');loadDebugLog()})}")
                 .append("function backupExport(){api('GET','/backup/export',null,function(d){if(d&&d.ok){q('#backupContent').value=d.content||'';msg('backupMsg','已导出 '+(d.bytes||0)+' bytes · '+(d.path||''))}else msg('backupMsg',d&&d.err?d.err:'导出失败')})}function backupRestore(){var c=q('#backupContent').value;if(!c.trim()){msg('backupMsg','请先粘贴备份 JSON');return}if(!confirm('从此 JSON 恢复配置？当前配置会被覆盖。'))return;api('POST','/backup/restore',enc({content:c}),function(d){msg('backupMsg',d&&d.ok?'已恢复，正在重载':(d&&d.err?d.err:'恢复失败'));if(d&&d.ok)setTimeout(loadStatus,800)},'application/x-www-form-urlencoded')}")
                 .append("boot();")
                 .append("</script></body></html>");
@@ -621,6 +671,19 @@ public class SettingsWebServer {
                 + name + "' min='" + min + "' max='" + max
                 + "' step='1' oninput='syncRanges()'><div class='hint'><span id='"
                 + name + "Text'></span> · " + hint + "</div></div></div>";
+    }
+
+    private static String mcpServerBox(int i) {
+        String p = "mcpServer" + i;
+        return "<details open><summary>服务器 " + i + " · 命名空间 mcp" + i + "__</summary>"
+                + rowCheckbox("启用服务器 " + i, p + "Enabled", "关闭后不会把该服务器工具交给模型")
+                + rowInput("名称", p + "Name", "text", "天气 / 搜索 / 记忆")
+                + rowInput("URL", p + "Url", "text", "https://host/mcp")
+                + rowInput("Bearer Token", p + "Token", "password", "留空=保持旧 Token")
+                + "<div class='row'><label></label><span class='state' id='" + p
+                + "TokenState'>Token 未知</span></div>"
+                + rowInput("超时(ms)", p + "TimeoutMs", "text", "12000")
+                + "</details>";
     }
 
     private static String fsRow(String label, String id, String placeholder) {
@@ -1303,6 +1366,8 @@ public class SettingsWebServer {
             o.put("browserRoundFit", Prefs.getB(app, Prefs.K_BROWSER_ROUND_FIT, true));
             o.put("convMaxKb", String.valueOf(Prefs.getI(app, Prefs.K_CONV_MAX_KB, 1024)));
             o.put("convCleanMin", String.valueOf(Prefs.getI(app, Prefs.K_CONV_CLEAN_MIN, 60)));
+            o.put("debugMode", Prefs.getB(app, Prefs.K_DEBUG_MODE, false));
+            o.put("debugMaxKb", String.valueOf(Prefs.getI(app, Prefs.K_DEBUG_MAX_KB, 4096)));
             o.put("sysPromptVoice", Prefs.get(app, Prefs.K_SYS_PROMPT_VOICE, Prefs.DEFAULT_SYS_PROMPT_VOICE));
             o.put("sysPromptVision", Prefs.get(app, Prefs.K_SYS_PROMPT_VISION, Prefs.DEFAULT_SYS_PROMPT_VISION));
             o.put("streamMode", normalizeStreamMode(Prefs.get(app, Prefs.K_STREAM_MODE, "h264")));
@@ -1317,6 +1382,7 @@ public class SettingsWebServer {
             o.put("locWifiUrl", Prefs.locWifiUrl(app));
             o.put("locIpUrl", Prefs.locIpUrl(app));
             o.put("showLoc", Prefs.locationDisplayEnabled(app));
+            putMcpConfigStatus(o);
             o.put("frpcConfig", Prefs.get(app, Prefs.K_FRPC_CONFIG, ""));
             o.put("camId", String.valueOf(Prefs.getI(app, Prefs.K_CAM_ID, 0)));
             o.put("camWidth", String.valueOf(Prefs.getI(app, Prefs.K_CAM_WIDTH, 1280)));
@@ -1338,6 +1404,7 @@ public class SettingsWebServer {
     private static void serveSave(OutputStream out, String body) throws IOException {
         try {
             Map<String, String> fields = form(body);
+            saveMcpServers(fields);
             if (isTrue(fields.get("clearApiKey"))) Prefs.put(app, Prefs.K_API_KEY, "");
             if (isTrue(fields.get("clearVoiceApiKey"))) Prefs.put(app, Prefs.K_VOICE_API_KEY, "");
             for (Map.Entry<String, String> entry : fields.entrySet()) {
@@ -1345,6 +1412,7 @@ public class SettingsWebServer {
                 String v = entry.getValue();
                 if (k == null) continue;
                 if (k.equals("clearApiKey") || k.equals("clearVoiceApiKey")) continue;
+                if (k.startsWith("mcpServer")) continue;
                 if (k.equals(Prefs.K_API_KEY) || k.equals(Prefs.K_VOICE_API_KEY)) {
                     if (v == null || v.trim().isEmpty()) continue;
                     Prefs.put(app, k, v.trim());
@@ -1387,6 +1455,17 @@ public class SettingsWebServer {
                     try { Prefs.putI(app, k, Math.max(100, Math.min(20480, Integer.parseInt(v)))); } catch (Exception ignored) {}
                 } else if (k.equals("convCleanMin")) {
                     try { Prefs.putI(app, k, Math.max(0, Math.min(1440, Integer.parseInt(v)))); } catch (Exception ignored) {}
+                } else if (k.equals(Prefs.K_DEBUG_MAX_KB)) {
+                    try { Prefs.putI(app, k, Math.max(256, Math.min(20480, Integer.parseInt(v)))); } catch (Exception ignored) {}
+                } else if (k.equals(Prefs.K_MCP_MAX_TOOL_ROUNDS)) {
+                    try { Prefs.putI(app, k, Math.max(0, Math.min(6, Integer.parseInt(v)))); } catch (Exception ignored) {}
+                } else if (k.equals(Prefs.K_MCP_SLOW_HINT_MS)) {
+                    try { Prefs.putI(app, k, Math.max(0, Math.min(10000, Integer.parseInt(v)))); } catch (Exception ignored) {}
+                } else if (k.equals(Prefs.K_MCP_SLOW_HINT_MAX_COUNT)) {
+                    try { Prefs.putI(app, k, Math.max(0, Math.min(10, Integer.parseInt(v)))); } catch (Exception ignored) {}
+                } else if (k.equals(Prefs.K_MCP_SLOW_HINT_SCHEDULE_MS)
+                        || k.equals(Prefs.K_MCP_SLOW_HINT_PHRASES)) {
+                    Prefs.put(app, k, v == null ? "" : v.trim());
                 } else if (k.equals("streamFps")) {
                     try { Prefs.putI(app, k, Math.max(1, Math.min(10, Integer.parseInt(v)))); } catch (Exception ignored) {}
                 } else if (k.equals("streamQuality")) {
@@ -1676,6 +1755,10 @@ public class SettingsWebServer {
         serveJson(out, o);
     }
 
+    private static void serveMcpStatus(OutputStream out, boolean forceRefresh) throws IOException {
+        serveJson(out, McpManager.status(app, forceRefresh));
+    }
+
     private static void serveOpenTtsTest(OutputStream out) throws IOException {
         JSONObject o = new JSONObject();
         try {
@@ -1689,6 +1772,74 @@ public class SettingsWebServer {
             putErr(o, e.getMessage());
         }
         serveJson(out, o);
+    }
+
+    private static void putMcpConfigStatus(JSONObject o) {
+        try {
+            o.put(Prefs.K_MCP_ENABLED, Prefs.mcpEnabled(app));
+            o.put(Prefs.K_MCP_MAX_TOOL_ROUNDS, String.valueOf(Prefs.mcpMaxToolRounds(app)));
+            o.put(Prefs.K_MCP_SLOW_HINT_ENABLED, Prefs.mcpSlowHintEnabled(app));
+            o.put(Prefs.K_MCP_SLOW_HINT_MS, String.valueOf(Prefs.mcpSlowHintMs(app)));
+            o.put(Prefs.K_MCP_SLOW_HINT_SCHEDULE_MS, Prefs.get(app,
+                    Prefs.K_MCP_SLOW_HINT_SCHEDULE_MS,
+                    Prefs.DEFAULT_MCP_SLOW_HINT_SCHEDULE_MS));
+            o.put(Prefs.K_MCP_SLOW_HINT_MAX_COUNT, String.valueOf(Prefs.mcpSlowHintMaxCount(app)));
+            o.put(Prefs.K_MCP_SLOW_HINT_PHRASES, Prefs.get(app,
+                    Prefs.K_MCP_SLOW_HINT_PHRASES,
+                    Prefs.DEFAULT_MCP_SLOW_HINT_PHRASES));
+            List<McpServerConfig> servers = McpServerConfig.load(app);
+            for (int i = 1; i <= 3; i++) {
+                String id = "mcp" + i;
+                McpServerConfig c = findMcpServer(servers, id);
+                String p = "mcpServer" + i;
+                o.put(p + "Enabled", c != null && c.enabled);
+                o.put(p + "Name", c == null ? "" : c.name);
+                o.put(p + "Url", c == null ? "" : c.url);
+                o.put(p + "Token", "");
+                o.put(p + "TokenSet", c != null && !c.bearerToken.isEmpty());
+                o.put(p + "TokenMask", c == null ? "未设置" : maskSecret(c.bearerToken));
+                o.put(p + "TimeoutMs", String.valueOf(c == null
+                        ? Prefs.DEFAULT_MCP_TOOL_TIMEOUT_MS : c.timeoutMs));
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private static void saveMcpServers(Map<String, String> fields) {
+        if (fields == null || !fields.containsKey("mcpServer1Url")) return;
+        List<McpServerConfig> old = McpServerConfig.load(app);
+        JSONArray arr = new JSONArray();
+        for (int i = 1; i <= 3; i++) {
+            String p = "mcpServer" + i;
+            String id = "mcp" + i;
+            String name = trim(fields.get(p + "Name"));
+            String url = trim(fields.get(p + "Url"));
+            String token = fields.get(p + "Token");
+            int timeout = parseInt(fields.get(p + "TimeoutMs"), Prefs.DEFAULT_MCP_TOOL_TIMEOUT_MS);
+            McpServerConfig previous = findMcpServer(old, id);
+            if ((token == null || token.trim().isEmpty()) && previous != null) {
+                token = previous.bearerToken;
+            }
+            boolean enabled = isTrue(fields.get(p + "Enabled"));
+            if (url.isEmpty()) continue;
+            try {
+                arr.put(new JSONObject()
+                        .put("id", id)
+                        .put("name", name.isEmpty() ? ("MCP " + i) : name)
+                        .put("url", McpServerConfig.normalizeUrl(url))
+                        .put("enabled", enabled)
+                        .put("bearerToken", token == null ? "" : token.trim())
+                        .put("timeoutMs", Math.max(1000, Math.min(60000, timeout))));
+            } catch (Exception ignored) {}
+        }
+        Prefs.put(app, Prefs.K_MCP_SERVERS, arr.toString());
+    }
+
+    private static McpServerConfig findMcpServer(List<McpServerConfig> list, String id) {
+        if (list == null) return null;
+        for (McpServerConfig c : list) {
+            if (c != null && c.id.equals(id)) return c;
+        }
+        return null;
     }
 
     private static void serveFsList(OutputStream out) throws IOException {
@@ -1780,7 +1931,10 @@ public class SettingsWebServer {
     private static boolean isBoolKey(String k) {
         return k.equals("localTtsFirst") || k.equals("visionEnabled") || k.equals("vadEnabled")
                 || k.equals("ignoreSsl") || k.equals("uaDesktop") || k.equals("noImages")
-                || k.equals("browserRoundFit") || k.equals("camAutoStart");
+                || k.equals("browserRoundFit") || k.equals("camAutoStart")
+                || k.equals(Prefs.K_MCP_ENABLED)
+                || k.equals(Prefs.K_MCP_SLOW_HINT_ENABLED)
+                || k.equals(Prefs.K_DEBUG_MODE);
     }
 
     private static void syncRuntimeGpsSource() {
@@ -1989,6 +2143,27 @@ public class SettingsWebServer {
 
     private static void serveClearConv(OutputStream out) throws IOException {
         ConversationLog.clear(app);
+        byte[] b = "已清空".getBytes("UTF-8");
+        writeHead(out, "text/plain; charset=utf-8", b.length);
+        out.write(b);
+    }
+
+    private static void serveDebugLog(OutputStream out) throws IOException {
+        JSONObject o = new JSONObject();
+        try {
+            o.put("ok", true);
+            o.put("enabled", Prefs.getB(app, Prefs.K_DEBUG_MODE, false));
+            o.put("entries", DebugLog.read(app));
+            o.put("sizeKb", DebugLog.size(app) / 1024L);
+            o.put("maxKb", Prefs.getI(app, Prefs.K_DEBUG_MAX_KB, 4096));
+        } catch (Exception e) {
+            putErr(o, e.getMessage());
+        }
+        serveJson(out, o);
+    }
+
+    private static void serveClearDebug(OutputStream out) throws IOException {
+        DebugLog.clear(app);
         byte[] b = "已清空".getBytes("UTF-8");
         writeHead(out, "text/plain; charset=utf-8", b.length);
         out.write(b);

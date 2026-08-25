@@ -11,8 +11,13 @@ import android.media.audiofx.NoiseSuppressor;
 import android.util.Log;
 
 import com.magneo.compass.ConversationLog;
+import com.magneo.compass.DebugLog;
 import com.magneo.compass.Prefs;
 import com.magneo.compass.llm.LlmClient;
+import com.magneo.compass.mcp.McpClient;
+import com.magneo.compass.mcp.McpManager;
+
+import org.json.JSONArray;
 
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
@@ -97,6 +102,7 @@ public class VoiceController {
     private final AtomicInteger asrFinalSerial = new AtomicInteger();
     private final AtomicInteger asrTerminalSerial = new AtomicInteger();
     private final AtomicInteger latestUtteranceAsrSession = new AtomicInteger();
+    private final AtomicInteger mcpHintCursor = new AtomicInteger();
     private final AtomicBoolean manualBoundaryRequested = new AtomicBoolean(false);
     private final Object standbyAsrLock = new Object();
     private final Set<Call> activeCalls = Collections.synchronizedSet(new HashSet<Call>());
@@ -763,6 +769,9 @@ public class VoiceController {
                 asrTurn == null ? System.currentTimeMillis() : asrTurn.boundaryAt);
         trace.fastFinalAt = System.currentTimeMillis();
         String text = applyHotwordCorrections(cleanupAsrText(rawText));
+        DebugLog.append(ctx, "asr.fast_final", "session=" + sessionId
+                + " raw=" + compact(rawText, 300)
+                + "\nclean=" + compact(text, 300));
         boolean rescuedWeakFast = false;
         if (text.isEmpty()) {
             String rescued = rescueWeakFastAsr(asrTurn, trace, sessionId, "empty");
@@ -810,6 +819,10 @@ public class VoiceController {
                 + ": " + compact(text, 120));
         String refined = rescuedWeakFast ? text : refineAsrFinal(text, asrTurn, trace);
         if (!refined.equals(text)) {
+            DebugLog.append(ctx, "asr.final_selected", "session=" + sessionId
+                    + " fast=" + compact(text, 300)
+                    + "\nselected=" + compact(refined, 300)
+                    + "\nfinalAsrMs=" + trace.finalAsrMs);
             ConversationLog.append(ctx, "system", "ASR final corrected[" + sessionId + "]: "
                     + compact(text, 60) + " -> " + compact(refined, 80));
             text = refined;
@@ -953,10 +966,13 @@ public class VoiceController {
         String refined = transcribeBlocking(new LlmClient(ctx), toWav(asrTurn.pcm), FINAL_ASR_WAIT_MS);
         trace.finalAsrMs = System.currentTimeMillis() - started;
         if (refined == null || refined.trim().isEmpty()) {
+            DebugLog.append(ctx, "asr.final_empty", "fast=" + compact(fastText, 300)
+                    + " ms=" + trace.finalAsrMs);
             ConversationLog.append(ctx, "system", "ASR final refine empty ms=" + trace.finalAsrMs);
             return fastText;
         }
         if (refined.startsWith("!")) {
+            DebugLog.append(ctx, "asr.final_error", refined);
             ConversationLog.append(ctx, "system", "ASR final refine unavailable ms="
                     + trace.finalAsrMs + ": " + compact(refined.substring(1), 60));
             return fastText;
@@ -968,6 +984,11 @@ public class VoiceController {
             return fastText;
         }
         if (shouldUseRefinedAsr(fastText, refined)) {
+            DebugLog.append(ctx, "asr.final_compare", "selected=final ms=" + trace.finalAsrMs
+                    + " fastScore=" + asrCandidateScore(fastText)
+                    + " finalScore=" + asrCandidateScore(refined)
+                    + "\nfast=" + compact(fastText, 300)
+                    + "\nfinal=" + compact(refined, 300));
             ConversationLog.append(ctx, "system", "ASR final refine selected ms="
                     + trace.finalAsrMs + " fastScore=" + asrCandidateScore(fastText)
                     + " finalScore=" + asrCandidateScore(refined)
@@ -980,6 +1001,11 @@ public class VoiceController {
                 + " finalScore=" + asrCandidateScore(refined)
                 + " fast=" + compact(fastText, 50)
                 + " final=" + compact(refined, 70));
+        DebugLog.append(ctx, "asr.final_compare", "selected=fast ms=" + trace.finalAsrMs
+                + " fastScore=" + asrCandidateScore(fastText)
+                + " finalScore=" + asrCandidateScore(refined)
+                + "\nfast=" + compact(fastText, 300)
+                + "\nfinal=" + compact(refined, 300));
         return fastText;
     }
 
@@ -1049,8 +1075,12 @@ public class VoiceController {
 
     private void processFinalText(String heardText, boolean autoMode, VoiceTrace trace) {
         String text = applyHotwordCorrections(cleanupAsrText(heardText));
+        DebugLog.append(ctx, "voice.final_text", "autoMode=" + autoMode
+                + " raw=" + compact(heardText, 300)
+                + "\nclean=" + compact(text, 300));
         if (text.isEmpty()) return;
         if (isIgnorableAsrText(text, null)) {
+            DebugLog.append(ctx, "voice.filtered", text);
             ConversationLog.append(ctx, "heard", "[ASR过滤] " + text);
             setStatus(continuousRunning.get() ? "常驻聆听中..." : "");
             return;
@@ -1058,11 +1088,15 @@ public class VoiceController {
         LlmClient llm = new LlmClient(ctx);
         if (trace == null) trace = new VoiceTrace(0, System.currentTimeMillis());
         if (autoMode && !shouldReply(llm, text, trace)) {
+            DebugLog.append(ctx, "voice.gate", "ignored text=" + compact(text, 300)
+                    + " gateMs=" + trace.gateMs);
             ConversationLog.append(ctx, "heard", text);
             setStatus("听见：" + compact(text, 18));
             logTrace("voice ignored", trace);
             return;
         }
+        DebugLog.append(ctx, "voice.gate", "accepted text=" + compact(text, 300)
+                + " gateMs=" + trace.gateMs);
         if (llm.apiKey.isEmpty()) {
             ConversationLog.append(ctx, "heard", text);
             setStatus("未配置大模型 API Key");
@@ -1084,13 +1118,18 @@ public class VoiceController {
             setStatus("思考中...");
 
             List<LlmClient.Msg> msgs = new ArrayList<>();
-            msgs.add(new LlmClient.Msg("system",
-                    Prefs.get(ctx, Prefs.K_SYS_PROMPT_VOICE, Prefs.DEFAULT_SYS_PROMPT_VOICE)
-                            + "\n" + voiceInteractionInstruction()));
+            String sysPrompt = Prefs.get(ctx, Prefs.K_SYS_PROMPT_VOICE, Prefs.DEFAULT_SYS_PROMPT_VOICE)
+                    + "\n" + voiceInteractionInstruction();
+            if (Prefs.mcpEnabled(ctx)) {
+                sysPrompt += "\n需要天气、联网搜索、资料、记忆或知识库时，可自动调用可用 MCP 工具；根据工具结果再回答。";
+            }
+            msgs.add(new LlmClient.Msg("system", sysPrompt));
             addRecentDialogHistory(msgs, looksLikeFollowup(text) ? 2 : 1);
             msgs.add(new LlmClient.Msg("user", text));
             trace.llmStartAt = System.currentTimeMillis();
-            String reply = chatAndQueueTts(llm, msgs, turnId, false, trace);
+            String reply = Prefs.mcpEnabled(ctx)
+                    ? chatWithMcpAndQueueTts(llm, msgs, turnId, trace)
+                    : chatAndQueueTts(llm, msgs, turnId, false, trace);
             if (turnId != turnSerial.get()) return;
             if (reply.startsWith("!")) {
                 ConversationLog.append(ctx, "error", "LLM 失败：" + reply.substring(1));
@@ -1598,6 +1637,52 @@ public class VoiceController {
 
     private String chatAndQueueTts(LlmClient llm, List<LlmClient.Msg> msgs, int turnId,
                                    boolean vision, VoiceTrace trace) {
+        ChatRun run = chatOnceAndQueueTts(llm, msgs, turnId, vision, trace, null);
+        return run.error == null ? run.full : "!" + run.error;
+    }
+
+    private String chatWithMcpAndQueueTts(LlmClient llm, List<LlmClient.Msg> msgs,
+                                          int turnId, VoiceTrace trace) {
+        JSONArray tools = McpManager.openAiTools(ctx);
+        if (tools.length() == 0) {
+            ConversationLog.append(ctx, "system", "MCP enabled but no tools available");
+            return chatAndQueueTts(llm, msgs, turnId, false, trace);
+        }
+        ConversationLog.append(ctx, "system", "MCP tools enabled count=" + tools.length());
+        ArrayList<LlmClient.Msg> chain = new ArrayList<>(msgs);
+        StringBuilder finalReply = new StringBuilder();
+        int rounds = Math.max(0, Prefs.mcpMaxToolRounds(ctx));
+        for (int round = 0; round <= rounds; round++) {
+            ChatRun run = chatOnceAndQueueTts(llm, chain, turnId, false, trace,
+                    round < rounds ? tools : null);
+            if (run.error != null) return "!" + run.error;
+            if (run.full != null && !run.full.trim().isEmpty()) finalReply.append(run.full);
+            if (turnId != turnSerial.get()) return finalReply.toString();
+            if (run.toolCalls == null || run.toolCalls.isEmpty()) return finalReply.toString();
+            if (round >= rounds) break;
+
+            JSONArray assistantCalls = new JSONArray();
+            for (LlmClient.ToolCall c : run.toolCalls) assistantCalls.put(c.toAssistantJson());
+            chain.add(LlmClient.Msg.assistantToolCalls(assistantCalls));
+            ConversationLog.append(ctx, "system", "MCP tool_calls round=" + (round + 1)
+                    + " count=" + run.toolCalls.size());
+            for (LlmClient.ToolCall c : run.toolCalls) {
+                if (turnId != turnSerial.get()) return finalReply.toString();
+                String result = callMcpToolForVoice(turnId, c);
+                chain.add(LlmClient.Msg.toolResult(c.id, result));
+            }
+        }
+        ConversationLog.append(ctx, "error", "MCP 工具轮次超过上限");
+        ArrayList<LlmClient.Msg> fallback = new ArrayList<>(chain);
+        fallback.add(new LlmClient.Msg("system", "工具调用轮次已经达到上限，请直接基于已有工具结果给用户一个简短回答。"));
+        ChatRun run = chatOnceAndQueueTts(llm, fallback, turnId, false, trace, null);
+        if (run.error != null) return "!" + run.error;
+        return finalReply.append(run.full).toString();
+    }
+
+    private ChatRun chatOnceAndQueueTts(LlmClient llm, List<LlmClient.Msg> msgs, int turnId,
+                                        boolean vision, VoiceTrace trace, JSONArray tools) {
+        final ChatRun run = new ChatRun();
         final StringBuilder full = new StringBuilder();
         final StringBuilder pending = new StringBuilder();
         final Object doneLock = new Object();
@@ -1605,7 +1690,7 @@ public class VoiceController {
         final String[] error = {null};
         final boolean[] hadDelta = {false};
         final long[] pendingStartedAt = {0L};
-        Call call = llm.chat(msgs, vision, llm.voiceOptions(), new LlmClient.StreamCallback() {
+        Call call = llm.chat(msgs, vision, llm.voiceOptions(), tools, new LlmClient.StreamCallback() {
             @Override public void onDelta(String s) {
                 if (turnId != turnSerial.get() || s == null || s.isEmpty()) return;
                 List<String> segments;
@@ -1643,6 +1728,12 @@ public class VoiceController {
                 }
             }
 
+            @Override public void onToolCalls(List<LlmClient.ToolCall> calls) {
+                synchronized (doneLock) {
+                    if (calls != null) run.toolCalls.addAll(calls);
+                }
+            }
+
             @Override public void onError(String msg) {
                 synchronized (doneLock) {
                     error[0] = msg == null ? "未知错误" : msg;
@@ -1660,8 +1751,86 @@ public class VoiceController {
             }
         }
         untrackCall(call);
-        if (error[0] != null) return "!" + error[0];
-        return full.toString();
+        run.full = full.toString();
+        run.error = error[0];
+        return run;
+    }
+
+    private String callMcpToolForVoice(int turnId, LlmClient.ToolCall call) {
+        if (call == null) return "工具调用失败：缺少工具信息";
+        AtomicBoolean done = new AtomicBoolean(false);
+        Thread hintThread = startMcpSlowHintThread(turnId, done);
+        long start = System.currentTimeMillis();
+        try {
+            ConversationLog.append(ctx, "system", "MCP tool start: "
+                    + compact(call.name, 48) + " args=" + compact(call.argumentsJson, 120));
+            McpClient.ToolResult r = McpManager.call(ctx, call.name, call.argumentsJson);
+            long ms = System.currentTimeMillis() - start;
+            String text = r == null ? "" : r.text;
+            boolean isError = r != null && r.isError;
+            ConversationLog.append(ctx, isError ? "error" : "system",
+                    "MCP tool " + (isError ? "error" : "ok") + ": "
+                            + compact(call.name, 48) + " ms=" + ms
+                            + " result=" + compact(text, 160));
+            if (text == null || text.trim().isEmpty()) text = "工具没有返回文本结果。";
+            if (isError) return "工具 " + call.name + " 返回错误：" + compact(text, 4000);
+            return compact(text, 5000);
+        } catch (Throwable t) {
+            long ms = System.currentTimeMillis() - start;
+            String msg = t.getMessage() == null ? String.valueOf(t) : t.getMessage();
+            ConversationLog.append(ctx, "error", "MCP tool failed: "
+                    + compact(call.name, 48) + " ms=" + ms + " err=" + compact(msg, 160));
+            return "工具 " + call.name + " 调用失败：" + compact(msg, 1000);
+        } finally {
+            done.set(true);
+            if (hintThread != null) hintThread.interrupt();
+        }
+    }
+
+    private Thread startMcpSlowHintThread(int turnId, AtomicBoolean done) {
+        if (!Prefs.mcpSlowHintEnabled(ctx) || Prefs.mcpSlowHintMaxCount(ctx) <= 0) return null;
+        final int[] schedule = Prefs.mcpSlowHintScheduleMs(ctx);
+        final int maxCount = Prefs.mcpSlowHintMaxCount(ctx);
+        final ArrayList<String> phrases = Prefs.mcpSlowHintPhrases(ctx);
+        Thread t = new Thread(() -> {
+            long start = System.currentTimeMillis();
+            int spoken = 0;
+            for (int i = 0; i < schedule.length && spoken < maxCount; i++) {
+                long due = start + Math.max(0, schedule[i]);
+                long wait = due - System.currentTimeMillis();
+                if (wait > 0) {
+                    try { Thread.sleep(wait); } catch (InterruptedException ignored) { return; }
+                }
+                if (done.get() || turnId != turnSerial.get()) return;
+                if (CloudTts.isPlaying() || CloudTts.isFading() || ttsSpeaking.get()
+                        || !ttsQueue.isEmpty() || !readyTtsQueue.isEmpty()) {
+                    ConversationLog.append(ctx, "system", "MCP slow hint skipped: audio busy at "
+                            + schedule[i] + "ms");
+                    continue;
+                }
+                String phrase = nextMcpHintPhrase(phrases);
+                if (phrase.isEmpty()) continue;
+                ConversationLog.append(ctx, "system", "MCP slow hint: "
+                        + compact(phrase, 32) + " at=" + schedule[i] + "ms");
+                enqueueTts(turnId, phrase, false);
+                spoken++;
+            }
+        }, "voice-mcp-hints");
+        t.setDaemon(true);
+        t.start();
+        return t;
+    }
+
+    private String nextMcpHintPhrase(ArrayList<String> phrases) {
+        if (phrases == null || phrases.isEmpty()) return "";
+        int idx = Math.abs(mcpHintCursor.getAndIncrement());
+        return phrases.get(idx % phrases.size());
+    }
+
+    private static class ChatRun {
+        String full = "";
+        String error;
+        final ArrayList<LlmClient.ToolCall> toolCalls = new ArrayList<>();
     }
 
     private List<String> drainSpeakableSegments(StringBuilder pending, boolean finishing,
@@ -1709,6 +1878,10 @@ public class VoiceController {
     }
 
     private void enqueueTts(int turnId, String text) {
+        enqueueTts(turnId, text, true);
+    }
+
+    private void enqueueTts(int turnId, String text, boolean markTrace) {
         String t = text == null ? "" : text.trim();
         if (t.isEmpty() || turnId != turnSerial.get()) return;
         String speech = prepareTtsText(t);
@@ -1719,7 +1892,7 @@ public class VoiceController {
         }
         rememberSpoken(speech);
         VoiceTrace trace = turnTraces.get(turnId);
-        if (firstTtsQueuedTurn.getAndSet(turnId) != turnId && trace != null) {
+        if (markTrace && firstTtsQueuedTurn.getAndSet(turnId) != turnId && trace != null) {
             trace.firstTtsEnqueueAt = System.currentTimeMillis();
             ConversationLog.append(ctx, "system", "first_tts_enqueue_ms="
                     + trace.firstTtsEnqueueMs() + " text=" + compact(speech, 24));
@@ -1730,6 +1903,8 @@ public class VoiceController {
                 + " ready=" + readyTtsQueue.size()
                 + (speech.equals(t) ? "" : " cleaned_from=" + compact(t, 18))
                 + " text=" + compact(speech, 32));
+        DebugLog.append(ctx, markTrace ? "tts.enqueue" : "tts.hint_enqueue",
+                "turn=" + turnId + " text=" + speech);
         ttsQueue.offer(job);
     }
 

@@ -3,6 +3,7 @@ package com.magneo.compass.llm;
 import android.content.Context;
 import android.util.Log;
 
+import com.magneo.compass.DebugLog;
 import com.magneo.compass.Prefs;
 import com.magneo.compass.ProviderConfig;
 
@@ -34,6 +35,7 @@ public class LlmClient {
     private static final MediaType AUDIO = MediaType.parse("audio/wav");
     private static final ConnectionPool SHARED_POOL = new ConnectionPool(8, 5, TimeUnit.MINUTES);
 
+    private final Context ctx;
     private final OkHttpClient client;
     public final String provider, baseUrl, textBaseUrl, visionBaseUrl, apiKey, voiceApiKey, reasoningEffort, textModel, visionModel,
             asrUrl, asrFinalUrl, asrModel, ttsUrl, ttsModel, ttsVoice;
@@ -41,6 +43,7 @@ public class LlmClient {
     public final float textTemperature, voiceTemperature, visionTemperature;
 
     public LlmClient(Context ctx) {
+        this.ctx = ctx == null ? null : ctx.getApplicationContext();
         OkHttpClient.Builder b = com.magneo.compass.netfs.Tls.builder(ctx)
                 .connectionPool(SHARED_POOL)
                 .connectTimeout(15, TimeUnit.SECONDS)
@@ -191,12 +194,28 @@ public class LlmClient {
     }
 
     public static class Msg {
-        public final String role; // system/user/assistant
+        public final String role; // system/user/assistant/tool
         public final String text;
         public final String imageBase64; // 可选
+        public final String toolCallId;
+        public final JSONArray toolCalls;
         public Msg(String role, String text) { this(role, text, null); }
         public Msg(String role, String text, String imageBase64) {
-            this.role = role; this.text = text; this.imageBase64 = imageBase64;
+            this(role, text, imageBase64, null, null);
+        }
+        private Msg(String role, String text, String imageBase64,
+                    String toolCallId, JSONArray toolCalls) {
+            this.role = role;
+            this.text = text;
+            this.imageBase64 = imageBase64;
+            this.toolCallId = toolCallId;
+            this.toolCalls = toolCalls;
+        }
+        public static Msg toolResult(String toolCallId, String text) {
+            return new Msg("tool", text, null, toolCallId, null);
+        }
+        public static Msg assistantToolCalls(JSONArray toolCalls) {
+            return new Msg("assistant", "", null, null, toolCalls);
         }
     }
 
@@ -204,7 +223,13 @@ public class LlmClient {
         try {
             JSONObject o = new JSONObject();
             o.put("role", m.role);
-            if (m.imageBase64 != null && useVisionModel) {
+            if ("tool".equals(m.role)) {
+                o.put("tool_call_id", m.toolCallId == null ? "" : m.toolCallId);
+                o.put("content", m.text == null ? "" : m.text);
+            } else if (m.toolCalls != null) {
+                o.put("content", JSONObject.NULL);
+                o.put("tool_calls", m.toolCalls);
+            } else if (m.imageBase64 != null && useVisionModel) {
                 JSONArray arr = new JSONArray();
                 JSONObject t = new JSONObject(); t.put("type", "text"); t.put("text", m.text);
                 arr.put(t);
@@ -223,8 +248,40 @@ public class LlmClient {
 
     public interface StreamCallback {
         void onDelta(String s);
+        default void onToolCalls(List<ToolCall> calls) {}
         void onDone(String full);
         void onError(String msg);
+    }
+
+    public static class ToolCall {
+        public final String id;
+        public final String name;
+        public final String argumentsJson;
+
+        ToolCall(String id, String name, String argumentsJson) {
+            this.id = id == null || id.isEmpty() ? "call_" + System.currentTimeMillis() : id;
+            this.name = name == null ? "" : name;
+            this.argumentsJson = argumentsJson == null ? "{}" : argumentsJson;
+        }
+
+        public JSONObject toAssistantJson() {
+            JSONObject o = new JSONObject();
+            try {
+                o.put("id", id);
+                o.put("type", "function");
+                o.put("function", new JSONObject()
+                        .put("name", name)
+                        .put("arguments", argumentsJson));
+            } catch (Exception ignored) {}
+            return o;
+        }
+    }
+
+    private static class ToolCallAcc {
+        String id = "";
+        String type = "function";
+        String name = "";
+        StringBuilder args = new StringBuilder();
     }
 
     public static class ChatOptions {
@@ -269,6 +326,11 @@ public class LlmClient {
 
     public Call chat(java.util.List<Msg> msgs, boolean useVisionModel,
                      ChatOptions opts, StreamCallback cb) {
+        return chat(msgs, useVisionModel, opts, null, cb);
+    }
+
+    public Call chat(java.util.List<Msg> msgs, boolean useVisionModel,
+                     ChatOptions opts, JSONArray tools, StreamCallback cb) {
         try {
             JSONArray arr = new JSONArray();
             for (Msg m : msgs) arr.put(msgToJson(m, useVisionModel));
@@ -286,6 +348,10 @@ public class LlmClient {
                 if (opts.maxTokens != null && opts.maxTokens.intValue() > 0) {
                     body.put("max_tokens", opts.maxTokens.intValue());
                 }
+            }
+            if (tools != null && tools.length() > 0) {
+                body.put("tools", tools);
+                body.put("tool_choice", "auto");
             }
             String effort = reasoningEffort;
             if (!"auto".equals(effort)) {
@@ -305,18 +371,27 @@ public class LlmClient {
                     .addHeader("Authorization", "Bearer " + apiKey)
                     .post(RequestBody.create(JSON, body.toString()))
                     .build();
+            DebugLog.append(ctx, "llm.request", "url=" + chatBaseUrl + "/chat/completions"
+                    + " model=" + (useVisionModel ? visionModel : textModel)
+                    + " tools=" + (tools == null ? 0 : tools.length())
+                    + "\n" + body.toString());
             Call call = client.newCall(req);
             call.enqueue(new Callback() {
-                @Override public void onFailure(Call call, java.io.IOException e) { cb.onError(e.getMessage()); }
+                @Override public void onFailure(Call call, java.io.IOException e) {
+                    DebugLog.append(ctx, "llm.error", e.getMessage());
+                    cb.onError(e.getMessage());
+                }
                 @Override public void onResponse(Call call, Response resp) throws java.io.IOException {
                     try {
                         if (!resp.isSuccessful()) {
                             String b = resp.body() != null ? resp.body().string() : "";
+                            DebugLog.append(ctx, "llm.http_error", "HTTP " + resp.code() + " " + b);
                             cb.onError("HTTP " + resp.code() + " " + b);
                             return;
                         }
                         BufferedReader r = new BufferedReader(new InputStreamReader(resp.body().byteStream(), "UTF-8"));
                         StringBuilder full = new StringBuilder();
+                        ArrayList<ToolCallAcc> toolAcc = new ArrayList<>();
                         String line;
                         while ((line = r.readLine()) != null) {
                             if (!line.startsWith("data:")) continue;
@@ -326,13 +401,23 @@ public class LlmClient {
                                 JSONObject jo = new JSONObject(data);
                                 JSONArray choices = jo.optJSONArray("choices");
                                 if (choices == null || choices.length() == 0) continue;
-                                JSONObject delta = choices.optJSONObject(0).optJSONObject("delta");
+                                JSONObject choice = choices.optJSONObject(0);
+                                if (choice == null) continue;
+                                JSONObject delta = choice.optJSONObject("delta");
                                 if (delta == null) continue;
+                                JSONArray calls = delta.optJSONArray("tool_calls");
+                                if (calls != null) mergeToolCalls(toolAcc, calls);
                                 String d = delta.has("content") && !delta.isNull("content")
                                         ? delta.optString("content", "") : "";
                                 if (d != null && !d.isEmpty()) { full.append(d); cb.onDelta(d); }
                             } catch (Exception ignored) {}
                         }
+                        List<ToolCall> calls = buildToolCalls(toolAcc);
+                        if (!calls.isEmpty()) {
+                            DebugLog.append(ctx, "llm.tool_calls", toolCallsToDebug(calls));
+                            cb.onToolCalls(calls);
+                        }
+                        DebugLog.append(ctx, "llm.done", full.toString());
                         cb.onDone(full.toString());
                     } finally {
                         if (resp.body() != null) resp.body().close();
@@ -342,6 +427,51 @@ public class LlmClient {
             return call;
         } catch (Exception e) { cb.onError(e.getMessage()); }
         return null;
+    }
+
+    private static void mergeToolCalls(ArrayList<ToolCallAcc> acc, JSONArray calls) {
+        for (int i = 0; i < calls.length(); i++) {
+            JSONObject c = calls.optJSONObject(i);
+            if (c == null) continue;
+            int idx = Math.max(0, c.optInt("index", i));
+            while (acc.size() <= idx) acc.add(new ToolCallAcc());
+            ToolCallAcc a = acc.get(idx);
+            String id = c.optString("id", "");
+            if (!id.isEmpty()) a.id = id;
+            String type = c.optString("type", "");
+            if (!type.isEmpty()) a.type = type;
+            JSONObject fn = c.optJSONObject("function");
+            if (fn != null) {
+                String name = fn.optString("name", "");
+                if (!name.isEmpty()) a.name = name;
+                String args = fn.optString("arguments", "");
+                if (!args.isEmpty()) a.args.append(args);
+            }
+        }
+    }
+
+    private static List<ToolCall> buildToolCalls(ArrayList<ToolCallAcc> acc) {
+        ArrayList<ToolCall> out = new ArrayList<>();
+        for (int i = 0; i < acc.size(); i++) {
+            ToolCallAcc a = acc.get(i);
+            if (a == null || a.name == null || a.name.isEmpty()) continue;
+            String args = a.args.length() == 0 ? "{}" : a.args.toString();
+            out.add(new ToolCall(a.id.isEmpty() ? "call_" + i : a.id, a.name, args));
+        }
+        return out;
+    }
+
+    private static String toolCallsToDebug(List<ToolCall> calls) {
+        JSONArray arr = new JSONArray();
+        try {
+            for (ToolCall c : calls) {
+                arr.put(new JSONObject()
+                        .put("id", c.id)
+                        .put("name", c.name)
+                        .put("arguments", c.argumentsJson));
+            }
+        } catch (Exception ignored) {}
+        return arr.toString();
     }
 
     public interface TextCallback { void onResult(String text); void onError(String msg); }

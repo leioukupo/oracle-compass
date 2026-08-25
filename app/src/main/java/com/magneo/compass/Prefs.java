@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.Environment;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -12,6 +13,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.util.ArrayList;
 import java.util.Map;
 
 /** 统一的设置存取（SharedPreferences），含大模型/语音/视觉/浏览器/网盘配置。 */
@@ -91,6 +93,16 @@ public class Prefs {
     public static final String K_LOC_SOURCE = "locSource";
     public static final String K_LOC_WIFI_URL = "locWifiUrl";
     public static final String K_LOC_IP_URL = "locIpUrl";
+    public static final String K_MCP_ENABLED = "mcpEnabled";
+    public static final String K_MCP_SERVERS = "mcpServers";
+    public static final String K_MCP_MAX_TOOL_ROUNDS = "mcpMaxToolRounds";
+    public static final String K_MCP_SLOW_HINT_ENABLED = "mcpSlowHintEnabled";
+    public static final String K_MCP_SLOW_HINT_MS = "mcpSlowHintMs";
+    public static final String K_MCP_SLOW_HINT_SCHEDULE_MS = "mcpSlowHintScheduleMs";
+    public static final String K_MCP_SLOW_HINT_MAX_COUNT = "mcpSlowHintMaxCount";
+    public static final String K_MCP_SLOW_HINT_PHRASES = "mcpSlowHintPhrases";
+    public static final String K_DEBUG_MODE = "debugMode";
+    public static final String K_DEBUG_MAX_KB = "debugMaxKb";
     public static final String DEFAULT_LOC_WIFI_URL = "";
     public static final String DEFAULT_LOC_IP_URL = "http://ip-api.com/json/?fields=status,lat,lon,query,city,regionName,country,isp";
     public static final String DEFAULT_SYS_PROMPT_VOICE = "你是真理罗盘助手，回答简洁，中文回复。";
@@ -127,6 +139,21 @@ public class Prefs {
     public static final String INTERACTION_NATURAL = "natural";
     public static final String INTERACTION_ACTIVE = "active";
     public static final String DEFAULT_INTERACTION_MODE = INTERACTION_NATURAL;
+    public static final int DEFAULT_MCP_MAX_TOOL_ROUNDS = 3;
+    public static final int DEFAULT_MCP_TOOL_TIMEOUT_MS = 12000;
+    public static final boolean DEFAULT_MCP_SLOW_HINT_ENABLED = true;
+    public static final int DEFAULT_MCP_SLOW_HINT_MS = 900;
+    public static final String DEFAULT_MCP_SLOW_HINT_SCHEDULE_MS = "900,2600,3800,4700,5300";
+    public static final int DEFAULT_MCP_SLOW_HINT_MAX_COUNT = 5;
+    public static final String DEFAULT_MCP_SLOW_HINT_PHRASES =
+            "我查一下。\n正在查询中。\n我看一下资料。\n稍等，我找一下。\n我检索一下。\n"
+                    + "我确认一下。\n我翻一下资料。\n等我取一下结果。\n我看看最新信息。\n我连一下工具。\n"
+                    + "我问一下知识库。\n我查查有没有更新。\n稍等，我整理一下。\n我核对一下。\n我找找相关资料。\n"
+                    + "这个我查一下更稳。\n我正在看结果。\n我帮你搜一下。\n我拉一下数据。\n马上给你。";
+
+    private static int clampInt(int v, int lo, int hi) {
+        return Math.max(lo, Math.min(hi, v));
+    }
 
     private static SharedPreferences sp(Context c) {
         return c.getSharedPreferences("bagua", Context.MODE_PRIVATE);
@@ -148,6 +175,73 @@ public class Prefs {
         }
     }
     public static boolean vadEnabled(Context c) { return getB(c, K_VAD_ENABLED, DEFAULT_VAD_ENABLED); }
+
+    public static boolean mcpEnabled(Context c) {
+        return getB(c, K_MCP_ENABLED, false);
+    }
+
+    public static int mcpMaxToolRounds(Context c) {
+        return clampInt(getI(c, K_MCP_MAX_TOOL_ROUNDS, DEFAULT_MCP_MAX_TOOL_ROUNDS), 0, 6);
+    }
+
+    public static boolean mcpSlowHintEnabled(Context c) {
+        return getB(c, K_MCP_SLOW_HINT_ENABLED, DEFAULT_MCP_SLOW_HINT_ENABLED);
+    }
+
+    public static int mcpSlowHintMs(Context c) {
+        return clampInt(getI(c, K_MCP_SLOW_HINT_MS, DEFAULT_MCP_SLOW_HINT_MS), 0, 10000);
+    }
+
+    public static int mcpSlowHintMaxCount(Context c) {
+        return clampInt(getI(c, K_MCP_SLOW_HINT_MAX_COUNT, DEFAULT_MCP_SLOW_HINT_MAX_COUNT), 0, 10);
+    }
+
+    public static int[] mcpSlowHintScheduleMs(Context c) {
+        String s = get(c, K_MCP_SLOW_HINT_SCHEDULE_MS, DEFAULT_MCP_SLOW_HINT_SCHEDULE_MS);
+        ArrayList<Integer> out = new ArrayList<>();
+        if (s != null) {
+            String[] parts = s.split("[,，\\s]+");
+            for (String p : parts) {
+                try {
+                    int v = Integer.parseInt(p.trim());
+                    if (v >= 0 && v <= 30000 && !out.contains(v)) out.add(v);
+                } catch (Exception ignored) {}
+            }
+        }
+        if (out.isEmpty()) out.add(DEFAULT_MCP_SLOW_HINT_MS);
+        int[] arr = new int[out.size()];
+        for (int i = 0; i < out.size(); i++) arr[i] = out.get(i);
+        return arr;
+    }
+
+    public static ArrayList<String> mcpSlowHintPhrases(Context c) {
+        String raw = get(c, K_MCP_SLOW_HINT_PHRASES, DEFAULT_MCP_SLOW_HINT_PHRASES);
+        ArrayList<String> out = new ArrayList<>();
+        if (raw != null) {
+            String t = raw.trim();
+            if (t.startsWith("[")) {
+                try {
+                    JSONArray arr = new JSONArray(t);
+                    for (int i = 0; i < arr.length(); i++) addPhrase(out, arr.optString(i, ""));
+                } catch (Exception ignored) {}
+            }
+            if (out.isEmpty()) {
+                String[] parts = raw.split("\\r?\\n");
+                for (String p : parts) addPhrase(out, p);
+            }
+        }
+        if (out.isEmpty()) {
+            String[] parts = DEFAULT_MCP_SLOW_HINT_PHRASES.split("\\r?\\n");
+            for (String p : parts) addPhrase(out, p);
+        }
+        return out;
+    }
+
+    private static void addPhrase(ArrayList<String> out, String phrase) {
+        String p = phrase == null ? "" : phrase.trim();
+        if (p.isEmpty() || out.contains(p)) return;
+        out.add(p);
+    }
 
     public static String normalizeLocSource(String v) {
         if (v == null) return DEFAULT_LOC_SOURCE;
