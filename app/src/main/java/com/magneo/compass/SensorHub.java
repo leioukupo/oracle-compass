@@ -68,6 +68,12 @@ public class SensorHub {
     public volatile float maxSnr = 0f;
     public volatile SatelliteInfo[] satelliteInfos = new SatelliteInfo[0];
     public volatile String gpsStatus = "未定位";
+    public volatile boolean gpsProviderEnabled = false;
+    public volatile boolean gpsRequestActive = false;
+    public volatile long gpsRequestStartedMs = 0;
+    public volatile long gpsLastRequestMs = 0;
+    public volatile String gpsLastError = "";
+    public volatile String gpsLastAction = "";
     public volatile long lastSensorMs = 0;
     public volatile long lastAccelMs = 0, lastGyroMs = 0, lastMagMs = 0;
     public volatile long lastLightMs = 0, lastProximityMs = 0, lastPressureMs = 0, lastGpsMs = 0;
@@ -76,8 +82,8 @@ public class SensorHub {
     public volatile float magOffsetX, magOffsetY, magOffsetZ;
     public volatile String magCalQuality = "未校准";
     private volatile boolean started;
-    /** 定位显示开关：关闭后不请求 GPS（省电），由 MainActivity 设置 */
-    public volatile boolean gpsEnabled = true;
+    /** GPS 诊断开关：日常粗定位不打开 GPS，只在星图/诊断需要时开启。 */
+    public volatile boolean gpsEnabled = false;
     public volatile boolean gyroSampling = false;
     public volatile boolean rawDiagnosticSampling = false;
     private boolean gpsRequested;
@@ -182,11 +188,9 @@ public class SensorHub {
                     && (gpsStatus.startsWith("搜索") || gpsStatus.startsWith("定位中"))) {
                 gpsStatus = "无卫星信号";   // 2 分钟没有任何卫星事件：天线/信号问题
             }
-            if (gpsEnabled && !gpsRequested) requestGps();       // 开关打开：恢复 GPS 请求
-            else if (!gpsEnabled && gpsRequested) {              // 开关关闭：1 秒内停掉 GPS
-                stopGps();
-                gpsStatus = "已关闭";
-            }
+            try { gpsProviderEnabled = lm.isProviderEnabled(LocationManager.GPS_PROVIDER); }
+            catch (Exception ignored) {}
+            applyGpsDemand();
             handler.postDelayed(this, 1000);
         }
     };
@@ -242,6 +246,8 @@ public class SensorHub {
         try { lm.removeUpdates(loc); } catch (Exception ignored) {}
         try { lm.removeGpsStatusListener(gpsListener); } catch (Exception ignored) {}
         gpsRequested = false;
+        gpsRequestActive = false;
+        gpsRequestStartedMs = 0;
         if (batteryRcRegistered) {
             try { appCtx.unregisterReceiver(batteryRc); } catch (Exception ignored) {}
             batteryRcRegistered = false;
@@ -250,19 +256,95 @@ public class SensorHub {
 
     private void requestGps() {
         try {
-            gpsStatus = lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ? "搜索卫星…" : "定位已关闭";
+            gpsProviderEnabled = lm.isProviderEnabled(LocationManager.GPS_PROVIDER);
+            gpsStatus = gpsProviderEnabled ? "搜索卫星…" : "定位已关闭";
+            gpsLastError = "";
+            String assist = injectGpsAssistance();
             try { lm.addGpsStatusListener(gpsListener); } catch (Exception ignored) {}
             Location l = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER);
             if (l != null) { lat = l.getLatitude(); lon = l.getLongitude(); alt = l.getAltitude(); }
             lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 2000, 1, loc);
             gpsRequested = true;
-        } catch (Exception ignored) {}
+            gpsRequestActive = true;
+            gpsLastRequestMs = System.currentTimeMillis();
+            if (gpsRequestStartedMs <= 0) gpsRequestStartedMs = gpsLastRequestMs;
+            gpsLastAction = "GPS请求 · " + assist;
+        } catch (Exception e) {
+            gpsLastError = e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage());
+            gpsStatus = "GPS请求失败";
+            gpsRequested = false;
+            gpsRequestActive = false;
+        }
+    }
+
+    public void setGpsEnabled(boolean enabled) {
+        gpsEnabled = enabled;
+        if (!enabled) gpsStatus = "已关闭";
+        if (!started) return;
+        handler.post(new Runnable() {
+            @Override public void run() { applyGpsDemand(); }
+        });
+    }
+
+    private void applyGpsDemand() {
+        if (gpsEnabled && !gpsRequested) requestGps();
+        else if (!gpsEnabled && gpsRequested) {
+            stopGps();
+            gpsStatus = "已关闭";
+            listener.onUpdate();
+        }
     }
 
     private void stopGps() {
         try { lm.removeUpdates(loc); } catch (Exception ignored) {}
         try { lm.removeGpsStatusListener(gpsListener); } catch (Exception ignored) {}
         gpsRequested = false;
+        gpsRequestActive = false;
+        gpsRequestStartedMs = 0;
+    }
+
+    public void requestGpsColdStart() {
+        handler.post(new Runnable() {
+            @Override public void run() { doGpsColdStart(); }
+        });
+    }
+
+    private void doGpsColdStart() {
+        boolean deleted = false;
+        String err = "";
+        try {
+            Bundle b = new Bundle();
+            String[] flags = {
+                    "ephemeris", "almanac", "position", "time", "iono", "utc",
+                    "health", "svdir", "svsteer", "sadata", "rti", "celldb", "all"
+            };
+            for (String f : flags) b.putBoolean(f, true);
+            deleted = lm.sendExtraCommand(LocationManager.GPS_PROVIDER, "delete_aiding_data", b);
+        } catch (Exception e) {
+            err = e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage());
+        }
+        stopGps();
+        lat = Double.NaN; lon = Double.NaN; alt = Double.NaN;
+        sats = 0; usedSats = 0; visibleSats = 0; maxSnr = 0f;
+        satelliteInfos = new SatelliteInfo[0];
+        lastGpsEventMs = System.currentTimeMillis();
+        gpsStatus = "GPS冷启动";
+        gpsLastError = err;
+        String action = "冷启动 · aiding " + (deleted ? "已清理" : "无确认");
+        gpsLastAction = action;
+        if (gpsEnabled) {
+            requestGps();
+            gpsLastAction = action + " · " + gpsLastAction;
+        }
+    }
+
+    private String injectGpsAssistance() {
+        boolean time = false, xtra = false;
+        try { time = lm.sendExtraCommand(LocationManager.GPS_PROVIDER, "force_time_injection", null); }
+        catch (Exception ignored) {}
+        try { xtra = lm.sendExtraCommand(LocationManager.GPS_PROVIDER, "force_xtra_injection", null); }
+        catch (Exception ignored) {}
+        return "time " + (time ? "ok" : "--") + " · xtra " + (xtra ? "ok" : "--");
     }
 
     public void setSensorDemand(boolean needGyro, boolean needRawDiagnostic) {

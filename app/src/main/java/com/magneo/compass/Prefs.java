@@ -88,10 +88,11 @@ public class Prefs {
     public static final String K_ORACLE_SHAKE_FORCE = "oracleShakeForce";
     public static final String K_SYS_PROMPT_VISION = "sysPromptVision";
     public static final String K_SHOW_LOC = "showLoc";
+    public static final String K_LOC_SOURCE = "locSource";
     public static final String K_LOC_WIFI_URL = "locWifiUrl";
     public static final String K_LOC_IP_URL = "locIpUrl";
-    public static final String DEFAULT_LOC_WIFI_URL = "https://location.services.mozilla.com/v1/geolocate?key=test";
-    public static final String DEFAULT_LOC_IP_URL = "";
+    public static final String DEFAULT_LOC_WIFI_URL = "";
+    public static final String DEFAULT_LOC_IP_URL = "http://ip-api.com/json/?fields=status,lat,lon,query,city,regionName,country,isp";
     public static final String DEFAULT_SYS_PROMPT_VOICE = "你是真理罗盘助手，回答简洁，中文回复。";
     public static final String DEFAULT_SYS_PROMPT_VISION = "你是圆屏设备“真理罗盘”的视觉感知模块。看图后用中文简述你看到的环境（物体/人/光线/场景），若与上一帧相比有明显变化，指出变化；若没有变化就说“无明显变化”。一句话即可。";
     public static final String DEFAULT_REASONING_EFFORT = "auto";
@@ -99,6 +100,10 @@ public class Prefs {
     public static final String VISION_FRAME_SOURCE_HAL = "hal";
     public static final String VISION_FRAME_SOURCE_RTSP = "rtsp";
     public static final String DEFAULT_VISION_FRAME_SOURCE = VISION_FRAME_SOURCE_HAL;
+    public static final String LOC_SOURCE_OFF = "off";
+    public static final String LOC_SOURCE_WIFI_IP = "wifi_ip";
+    public static final String LOC_SOURCE_GPS_DIAG = "gps_diag";
+    public static final String DEFAULT_LOC_SOURCE = LOC_SOURCE_WIFI_IP;
     public static final String MAIN_RENDERER_GL = "gl";
     public static final String MAIN_RENDERER_CANVAS = "canvas";
     public static final String DEFAULT_MAIN_RENDERER = MAIN_RENDERER_GL;
@@ -143,6 +148,57 @@ public class Prefs {
         }
     }
     public static boolean vadEnabled(Context c) { return getB(c, K_VAD_ENABLED, DEFAULT_VAD_ENABLED); }
+
+    public static String normalizeLocSource(String v) {
+        if (v == null) return DEFAULT_LOC_SOURCE;
+        String s = v.trim().toLowerCase();
+        if (LOC_SOURCE_OFF.equals(s) || "关闭".equals(s) || "false".equals(s)) return LOC_SOURCE_OFF;
+        if (LOC_SOURCE_GPS_DIAG.equals(s) || "gps".equals(s) || "gps_diag".equals(s)
+                || "gps诊断".equals(s)) return LOC_SOURCE_GPS_DIAG;
+        return LOC_SOURCE_WIFI_IP;
+    }
+
+    public static String locSource(Context c) {
+        return normalizeLocSource(get(c, K_LOC_SOURCE, DEFAULT_LOC_SOURCE));
+    }
+
+    public static boolean locSourceOff(Context c) {
+        return LOC_SOURCE_OFF.equals(locSource(c));
+    }
+
+    public static boolean locSourceWifiIp(Context c) {
+        return LOC_SOURCE_WIFI_IP.equals(locSource(c));
+    }
+
+    public static boolean locSourceGpsDiag(Context c) {
+        return LOC_SOURCE_GPS_DIAG.equals(locSource(c));
+    }
+
+    public static boolean locationDisplayEnabled(Context c) {
+        return !locSourceOff(c);
+    }
+
+    public static String locSourceLabel(Context c) {
+        String s = locSource(c);
+        if (LOC_SOURCE_OFF.equals(s)) return "关闭";
+        if (LOC_SOURCE_GPS_DIAG.equals(s)) return "GPS诊断";
+        return "WiFi-IP";
+    }
+
+    public static String locWifiUrl(Context c) {
+        String v = get(c, K_LOC_WIFI_URL, DEFAULT_LOC_WIFI_URL);
+        if (v == null) return "";
+        String s = v.trim();
+        if (s.contains("location.services.mozilla.com")) return DEFAULT_LOC_WIFI_URL;
+        return s;
+    }
+
+    public static String locIpUrl(Context c) {
+        String v = get(c, K_LOC_IP_URL, DEFAULT_LOC_IP_URL);
+        if (v == null || v.trim().isEmpty()) return DEFAULT_LOC_IP_URL;
+        return v.trim();
+    }
+
     public static void putB(Context c, String k, boolean v) {
         sp(c).edit().putBoolean(k, v).apply();
         exportBackup(c);

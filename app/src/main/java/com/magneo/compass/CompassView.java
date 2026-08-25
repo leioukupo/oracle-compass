@@ -162,8 +162,9 @@ public class CompassView extends View {
     }
 
     private void applyDetailResourceDemand() {
-        boolean showLoc = Prefs.getB(getContext(), Prefs.K_SHOW_LOC, false);
-        hub.gpsEnabled = showLoc || (detailMode && detailPage == DETAIL_SATELLITES);
+        boolean needGps = Prefs.locSourceGpsDiag(getContext())
+                || (detailMode && detailPage == DETAIL_SATELLITES);
+        hub.setGpsEnabled(needGps);
         boolean needGyro = detailMode && (detailPage == DETAIL_EARTH || detailPage == DETAIL_DIAGNOSTIC);
         boolean needRawDiagnostic = detailMode && detailPage == DETAIL_DIAGNOSTIC;
         hub.setSensorDemand(needGyro, needRawDiagnostic);
@@ -785,7 +786,7 @@ public class CompassView extends View {
         pStroke.setStrokeWidth(3.0f * s);
         c.drawCircle(cx, cy, diskR, pStroke);
 
-        float taijiR = diskR * 0.88f;
+        float taijiR = diskR;
         tmpRectA.set(cx - taijiR, cy - taijiR, cx + taijiR, cy + taijiR);
         float taijiAz = Float.isNaN(az) ? 0f : az;
         c.save();
@@ -1520,19 +1521,20 @@ public class CompassView extends View {
     }
 
     private String locationState() {
-        if (!Prefs.getB(getContext(), Prefs.K_SHOW_LOC, true)) return "定位关闭";
-        if (!Double.isNaN(hub.lat)) return "GPS";
+        if (Prefs.locSourceOff(getContext())) return "定位关闭";
+        if (hub.gpsEnabled && !Double.isNaN(hub.lat)) return "GPS";
         if (!Double.isNaN(hub.netLat)) {
             String src = hub.netSrc == null || hub.netSrc.trim().isEmpty() ? "网络" : hub.netSrc.trim();
             if (src.startsWith("IP")) return "粗定位";
             return src.length() > 5 ? "网络" : src;
         }
+        if (Prefs.locSourceWifiIp(getContext())) return "粗定位中";
         return "定位未定";
     }
 
     private String locationValue() {
-        if (!Prefs.getB(getContext(), Prefs.K_SHOW_LOC, true)) return "已关闭";
-        if (!Double.isNaN(hub.lat)) return hub.sats > 0 ? ("GPS " + hub.sats + "星") : "GPS";
+        if (Prefs.locSourceOff(getContext())) return "已关闭";
+        if (hub.gpsEnabled && !Double.isNaN(hub.lat)) return hub.sats > 0 ? ("GPS " + hub.sats + "星") : "GPS";
         if (!Double.isNaN(hub.netLat)) {
             String src = hub.netSrc == null || hub.netSrc.trim().isEmpty() ? "网络" : hub.netSrc.trim();
             float acc = hub.netAcc;
@@ -1541,6 +1543,7 @@ public class CompassView extends View {
                     : (acc > 0 ? String.format(Locale.US, "±%.0fm", acc) : "");
             return (src.startsWith("IP") ? "粗略" : src) + (accText.isEmpty() ? "" : " " + accText);
         }
+        if (Prefs.locSourceWifiIp(getContext())) return "等待网络";
         return "未定";
     }
 

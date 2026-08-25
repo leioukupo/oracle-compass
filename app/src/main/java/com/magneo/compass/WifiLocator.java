@@ -72,7 +72,7 @@ public class WifiLocator {
     }
 
     private void locate() {
-        if (!Prefs.getB(ctx, Prefs.K_SHOW_LOC, false)) return;  // 定位显示开关关闭：不请求
+        if (!Prefs.locSourceWifiIp(ctx)) return;  // 只有粗定位模式才请求系统网络/WiFi/IP
         requestNetworkLocation();
         try { if (wm != null) wm.startScan(); } catch (Exception ignored) {}
         handler.postDelayed(new Runnable() {
@@ -97,6 +97,7 @@ public class WifiLocator {
     }
 
     private void readAndQuery() {
+        if (!running || !Prefs.locSourceWifiIp(ctx)) return;
         List<ScanResult> aps = new ArrayList<ScanResult>();
         try { if (wm != null) aps.addAll(wm.getScanResults()); } catch (Exception ignored) {}
         if (!aps.isEmpty()) {
@@ -112,7 +113,11 @@ public class WifiLocator {
                             .put("signalStrength", aps.get(i).level));
                 }
                 JSONObject body = new JSONObject().put("wifiAccessPoints", arr);
-                String wifiUrl = Prefs.get(ctx, Prefs.K_LOC_WIFI_URL, Prefs.DEFAULT_LOC_WIFI_URL);
+                String wifiUrl = Prefs.locWifiUrl(ctx);
+                if (wifiUrl.isEmpty()) {
+                    ipFallbackIfConfigured();
+                    return;
+                }
                 Request req = new Request.Builder()
                         .url(wifiUrl)
                         .post(RequestBody.create(JSON, body.toString()))
@@ -137,7 +142,8 @@ public class WifiLocator {
     }
 
     private void ipFallbackIfConfigured() {
-        String ipUrl = Prefs.get(ctx, Prefs.K_LOC_IP_URL, "");
+        if (!running || !Prefs.locSourceWifiIp(ctx)) return;
+        String ipUrl = Prefs.locIpUrl(ctx);
         if (ipUrl == null || ipUrl.trim().isEmpty()) return;
         Request req = new Request.Builder().url(ipUrl).build();
         client.newCall(req).enqueue(new okhttp3.Callback() {
@@ -145,12 +151,40 @@ public class WifiLocator {
             @Override public void onResponse(Call c, Response r) throws java.io.IOException {
                 try {
                     JSONObject o = new JSONObject(r.body() == null ? "" : r.body().string());
-                    if ("success".equals(o.optString("status"))) {
-                        fire(o.getDouble("lat"), o.getDouble("lon"), 5000f, "IP粗略");
-                    }
+                    double[] ll = parseIpLocation(o);
+                    if (ll != null) fire(ll[0], ll[1], 5000f, ipSourceLabel(o));
                 } catch (Exception ignored) {}
             }
         });
+    }
+
+    private double[] parseIpLocation(JSONObject o) {
+        try {
+            if (o.has("lat") && o.has("lon")) {
+                String status = o.optString("status", "success");
+                if (status.isEmpty() || "success".equalsIgnoreCase(status)) {
+                    return new double[]{o.getDouble("lat"), o.getDouble("lon")};
+                }
+            }
+            if (o.has("latitude") && o.has("longitude")) {
+                return new double[]{o.getDouble("latitude"), o.getDouble("longitude")};
+            }
+            if (o.has("lat") && o.has("lng")) {
+                return new double[]{o.getDouble("lat"), o.getDouble("lng")};
+            }
+            String loc = o.optString("loc", "");
+            if (!loc.isEmpty() && loc.indexOf(',') > 0) {
+                String[] p = loc.split(",", 2);
+                return new double[]{Double.parseDouble(p[0].trim()), Double.parseDouble(p[1].trim())};
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private String ipSourceLabel(JSONObject o) {
+        String city = o.optString("city", "");
+        if (city == null || city.trim().isEmpty()) return "IP粗略";
+        return "IP粗略 " + city.trim();
     }
 
     private void fire(Location l, String src) {

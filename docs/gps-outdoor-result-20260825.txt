@@ -1,0 +1,21 @@
+Oracle Compass GPS outdoor result - 2026-08-25
+
+Capture files:
+/sdcard/oracle-gps/gps_capture_20260825_212604_summary.txt
+/sdcard/oracle-gps/gps_capture_20260825_212604_logcat.txt
+
+Result:
+- GPGSV max visible satellites: 2
+- GPGGA fix quality: all 0
+- GPGGA used satellites: all 0
+- GPRMC status: all V invalid
+- Framework GNSS max count: 2
+- Ephemeris/almanac masks: always 0
+- YGPS reported Satellite Count:0 during the same period
+- SUPL/A-GPS did exchange data and logged assist data are inject done
+
+Conclusion:
+Outdoor open-sky test still did not produce usable GPS reception. Since the GPS driver is active and A-GPS injection works, this strongly suggests GPS antenna/RF/hardware reception failure or severe shielding/contact problems.
+
+Next:
+Inspect GPS antenna/contact/flex/shielding, or treat built-in GPS as unreliable and use Wi-Fi/network/external GPS.

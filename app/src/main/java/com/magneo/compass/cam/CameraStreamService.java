@@ -136,6 +136,7 @@ public class CameraStreamService extends Service {
             WebRtcStreamer wr = WebRtcStreamer.get();
             wr.init(getApplicationContext());
 
+            com.magneo.compass.FlashlightController.releaseHardwareKeepingRequest();
             camera = Camera.open(camId);
             Camera.Parameters p = camera.getParameters();
             java.util.List<Camera.Size> allSizes = p.getSupportedPreviewSizes();
@@ -204,6 +205,9 @@ public class CameraStreamService extends Service {
                 camera.setParameters(pp);
                 fpsDiag += "[sf60]";
             } catch (Throwable ignored) {}
+            if (com.magneo.compass.FlashlightController.applyToOpenedCamera(camera)) {
+                fpsDiag += "[torch]";
+            }
             fpsInfo = fpsInfo + " " + fpsDiag;
 
             // 回调驱动的实际帧率统计（每 50 帧更新一次）

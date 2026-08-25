@@ -20,7 +20,9 @@ import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.util.Calendar;
 
+import javax.microedition.khronos.egl.EGL10;
 import javax.microedition.khronos.egl.EGLConfig;
+import javax.microedition.khronos.egl.EGLDisplay;
 import javax.microedition.khronos.opengles.GL10;
 
 /** OpenGL ES 2.0 主罗盘渲染层。详情/拖拽仍由 CompassView 的 Canvas 覆盖层负责。 */
@@ -30,7 +32,7 @@ public class CompassGlView extends GLSurfaceView {
     public CompassGlView(Context context, SensorHub hub, Runnable fallback) {
         super(context);
         setEGLContextClientVersion(2);
-        setEGLConfigChooser(8, 8, 8, 8, 16, 0);
+        setEGLConfigChooser(new MsaaConfigChooser());
         getHolder().setFormat(PixelFormat.RGBA_8888);
         try { setPreserveEGLContextOnPause(true); } catch (Throwable ignored) {}
         renderer = new CompassRenderer(context.getApplicationContext(), hub, fallback);
@@ -42,6 +44,47 @@ public class CompassGlView extends GLSurfaceView {
         try { requestRender(); } catch (Throwable ignored) {}
     }
 
+    private static final class MsaaConfigChooser implements EGLConfigChooser {
+        private static final int EGL_OPENGL_ES2_BIT = 4;
+        private static final int EGL_RENDERABLE_TYPE = 0x3040;
+
+        @Override public EGLConfig chooseConfig(EGL10 egl, EGLDisplay display) {
+            EGLConfig c = choose(egl, display, true);
+            if (c == null) c = choose(egl, display, false);
+            if (c == null) throw new IllegalArgumentException("No EGL config for compass GL");
+            return c;
+        }
+
+        private EGLConfig choose(EGL10 egl, EGLDisplay display, boolean msaa) {
+            int[] attrs = msaa
+                    ? new int[] {
+                    EGL10.EGL_RED_SIZE, 8,
+                    EGL10.EGL_GREEN_SIZE, 8,
+                    EGL10.EGL_BLUE_SIZE, 8,
+                    EGL10.EGL_ALPHA_SIZE, 8,
+                    EGL10.EGL_DEPTH_SIZE, 16,
+                    EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+                    EGL10.EGL_SAMPLE_BUFFERS, 1,
+                    EGL10.EGL_SAMPLES, 4,
+                    EGL10.EGL_NONE
+            }
+                    : new int[] {
+                    EGL10.EGL_RED_SIZE, 8,
+                    EGL10.EGL_GREEN_SIZE, 8,
+                    EGL10.EGL_BLUE_SIZE, 8,
+                    EGL10.EGL_ALPHA_SIZE, 8,
+                    EGL10.EGL_DEPTH_SIZE, 16,
+                    EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+                    EGL10.EGL_NONE
+            };
+            int[] num = new int[1];
+            if (!egl.eglChooseConfig(display, attrs, null, 0, num) || num[0] <= 0) return null;
+            EGLConfig[] configs = new EGLConfig[num[0]];
+            if (!egl.eglChooseConfig(display, attrs, configs, configs.length, num)) return null;
+            return configs.length > 0 ? configs[0] : null;
+        }
+    }
+
     private static final class CompassRenderer implements Renderer {
         private static final String[] SECTOR_NAMES = {"乾", "坎", "艮", "震", "巽", "离", "兑", "坤"};
         private static final int[][] TRIGRAMS = {
@@ -51,6 +94,9 @@ public class CompassGlView extends GLSurfaceView {
         private static final String[] TIAN_GAN = {"甲","乙","丙","丁","戊","己","庚","辛","壬","癸"};
         private static final String[] DI_ZHI = {"子","丑","寅","卯","辰","巳","午","未","申","酉","戌","亥"};
         private static final String[] DIRS = {"北", "东", "南", "西"};
+        private static final int FULL_RING_STEPS = 2048;
+        private static final int HALF_RING_STEPS = 1024;
+        private static final int DOT_STEPS = 160;
 
         private static final int C_GOLD = Ui.COLOR_GOLD;
         private static final int C_GOLD_DARK = Ui.COLOR_GOLD_DARK;
@@ -72,10 +118,10 @@ public class CompassGlView extends GLSurfaceView {
         private final RectF rectA = new RectF();
         private final RectF rectB = new RectF();
         private final RectF rectC = new RectF();
-        private final float[] verts = new float[4096];
+        private final float[] verts = new float[8192];
         private final float[] texVerts = new float[8];
         private final float[] texUvs = new float[8];
-        private final FloatBuffer vertBuf = ByteBuffer.allocateDirect(4096 * 4)
+        private final FloatBuffer vertBuf = ByteBuffer.allocateDirect(8192 * 4)
                 .order(ByteOrder.nativeOrder()).asFloatBuffer();
         private final FloatBuffer texVertBuf = ByteBuffer.allocateDirect(8 * 4)
                 .order(ByteOrder.nativeOrder()).asFloatBuffer();
@@ -398,7 +444,7 @@ public class CompassGlView extends GLSurfaceView {
             float outer = rMax * 0.595f;
             float inner = rMax * 0.565f;
             float mid = (outer + inner) / 2f;
-            int steps = 384;
+            int steps = FULL_RING_STEPS;
             drawSoftArcRing(inner, outer, -90f, 360f, Color.rgb(74, 46, 24), steps);
             drawArcRing(cx, cy, outer - 0.65f * scale, outer + 0.15f * scale,
                     0f, 360f, a(C_GOLD, 42), steps);
@@ -408,9 +454,9 @@ public class CompassGlView extends GLSurfaceView {
                 int remain = hub.battery < 20 ? Color.rgb(183, 47, 37) : Color.rgb(246, 204, 70);
                 float sweep = 360f * hub.battery / 100f;
                 drawSoftArcRing(inner - 0.7f * scale, outer + 0.7f * scale,
-                        -90f, sweep, a(remain, 72), stepsForSweep(sweep, 160, 384));
+                        -90f, sweep, a(remain, 72), stepsForSweep(sweep, 240, FULL_RING_STEPS));
                 drawSoftArcRing(inner + 0.7f * scale, outer - 0.7f * scale,
-                        -90f, sweep, remain, stepsForSweep(sweep, 160, 384));
+                        -90f, sweep, remain, stepsForSweep(sweep, 240, FULL_RING_STEPS));
                 if (sweep > 0.5f && sweep < 359.5f) {
                     drawBatteryCap(mid, (outer - inner) * 0.5f - 0.7f * scale, -90f, remain);
                     drawBatteryCap(mid, (outer - inner) * 0.5f - 0.7f * scale,
@@ -444,14 +490,14 @@ public class CompassGlView extends GLSurfaceView {
             float rad = (float) Math.toRadians(deg);
             float x = cx + (float) Math.cos(rad) * radius;
             float y = cy + (float) Math.sin(rad) * radius;
-            drawCircle(x, y, capR + 0.75f * scale, a(color, 70), 28);
-            drawCircle(x, y, capR, color, 28);
+            drawCircle(x, y, capR + 0.75f * scale, a(color, 70), DOT_STEPS);
+            drawCircle(x, y, capR, color, DOT_STEPS);
         }
 
         private void drawCompassRing(float az) {
             float r = rMax * 0.55f;
-            drawArcRing(cx, cy, r * 1.015f, r * 1.025f, 0f, 360f, a(C_GOLD_DARK, 130), 96);
-            drawArcRing(cx, cy, r * 0.755f, r * 0.765f, 0f, 360f, a(C_CYAN, 70), 96);
+            drawArcRing(cx, cy, r * 1.015f, r * 1.025f, 0f, 360f, a(C_GOLD_DARK, 130), FULL_RING_STEPS);
+            drawArcRing(cx, cy, r * 0.755f, r * 0.765f, 0f, 360f, a(C_CYAN, 70), FULL_RING_STEPS);
             for (int d = 0; d < 360; d += 5) {
                 boolean cardinal = d % 90 == 0;
                 boolean major = d % 30 == 0;
@@ -505,15 +551,15 @@ public class CompassGlView extends GLSurfaceView {
                 float half = (1.0f + 1.55f * t) * scale;
                 drawArcRing(cx, cy, trailR - half, trailR + half,
                         end - span + i * step, step * 0.82f,
-                        a(C_GOLD, (int) (18 + 118 * t)), 4);
+                        a(C_GOLD, (int) (18 + 118 * t)), 18);
             }
             drawHand(trailR, deg, 7.4f * scale, a(C_GOLD, 105));
             drawHand(trailR, deg, 3.7f * scale, Color.rgb(255, 220, 86));
             float rad = (float) Math.toRadians(deg - 90f);
             float tx = cx + (float) Math.cos(rad) * trailR;
             float ty = cy + (float) Math.sin(rad) * trailR;
-            drawCircle(tx, ty, 5.8f * scale, a(C_GOLD, 72), 18);
-            drawCircle(tx, ty, 3.0f * scale, Color.rgb(255, 226, 92), 18);
+            drawCircle(tx, ty, 5.8f * scale, a(C_GOLD, 72), DOT_STEPS);
+            drawCircle(tx, ty, 3.0f * scale, Color.rgb(255, 226, 92), DOT_STEPS);
         }
 
         private void drawHand(float len, float deg, float width, int color) {
@@ -527,13 +573,13 @@ public class CompassGlView extends GLSurfaceView {
             float ringR = r * 1.14f;
             float diskR = r * 0.93f;
             drawArcRing(cx, cy, ringR * 1.17f - 0.85f * scale, ringR * 1.17f + 0.85f * scale,
-                    -26f, 52f, a(C_CYAN, 110), 24);
+                    -26f, 52f, a(C_CYAN, 110), 220);
             drawArcRing(cx, cy, ringR * 1.17f - 0.85f * scale, ringR * 1.17f + 0.85f * scale,
-                    154f, 52f, a(C_CYAN, 110), 24);
+                    154f, 52f, a(C_CYAN, 110), 220);
             drawArcRing(cx, cy, ringR - 0.8f * scale, ringR + 0.8f * scale,
-                    0f, 360f, a(C_GOLD_DARK, 116), 90);
+                    0f, 360f, a(C_GOLD_DARK, 116), FULL_RING_STEPS);
             drawArcRing(cx, cy, ringR * 0.78f - 0.5f * scale, ringR * 0.78f + 0.5f * scale,
-                    0f, 360f, a(C_CYAN, 58), 90);
+                    0f, 360f, a(C_CYAN, 58), FULL_RING_STEPS);
             for (int i = 0; i < 4; i++) {
                 float rad = (float) Math.toRadians(-90f + i * 90f);
                 drawLine(cx + (float) Math.cos(rad) * ringR * 0.90f,
@@ -546,28 +592,28 @@ public class CompassGlView extends GLSurfaceView {
                 float showAz = az % 360f;
                 if (showAz < 0f) showAz += 360f;
                 drawArcRing(cx, cy, ringR - 1f * scale, ringR + 1f * scale,
-                        -90f, showAz, a(C_CYAN, 110), 72);
+                        -90f, showAz, a(C_CYAN, 110), stepsForSweep(showAz, 180, FULL_RING_STEPS));
                 float rad = (float) Math.toRadians(showAz - 90f);
                 drawCircle(cx + (float) Math.cos(rad) * ringR,
-                        cy + (float) Math.sin(rad) * ringR, 3.0f * scale, C_GOLD, 20);
+                        cy + (float) Math.sin(rad) * ringR, 3.0f * scale, C_GOLD, DOT_STEPS);
             }
 
-            drawCircle(cx, cy, diskR, Color.rgb(10, 9, 7), 96);
+            drawCircle(cx, cy, diskR, Color.rgb(10, 9, 7), FULL_RING_STEPS);
             drawArcRing(cx, cy, diskR * 1.04f - 2.1f * scale, diskR * 1.04f + 2.1f * scale,
-                    0f, 360f, a(C_GOLD, 92), 96);
+                    0f, 360f, a(C_GOLD, 92), FULL_RING_STEPS);
             drawArcRing(cx, cy, diskR - 1.5f * scale, diskR + 1.5f * scale,
-                    0f, 360f, C_GOLD, 80);
-            drawTaiji(diskR * 0.88f, Float.isNaN(az) ? 0f : -az * 0.18f);
+                    0f, 360f, C_GOLD, FULL_RING_STEPS);
+            drawTaiji(diskR, Float.isNaN(az) ? 0f : -az * 0.18f);
         }
 
         private void drawTaiji(float r, float rot) {
-            drawCircle(cx, cy, r, Color.rgb(217, 169, 44), 112);
-            drawLocalSector(0f, 0f, r, -90f, 180f, rot, Color.rgb(4, 4, 3), 96);
-            drawLocalCircle(0f, r / 2f, r / 2f, rot, Color.rgb(4, 4, 3), 96);
-            drawLocalCircle(0f, -r / 2f, r / 2f, rot, Color.rgb(217, 169, 44), 96);
-            drawArcRing(cx, cy, r - 0.95f * scale, r + 0.95f * scale, 0f, 360f, a(C_GOLD, 205), 112);
-            drawLocalCircle(0f, -r / 2f, r * 0.115f, rot, Color.rgb(4, 4, 3), 32);
-            drawLocalCircle(0f, r / 2f, r * 0.115f, rot, Color.rgb(245, 201, 62), 32);
+            drawCircle(cx, cy, r, Color.rgb(217, 169, 44), FULL_RING_STEPS);
+            drawLocalSector(0f, 0f, r, -90f, 180f, rot, Color.rgb(4, 4, 3), HALF_RING_STEPS);
+            drawLocalCircle(0f, r / 2f, r / 2f, rot, Color.rgb(4, 4, 3), HALF_RING_STEPS);
+            drawLocalCircle(0f, -r / 2f, r / 2f, rot, Color.rgb(217, 169, 44), HALF_RING_STEPS);
+            drawArcRing(cx, cy, r - 0.95f * scale, r + 0.95f * scale, 0f, 360f, a(C_GOLD, 205), FULL_RING_STEPS);
+            drawLocalCircle(0f, -r / 2f, r * 0.115f, rot, Color.rgb(4, 4, 3), DOT_STEPS);
+            drawLocalCircle(0f, r / 2f, r * 0.115f, rot, Color.rgb(245, 201, 62), DOT_STEPS);
         }
 
         private void drawLocalCircle(float lx, float ly, float r, float rot, int color, int steps) {

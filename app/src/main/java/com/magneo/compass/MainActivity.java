@@ -8,6 +8,7 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
+import android.widget.Toast;
 
 import com.magneo.compass.browser.BrowserActivity;
 import com.magneo.compass.llm.LlmClient;
@@ -25,6 +26,8 @@ import okhttp3.Call;
 
 /** 真理罗盘桌面主屏：HOME 桌面 + 罗盘 + 传感器 + 语音/灵眼入口。 */
 public class MainActivity extends BaseActivity implements CompassView.Actions {
+
+    private static volatile MainActivity activeMain;
 
     private CompassHostView view;
     private SensorHub hub;
@@ -119,22 +122,12 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     @Override
     protected void onResume() {
         super.onResume();
-        boolean showLoc = Prefs.getB(this, Prefs.K_SHOW_LOC, false);
-        hub.gpsEnabled = showLoc;
+        activeMain = this;
         view.applyRendererPrefs();
         view.onHostResume();
         hub.start();
-        view.syncHardwareDemand();
-        if (locator != null) {
-            if (showLoc) {
-                locator.start((lat, lon, acc, src) -> {
-                    hub.netLat = lat; hub.netLon = lon; hub.netAcc = acc; hub.netSrc = src;
-                    view.postInvalidate();
-                });
-            } else {
-                locator.stop();
-            }
-        }
+        FlashlightController.restoreIfRequested();
+        applyLocationPrefs();
         uiTicker.removeCallbacks(uiTick);
         uiTicker.post(uiTick);
         if (voice != null) voice = VoiceController.get(this, this::setMainVoiceStatus);
@@ -144,7 +137,9 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
 
     @Override
     protected void onPause() {
+        if (activeMain == this) activeMain = null;
         cancelOracleAi();
+        FlashlightController.releaseHardwareKeepingRequest();
         if (view != null) view.onHostPause();
         hub.stop();
         if (locator != null) locator.stop();
@@ -157,8 +152,33 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         uiTicker.removeCallbacks(uiTick);
         if (locator != null) locator.stop();
         cancelOracleAi();
+        FlashlightController.turnOff();
         voice.shutdown();
         super.onDestroy();
+    }
+
+    public static void applyLocationPrefsToActive() {
+        final MainActivity a = activeMain;
+        if (a == null) return;
+        a.runOnUiThread(new Runnable() {
+            @Override public void run() { a.applyLocationPrefs(); }
+        });
+    }
+
+    private void applyLocationPrefs() {
+        boolean wifiIpLoc = Prefs.locSourceWifiIp(this);
+        hub.setGpsEnabled(Prefs.locSourceGpsDiag(this));
+        if (view != null) view.syncHardwareDemand();
+        if (locator != null) {
+            if (wifiIpLoc) {
+                locator.start((lat, lon, acc, src) -> {
+                    hub.netLat = lat; hub.netLon = lon; hub.netAcc = acc; hub.netSrc = src;
+                    view.postInvalidate();
+                });
+            } else {
+                locator.stop();
+            }
+        }
     }
 
     private long idleFrameDelayMs() {
@@ -276,7 +296,18 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
 
     @Override
     public void onCenterTap() {
-        voice.toggle();
+        try {
+            boolean on = FlashlightController.toggle();
+            Toast.makeText(this, on ? "闪光灯已开启" : "闪光灯已关闭", Toast.LENGTH_SHORT).show();
+            ConversationLog.append(this, "system", on ? "中心太极：闪光灯开启" : "中心太极：闪光灯关闭");
+        } catch (Throwable t) {
+            FlashlightController.turnOff();
+            String msg = t.getMessage();
+            if (msg == null || msg.trim().isEmpty()) msg = "摄像头可能被占用";
+            if (msg.length() > 28) msg = msg.substring(0, 28);
+            Toast.makeText(this, "闪光灯不可用：" + msg, Toast.LENGTH_SHORT).show();
+            ConversationLog.append(this, "error", "闪光灯不可用: " + t);
+        }
     }
 
     @Override

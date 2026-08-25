@@ -157,6 +157,10 @@ public class SettingsWebServer {
             else if (path.equals("/h264fast")) { serveH264Fast(s); return; }
             else if (path.equals("/stream_state")) serveStreamState(out);
             else if (path.equals("/system_status")) serveSystemStatus(out);
+            else if (path.equals("/gps/reset")) {
+                if (!requireAuth(out, authed)) return;
+                serveGpsReset(out);
+            }
             else if (path.equals("/key")) {
                 if (!requireAuth(out, authed)) return;
                 serveKey(out, req.target); return;
@@ -414,7 +418,7 @@ public class SettingsWebServer {
                 .append("<div class='meter'><div class='top'><span>RAM</span><b id='sysRam'>--</b></div><div class='bar'><em id='sysRamBar'></em></div></div>")
                 .append("<div class='meter'><div class='top'><span>Mali</span><b id='sysGpu'>--</b></div><div class='bar cyan'><em id='sysGpuBar'></em></div></div>")
                 .append("<div class='meter'><div class='top'><span>电量</span><b id='sysBat'>--</b></div><div class='bar'><em id='sysBatBar'></em></div></div>")
-                .append("<p class='hint' id='sysLoadNote'>CPU/RAM/温度来自设备实时采样；Mali clock off 表示内核节点未给出有效占用。</p></div></div><div class='box' style='margin-top:12px'><h3>硬件自检</h3><div id='hwDiag' class='list'></div></div></div>")
+                .append("<p class='hint' id='sysLoadNote'>CPU/RAM/温度来自设备实时采样；Mali clock off 表示内核节点未给出有效占用。</p></div></div><div class='box' style='margin-top:12px'><h3>硬件自检</h3><div id='hwDiag' class='list'></div><div class='inline' style='margin-top:10px'><button type='button' class='secondary' onclick='gpsReset()'>GPS 冷启动</button><span class='state' id='gpsResetMsg'></span></div></div></div>")
                 .append("<nav class='tabs'>")
                 .append("<button type='button' class='tab active' data-tab='model'>大模型</button>")
                 .append("<button type='button' class='tab' data-tab='voice'>语音链路</button>")
@@ -499,6 +503,11 @@ public class SettingsWebServer {
                 .append(rowCheckbox("无图模式", "noImages", "减少加载流量"))
                 .append(rowCheckbox("桌面 UA", "uaDesktop", "请求桌面版网页"))
                 .append(rowCheckbox("忽略 SSL", "ignoreSsl", "仅用于证书异常站点"))
+                .append("<h3 style='margin-top:16px'>粗定位</h3>")
+                .append(rowSelect("定位来源", Prefs.K_LOC_SOURCE, null, "<option value='off'>关闭</option><option value='wifi_ip'>WiFi-IP</option><option value='gps_diag'>GPS诊断</option>", null))
+                .append(rowInput("WiFi 定位", "locWifiUrl", "text", "留空=跳过 WiFi BSSID 定位"))
+                .append(rowInput("IP 粗定位", "locIpUrl", "text", "留空=使用默认 IP 粗定位"))
+                .append("<p class='hint'>WiFi/IP 只用于大概城市/街区；GPS 默认关闭省电。默认 IP 粗定位不需要 GPS，也不需要 SIM。</p>")
                 .append("</div><div class='box'><h3>网盘连接</h3><div id='fsList' class='list'></div>")
                 .append("<h3 style='margin-top:14px'>编辑连接</h3><input type='hidden' id='fsId'>")
                 .append(fsRow("名称", "fsName", "自动命名可留空"))
@@ -540,8 +549,9 @@ public class SettingsWebServer {
                 .append("function msg(id,t){var e=q('#'+id);if(e)e.textContent=t||''}")
                 .append("function publicStatus(){api('GET','/status',null,function(d){if(d){chip('ovVad',d.vadEnabled?'开启':'关闭',!!d.vadEnabled,!d.vadEnabled);chip('ovAsr',d.asrUrlSet?'已配置':'未配置',!!d.asrUrlSet,!d.asrUrlSet);chip('ovAsrFinal',d.asrFinalUrlSet?'已配置':'未配置',!!d.asrFinalUrlSet,false);chip('ovLlm',d.apiKeySet?d.apiKeyMask:'未设置',!!d.apiKeySet,!d.apiKeySet);chip('ovTts',d.ttsUrlSet?'已配置':'未配置',!!d.ttsUrlSet,!d.ttsUrlSet)}});api('GET','/frpc/status',null,function(d){if(d)chip('ovFrpc',d.status==='running'?'运行中':(d.status==='error'?'异常':'停止'),d.status==='running',d.status==='error')});api('GET','/adb/status',null,function(d){if(d)chip('ovAdb',d.running?'运行中':'未监听',!!d.running,false)})}")
                 .append("function pct(v){v=Number(v);return v>=0?(Math.round(v)+'%'):'--'}function metric(v,t){return t?t:pct(v)}function meter(n,v,t){var e=q('#sys'+n),b=q('#sys'+n+'Bar');if(e)e.textContent=metric(v,t);if(b)b.style.width=(Number(v)>=0?Math.max(0,Math.min(100,Number(v))):0)+'%'}")
-                .append("function renderHwDiag(h){var box=q('#hwDiag');if(!box)return;h=h||{};var rows=[['传感器',h.sensors||'--'],['姿态',h.pose||'--'],['磁场',h.magnetic||'--'],['卫星',h.gps||'--'],['弱项',h.untrusted||'--'],['校准',h.magCalibration||'--']];var out='';for(var i=0;i<rows.length;i++)out+='<div class=\"item\"><div class=\"main\"><b>'+esc(rows[i][0])+'</b><small>'+esc(rows[i][1])+'</small></div></div>';box.innerHTML=out}")
-                .append("function systemStatus(){api('GET','/system_status',null,renderSystem)}function renderSystem(d){if(!d)return;q('#sysTime').textContent=d.time||'--:--';q('#sysDate').textContent=d.date||'';meter('Cpu',d.cpu);meter('AppCpu',d.appCpu);meter('Ram',d.memPct);meter('Gpu',d.gpu,d.gpuText);meter('Bat',d.battery);renderHwDiag(d.hardware);var gt=d.gpuText||pct(d.gpu),core=(d.cpuOnline&&d.cpuPossible)?(' · 核 '+d.cpuOnline+'/'+d.cpuPossible):'',appCore=(Number(d.appCpuCore)>=0?(' · 单核 '+pct(d.appCpuCore)):''),renderer=(d.mainRenderer==='canvas'?'Canvas':'OpenGL'),fps=d.mainFpsMode==='power'?'省电':(d.mainFpsMode==='smooth'?'流畅':'自适应');q('#sysCore').textContent='总 '+pct(d.cpu)+' · App '+pct(d.appCpu)+appCore+core+' · RAM '+pct(d.memPct)+' · Mali '+gt+' · 电 '+pct(d.battery)+' · '+renderer+'/'+fps;q('#sysGps').textContent=d.gps?('定位 '+d.gps):'';q('#sysUpdated').textContent='更新 '+(d.time||'');var note='CPU/RAM/温度来自设备实时采样；App 为在线核心总口径，单核用于看主线程压力。';if(d.streamActive)note='屏幕预览正在运行，会明显增加 CPU 和温度。';q('#sysLoadNote').textContent=note;var temps=d.temps||[],ring=q('#sysTempRing');if(!ring)return;ring.innerHTML='';for(var i=0;i<temps.length;i++){var el=document.createElement('div');el.className='tempdot';el.innerHTML='<span>'+esc(temps[i].name||'温度')+'</span><b>'+Number(temps[i].c||0).toFixed(0)+'°</b>';ring.appendChild(el)}if(!temps.length){var e=document.createElement('div');e.className='tempdot';e.innerHTML='<span>温度</span><b>--</b>';ring.appendChild(e)}}")
+                .append("function renderHwDiag(h){var box=q('#hwDiag');if(!box)return;h=h||{};var rows=[['传感器',h.sensors||'--'],['姿态',h.pose||'--'],['磁场',h.magnetic||'--'],['GPS请求',h.gpsRequest||'--'],['GPS驱动',h.gpsDriver||'--'],['GPS动作',h.gpsAction||'--'],['卫星',h.gps||'--'],['弱项',h.untrusted||'--'],['校准',h.magCalibration||'--']];var out='';for(var i=0;i<rows.length;i++)out+='<div class=\"item\"><div class=\"main\"><b>'+esc(rows[i][0])+'</b><small>'+esc(rows[i][1])+'</small></div></div>';box.innerHTML=out}")
+                .append("function gpsReset(){if(!confirm('清理 GPS 辅助数据并重新搜星？建议在室外空旷处使用。'))return;msg('gpsResetMsg','正在触发...');api('POST','/gps/reset','',function(d){msg('gpsResetMsg',d&&d.ok?(d.msg||'已触发'):(d&&d.err?d.err:'失败'));setTimeout(systemStatus,800)},'application/x-www-form-urlencoded')}")
+                .append("function systemStatus(){api('GET','/system_status',null,renderSystem)}function renderSystem(d){if(!d)return;q('#sysTime').textContent=d.time||'--:--';q('#sysDate').textContent=d.date||'';meter('Cpu',d.cpu);meter('AppCpu',d.appCpu);meter('Ram',d.memPct);meter('Gpu',d.gpu,d.gpuText);meter('Bat',d.battery);renderHwDiag(d.hardware);var gt=d.gpuText||pct(d.gpu),core=(d.cpuOnline&&d.cpuPossible)?(' · 核 '+d.cpuOnline+'/'+d.cpuPossible):'',appCore=(Number(d.appCpuCore)>=0?(' · 单核 '+pct(d.appCpuCore)):''),renderer=(d.mainRenderer==='canvas'?'Canvas':'OpenGL'),fps=d.mainFpsMode==='power'?'省电':(d.mainFpsMode==='smooth'?'流畅':'自适应');q('#sysCore').textContent='总 '+pct(d.cpu)+' · App '+pct(d.appCpu)+appCore+core+' · RAM '+pct(d.memPct)+' · Mali '+gt+' · 电 '+pct(d.battery)+' · '+renderer+'/'+fps;q('#sysGps').textContent=d.gps||'';q('#sysUpdated').textContent='更新 '+(d.time||'');var note='CPU/RAM/温度来自设备实时采样；App 为在线核心总口径，单核用于看主线程压力。';if(d.streamActive)note='屏幕预览正在运行，会明显增加 CPU 和温度。';q('#sysLoadNote').textContent=note;var temps=d.temps||[],ring=q('#sysTempRing');if(!ring)return;ring.innerHTML='';for(var i=0;i<temps.length;i++){var el=document.createElement('div');el.className='tempdot';el.innerHTML='<span>'+esc(temps[i].name||'温度')+'</span><b>'+Number(temps[i].c||0).toFixed(0)+'°</b>';ring.appendChild(el)}if(!temps.length){var e=document.createElement('div');e.className='tempdot';e.innerHTML='<span>温度</span><b>--</b>';ring.appendChild(e)}}")
                 .append("function initConsole(){loadStatus();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();fsList();loadConv();setInterval(function(){frpcRefresh();camRefresh();adbStatus();appState()},3000);setInterval(systemStatus,2000);setInterval(loadConv,4000)}")
                 .append("function wireTabs(){var bs=qa('.tab');for(var i=0;i<bs.length;i++)bs[i].onclick=function(){var id=this.getAttribute('data-tab');var b=qa('.tab'),p=qa('.panel');for(var j=0;j<b.length;j++)b[j].classList.remove('active');for(var k=0;k<p.length;k++)p[k].classList.remove('active');this.classList.add('active');q('#tab-'+id).classList.add('active')}}")
                 .append("function wireDirty(){var f=q('#f');if(!f)return;var es=f.querySelectorAll('input,textarea,select');for(var i=0;i<es.length;i++){es[i].addEventListener('input',markDirty);es[i].addEventListener('change',markDirty)}}")
@@ -730,11 +740,11 @@ public class SettingsWebServer {
                 + "<div style='color:#8a8272;font-size:11px'>H.264 走 MT6580 硬件编码器（720×720），省 CPU、省带宽；MJPEG 为兼容模式。改参数先点保存。</div>"
                 + "</fieldset>"
                 + "<fieldset><legend>定位 API</legend>"
-                + "<div class='row'><label>显示定位</label><input type='checkbox' name='showLoc' id='showLoc' style='width:auto;vertical-align:middle'>"
-                + "<span style='font-size:11px;color:#8a8272'>显示 GPS / 系统网络 / WiFi 定位信息（关闭后不再请求定位，省电）</span></div>"
+                + "<div class='row'><label>定位来源</label><select name='locSource' style='width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'>"
+                + "<option value='off'>关闭</option><option value='wifi_ip'>WiFi-IP</option><option value='gps_diag'>GPS诊断</option></select></div>"
                 + "<div class='row'><label>WiFi 定位地址</label><input type='text' name='locWifiUrl'></div>"
-                + "<div class='row'><label>IP 粗定位地址</label><input type='text' name='locIpUrl' placeholder='留空=不用 IP 粗定位'></div>"
-                + "<div style='color:#8a8272;font-size:11px'>优先系统网络定位和 WiFi BSSID 定位；IP 定位城市级不准确，默认留空不用。保存后下一轮定位（≤30s）生效。</div>"
+                + "<div class='row'><label>IP 粗定位地址</label><input type='text' name='locIpUrl' placeholder='留空=使用默认 IP 粗定位'></div>"
+                + "<div style='color:#8a8272;font-size:11px'>WiFi/IP 只做城市/街区级粗定位；默认 IP 粗定位不需要 GPS/SIM，只有 GPS诊断 或 坤·星图 会临时搜星。</div>"
                 + "</fieldset>"
                 + "<fieldset><legend>摄像头推流</legend>"
                 + "<div class='row'><label>摄像头</label><select name='camId'><option value='0'>后置（默认）</option><option value='1'>前置</option></select></div>"
@@ -996,7 +1006,7 @@ public class SettingsWebServer {
                 + "document.getElementById('statDate').textContent=d.date||'';"
                 + "var core=(d.cpuOnline&&d.cpuPossible)?(' · 核 '+d.cpuOnline+'/'+d.cpuPossible):'',app=(d.appCpu>=0?(' · App '+d.appCpu+'%'):'');"
                 + "document.getElementById('statCore').textContent='CPU '+(d.cpu>=0?d.cpu+'%':'--')+app+core+' · 内存 '+(d.memPct>=0?d.memPct+'%':'--')+' · GPU '+(d.gpu>=0?d.gpu+'%':'--')+' · 电 '+(d.battery>=0?d.battery+'%':'--');"
-                + "var sg=document.getElementById('statGps');if(sg)sg.textContent=d.gps?'GPS '+d.gps:'';"
+                + "var sg=document.getElementById('statGps');if(sg)sg.textContent=d.gps?d.gps:'';"
                 + "var temps=d.temps||[];var ring=document.getElementById('ring');ring.innerHTML='';"
                 + "var n=Math.max(1,temps.length),cw=ring.clientWidth||346,cx=cw/2,cy=cw/2,r=cw*0.42;"
                 + "for(var i=0;i<temps.length;i++){var ang=(-90+i*(360/n))*Math.PI/180;"
@@ -1301,9 +1311,11 @@ public class SettingsWebServer {
             o.put("streamBitrate", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_BITRATE, 1500)));
             o.put("mainRenderer", Prefs.mainRenderer(app));
             o.put("mainFpsMode", Prefs.mainFpsMode(app));
-            o.put("locWifiUrl", Prefs.get(app, Prefs.K_LOC_WIFI_URL, Prefs.DEFAULT_LOC_WIFI_URL));
-            o.put("locIpUrl", Prefs.get(app, Prefs.K_LOC_IP_URL, Prefs.DEFAULT_LOC_IP_URL));
-            o.put("showLoc", Prefs.getB(app, Prefs.K_SHOW_LOC, false));
+            o.put("locSource", Prefs.locSource(app));
+            o.put("locSourceLabel", Prefs.locSourceLabel(app));
+            o.put("locWifiUrl", Prefs.locWifiUrl(app));
+            o.put("locIpUrl", Prefs.locIpUrl(app));
+            o.put("showLoc", Prefs.locationDisplayEnabled(app));
             o.put("frpcConfig", Prefs.get(app, Prefs.K_FRPC_CONFIG, ""));
             o.put("camId", String.valueOf(Prefs.getI(app, Prefs.K_CAM_ID, 0)));
             o.put("camWidth", String.valueOf(Prefs.getI(app, Prefs.K_CAM_WIDTH, 1280)));
@@ -1352,6 +1364,14 @@ public class SettingsWebServer {
                     Prefs.put(app, k, Prefs.normalizeMainRenderer(v));
                 } else if (k.equals(Prefs.K_MAIN_FPS_MODE)) {
                     Prefs.put(app, k, Prefs.normalizeMainFpsMode(v));
+                } else if (k.equals(Prefs.K_LOC_SOURCE)) {
+                    Prefs.put(app, k, Prefs.normalizeLocSource(v));
+                    syncRuntimeGpsSource();
+                } else if (k.equals(Prefs.K_SHOW_LOC)) {
+                    boolean on = "true".equalsIgnoreCase(v) || "1".equals(v);
+                    Prefs.putB(app, k, on);
+                    Prefs.put(app, Prefs.K_LOC_SOURCE, on ? Prefs.LOC_SOURCE_WIFI_IP : Prefs.LOC_SOURCE_OFF);
+                    syncRuntimeGpsSource();
                 } else if (isMaxTokenKey(k)) {
                     try { Prefs.putI(app, k, clamp(Integer.parseInt(v), 0, 8192)); } catch (Exception ignored) {}
                 } else if (isTemperatureKey(k)) {
@@ -1759,7 +1779,17 @@ public class SettingsWebServer {
     private static boolean isBoolKey(String k) {
         return k.equals("localTtsFirst") || k.equals("visionEnabled") || k.equals("vadEnabled")
                 || k.equals("ignoreSsl") || k.equals("uaDesktop") || k.equals("noImages")
-                || k.equals("browserRoundFit") || k.equals("camAutoStart") || k.equals("showLoc");
+                || k.equals("browserRoundFit") || k.equals("camAutoStart");
+    }
+
+    private static void syncRuntimeGpsSource() {
+        try {
+            com.magneo.compass.SensorHub h = com.magneo.compass.SensorHub.instance;
+            if (h != null) h.setGpsEnabled(Prefs.locSourceGpsDiag(app));
+        } catch (Exception ignored) {}
+        try {
+            com.magneo.compass.MainActivity.applyLocationPrefsToActive();
+        } catch (Exception ignored) {}
     }
 
     private static Map<String, String> form(String body) {
@@ -1989,11 +2019,21 @@ public class SettingsWebServer {
             o.put("mainFpsMode", Prefs.mainFpsMode(app));
             o.put("temps", readTemps());
             com.magneo.compass.SensorHub h = com.magneo.compass.SensorHub.instance;
-            String gpsTxt = Prefs.getB(app, Prefs.K_SHOW_LOC, false) ? "无" : "已关闭";
-            if (Prefs.getB(app, Prefs.K_SHOW_LOC, false) && h != null) {
+            String locSource = Prefs.locSource(app);
+            String gpsTxt = "定位关闭";
+            if (Prefs.LOC_SOURCE_WIFI_IP.equals(locSource)) {
+                gpsTxt = "WiFi/IP 等待粗定位";
+                if (h != null && !Double.isNaN(h.netLat)) {
+                    String src = h.netSrc == null || h.netSrc.trim().isEmpty() ? "网络" : h.netSrc.trim();
+                    gpsTxt = "粗定位(" + src + ") "
+                            + String.format(java.util.Locale.US, "%.5f,%.5f ±%.0fm",
+                            h.netLat, h.netLon, h.netAcc);
+                }
+            } else if (Prefs.LOC_SOURCE_GPS_DIAG.equals(locSource)) {
+                gpsTxt = h == null ? "GPS诊断待机" : h.gpsStatus;
+            }
+            if (h != null && h.gpsEnabled) {
                 if (!Double.isNaN(h.lat)) gpsTxt = h.gpsStatus + " 已定位";
-                else if (!Double.isNaN(h.netLat))
-                    gpsTxt = "定位(" + h.netSrc + ") " + String.format(java.util.Locale.US, "%.5f,%.5f ±%.0fm", h.netLat, h.netLon, h.netAcc);
                 else gpsTxt = h.gpsStatus;
             }
             o.put("gps", gpsTxt);
@@ -2005,6 +2045,30 @@ public class SettingsWebServer {
         out.write(b);
     }
 
+    private static void serveGpsReset(OutputStream out) throws IOException {
+        JSONObject o = new JSONObject();
+        try {
+            com.magneo.compass.SensorHub h = com.magneo.compass.SensorHub.instance;
+            if (h == null) {
+                o.put("ok", false);
+                o.put("err", "SensorHub 未启动，请先打开主屏或硬件自检页");
+            } else if (!h.gpsEnabled) {
+                o.put("ok", false);
+                o.put("err", "GPS 已关闭，请进入坤·星图或把定位来源切到 GPS诊断");
+            } else {
+                h.requestGpsColdStart();
+                o.put("ok", true);
+                o.put("msg", "GPS 冷启动已触发，等待重新搜星");
+            }
+        } catch (Exception e) {
+            try {
+                o.put("ok", false);
+                o.put("err", e.getClass().getSimpleName() + ": " + e.getMessage());
+            } catch (Exception ignored) {}
+        }
+        serveJson(out, o);
+    }
+
     private static JSONObject hardwareStatus(com.magneo.compass.SensorHub h) {
         JSONObject o = new JSONObject();
         try {
@@ -2012,6 +2076,7 @@ public class SettingsWebServer {
                 o.put("sensors", "等待 App 前台采样");
                 o.put("pose", "--");
                 o.put("magnetic", "--");
+                o.put("gpsAction", "--");
                 o.put("gps", "--");
                 o.put("untrusted", "--");
                 o.put("magCalibration", "--");
@@ -2026,10 +2091,20 @@ public class SettingsWebServer {
                     + " · 动势 " + motionText(h);
             float mag = (float) Math.sqrt(h.mx * h.mx + h.my * h.my + h.mz * h.mz);
             String magnetic = mag > 1f ? String.format(Locale.US, "%.0fuT · %s", mag, magText(mag)) : "无磁力数据";
+            String gpsReq = h.gpsEnabled
+                    ? ((h.gpsRequestActive ? "请求中" : "未请求")
+                    + " · Provider " + (h.gpsProviderEnabled ? "开" : "关")
+                    + gpsRequestAge(h, now)
+                    + (h.gpsLastError == null || h.gpsLastError.trim().isEmpty() ? "" : " · " + h.gpsLastError))
+                    : "GPS关闭 · " + Prefs.locSourceLabel(app);
+            JSONObject driver = gpsDriverStatus();
+            String gpsDriver = gpsDriverText(driver, h);
             String gps = h.gpsEnabled
                     ? h.gpsStatus + " · " + h.usedSats + "/" + h.visibleSats
                     + " 星 · SNR " + (h.maxSnr > 0f ? String.format(Locale.US, "%.0f", h.maxSnr) : "--")
-                    : "卫星关闭";
+                    : (Prefs.locSourceWifiIp(app) && !Double.isNaN(h.netLat)
+                    ? ("粗定位 " + h.netSrc + " ±" + String.format(Locale.US, "%.0fm", h.netAcc))
+                    : "卫星关闭");
             String untrusted = "光 " + sensorValue(h.hasLightSensor, h.rawDiagnosticSampling, h.lastLightMs, h.light, now, true)
                     + " · 近 " + sensorValue(h.hasProximitySensor, h.rawDiagnosticSampling, h.lastProximityMs, h.proximity, now, true)
                     + " · 气压 " + sensorValue(h.hasPressureSensor, h.rawDiagnosticSampling, h.lastPressureMs, h.pressure, now, false);
@@ -2038,11 +2113,81 @@ public class SettingsWebServer {
             o.put("sensors", sensors);
             o.put("pose", pose);
             o.put("magnetic", magnetic);
+            o.put("gpsRequest", gpsReq);
+            o.put("gpsDriver", gpsDriver);
+            o.put("gpsDriverRaw", driver);
+            o.put("gpsAction", h.gpsLastAction == null || h.gpsLastAction.trim().isEmpty()
+                    ? "--" : h.gpsLastAction);
             o.put("gps", gps);
             o.put("untrusted", untrusted);
             o.put("magCalibration", cal);
         } catch (Exception ignored) {}
         return o;
+    }
+
+    private static String gpsRequestAge(com.magneo.compass.SensorHub h, long now) {
+        if (!h.gpsRequestActive || h.gpsRequestStartedMs <= 0) return "";
+        long age = Math.max(0L, now - h.gpsRequestStartedMs) / 1000L;
+        return " · " + age + "s";
+    }
+
+    private static long gpsDriverCacheMs = 0;
+    private static JSONObject gpsDriverCache = null;
+
+    private static JSONObject gpsDriverStatus() {
+        long now = System.currentTimeMillis();
+        JSONObject cached = gpsDriverCache;
+        if (cached != null && now - gpsDriverCacheMs < 5000L) return cached;
+        JSONObject o = new JSONObject();
+        try {
+            String out = runRootCapture("echo mnld=$(getprop init.svc.mnld); "
+                    + "echo agpsd=$(getprop init.svc.agpsd); "
+                    + "echo wifi2agps=$(getprop init.svc.wifi2agps); "
+                    + "echo mnlprop=$(getprop persist.radio.mnl.prop); "
+                    + "echo pwrctl=$(cat /sys/class/gpsdrv/gps/pwrctl 2>/dev/null); "
+                    + "echo state=$(cat /sys/class/gpsdrv/gps/state 2>/dev/null); "
+                    + "echo pwrsave=$(cat /sys/class/gpsdrv/gps/pwrsave 2>/dev/null); "
+                    + "echo suspend=$(cat /sys/class/gpsdrv/gps/suspend 2>/dev/null)");
+            for (String line : out.split("\\n")) {
+                int eq = line.indexOf('=');
+                if (eq <= 0) continue;
+                String key = line.substring(0, eq).trim();
+                String val = line.substring(eq + 1).trim();
+                if (key.length() > 0) o.put(key, val);
+            }
+            String status = runRootCapture("cat /sys/class/gpsdrv/gps/status 2>/dev/null");
+            if (status != null && status.length() > 180) status = status.substring(0, 180);
+            o.put("status", status == null ? "" : status.trim());
+        } catch (Exception e) {
+            try { o.put("error", e.getClass().getSimpleName() + ": " + e.getMessage()); }
+            catch (Exception ignored) {}
+        }
+        gpsDriverCache = o;
+        gpsDriverCacheMs = now;
+        return o;
+    }
+
+    private static String gpsDriverText(JSONObject d, com.magneo.compass.SensorHub h) {
+        if (d == null) return "--";
+        String err = d.optString("error", "");
+        if (!err.isEmpty()) return "root读取失败 · " + err;
+        String pwr = emptyDash(d.optString("pwrctl", ""));
+        String state = emptyDash(d.optString("state", ""));
+        String save = emptyDash(d.optString("pwrsave", ""));
+        String mnld = emptyDash(d.optString("mnld", ""));
+        String agpsd = emptyDash(d.optString("agpsd", ""));
+        String prop = d.optString("mnlprop", "");
+        String prefix = "pwr " + pwr + " · state " + state + " · save " + save
+                + " · mnld " + mnld + " · agps " + agpsd;
+        if (h != null && h.gpsRequestActive && "0".equals(pwr) && "0".equals(state)) {
+            prefix = "底层未开机 · " + prefix;
+        }
+        if (prop == null || prop.trim().isEmpty()) return prefix + " · mnlprop 空";
+        return prefix + " · mnlprop " + prop;
+    }
+
+    private static String emptyDash(String s) {
+        return s == null || s.trim().isEmpty() ? "--" : s.trim();
     }
 
     private static String sensorState(boolean exists, boolean active, long lastMs, long now) {
@@ -2125,6 +2270,20 @@ public class SettingsWebServer {
             Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
             p.waitFor();
         } catch (Exception ignored) {}
+    }
+
+    private static String runRootCapture(String cmd) throws Exception {
+        Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        InputStream in = p.getInputStream();
+        byte[] buf = new byte[1024];
+        int n;
+        while ((n = in.read(buf)) >= 0) bos.write(buf, 0, n);
+        try { in.close(); } catch (Exception ignored) {}
+        int code = p.waitFor();
+        String out = new String(bos.toByteArray(), "UTF-8");
+        if (code != 0) throw new IllegalStateException("su exit=" + code + " " + out.trim());
+        return out;
     }
 
     private static long[] prevCpuTicks;
