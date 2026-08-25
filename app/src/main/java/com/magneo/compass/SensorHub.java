@@ -58,6 +58,9 @@ public class SensorHub {
     public volatile float light = Float.NaN, proximity = Float.NaN, pressure = Float.NaN;
     public volatile float azimuth = Float.NaN, pitch, roll;
     public volatile int battery = 100;
+    public volatile boolean batteryCharging = false;
+    public volatile boolean batteryFull = false;
+    public volatile String batteryPlugged = "";
     public volatile double lat = Double.NaN, lon = Double.NaN, alt = Double.NaN;
     public volatile double netLat = Double.NaN, netLon = Double.NaN;
     public volatile float netAcc = 0;
@@ -107,16 +110,32 @@ public class SensorHub {
         detectSensors();
         loadMagCalibration();
         Intent b = ctx.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
-        if (b != null) battery = b.getIntExtra(BatteryManager.EXTRA_LEVEL, 100);
+        if (b != null) updateBattery(b);
     }
 
     /** 电量广播：ACTION_BATTERY_CHANGED 每次电量变化都会触发，保证电量显示自动更新 */
     private final BroadcastReceiver batteryRc = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) {
-            battery = i.getIntExtra(BatteryManager.EXTRA_LEVEL, battery);
+            updateBattery(i);
             listener.onUpdate();
         }
     };
+
+    private void updateBattery(Intent i) {
+        battery = i.getIntExtra(BatteryManager.EXTRA_LEVEL, battery);
+        int status = i.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN);
+        int plugged = i.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
+        batteryFull = status == BatteryManager.BATTERY_STATUS_FULL;
+        batteryCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || batteryFull;
+        if ((plugged & BatteryManager.BATTERY_PLUGGED_USB) != 0) batteryPlugged = "USB";
+        else if ((plugged & BatteryManager.BATTERY_PLUGGED_AC) != 0) batteryPlugged = "AC";
+        else if (android.os.Build.VERSION.SDK_INT >= 17
+                && (plugged & BatteryManager.BATTERY_PLUGGED_WIRELESS) != 0) {
+            batteryPlugged = "无线";
+        } else {
+            batteryPlugged = "";
+        }
+    }
 
     private final SensorEventListener sens = new SensorEventListener() {
         @Override public void onSensorChanged(SensorEvent e) {

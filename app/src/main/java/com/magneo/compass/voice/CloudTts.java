@@ -15,6 +15,8 @@ public class CloudTts {
     private static final String TAG = "CloudTts";
     private static MediaPlayer mp;
     private static volatile boolean playing;
+    private static volatile boolean fading;
+    private static int playSerial;
 
     public static synchronized void play(Context c, byte[] audio, Runnable done) {
         play(c, audio, "", done);
@@ -23,6 +25,8 @@ public class CloudTts {
     public static synchronized void play(Context c, byte[] audio, String contentType, Runnable done) {
         try {
             stop();
+            int serial = ++playSerial;
+            fading = false;
             playing = true;
             File f = new File(c.getCacheDir(),
                     "tts_" + System.currentTimeMillis() + extensionFor(audio, contentType));
@@ -33,16 +37,17 @@ public class CloudTts {
                     + " bytes=" + audio.length + " ct=" + contentType);
             mp = new MediaPlayer();
             mp.setAudioStreamType(AudioManager.STREAM_MUSIC);
+            mp.setVolume(1f, 1f);
             mp.setDataSource(f.getAbsolutePath());
             mp.setOnCompletionListener(m -> {
                 ConversationLog.append(c, "system", "TTS play complete");
-                finish(m, f);
+                finish(m, f, serial);
                 if (done != null) done.run();
             });
             mp.setOnErrorListener((m, what, extra) -> {
                 ConversationLog.append(c, "error", "TTS 播放失败 what=" + what + " extra=" + extra);
                 Log.w(TAG, "MediaPlayer error what=" + what + " extra=" + extra);
-                finish(m, f);
+                finish(m, f, serial);
                 if (done != null) done.run();
                 return true;
             });
@@ -57,9 +62,13 @@ public class CloudTts {
         }
     }
 
-    private static synchronized void finish(MediaPlayer m, File f) {
+    private static synchronized void finish(MediaPlayer m, File f, int serial) {
         playing = false;
-        if (mp == m) mp = null;
+        if (playSerial == serial) fading = false;
+        if (mp == m) {
+            mp = null;
+            playSerial++;
+        }
         try { m.release(); } catch (Throwable ignored) {}
         //noinspection ResultOfMethodCallIgnored
         f.delete();
@@ -67,14 +76,49 @@ public class CloudTts {
 
     public static synchronized void stop() {
         playing = false;
+        fading = false;
+        playSerial++;
         if (mp != null) {
             try { mp.stop(); mp.release(); } catch (Throwable ignored) {}
             mp = null;
         }
     }
 
+    public static void fadeOutAndStop(long fadeMs) {
+        final MediaPlayer target;
+        final int serial;
+        synchronized (CloudTts.class) {
+            if (mp == null || !playing) return;
+            target = mp;
+            serial = playSerial;
+            fading = true;
+        }
+        long duration = Math.max(120, Math.min(1200, fadeMs));
+        Thread t = new Thread(() -> {
+            int steps = 8;
+            long sleep = Math.max(15, duration / steps);
+            for (int i = 1; i <= steps; i++) {
+                synchronized (CloudTts.class) {
+                    if (mp != target || playSerial != serial || !playing) return;
+                    float v = Math.max(0f, 1f - (i / (float) steps));
+                    try { target.setVolume(v, v); } catch (Throwable ignored) {}
+                }
+                try { Thread.sleep(sleep); } catch (InterruptedException ignored) { break; }
+            }
+            synchronized (CloudTts.class) {
+                if (mp == target && playSerial == serial) stop();
+            }
+        }, "tts-fadeout");
+        t.setDaemon(true);
+        t.start();
+    }
+
     public static boolean isPlaying() {
         return playing;
+    }
+
+    public static boolean isFading() {
+        return fading;
     }
 
     private static String extensionFor(byte[] audio, String contentType) {

@@ -29,6 +29,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 
 import okhttp3.Call;
 
@@ -59,6 +60,20 @@ public class VoiceController {
     private static final long TTS_SEGMENT_TIMEOUT_MS = 12_000;
     private static final long TTS_SEGMENT_RETRY_TIMEOUT_MS = 6_000;
     private static final long FOLLOWUP_WINDOW_MS = 22_000;
+    private static final long BARGE_TTS_FADE_MS = 520;
+    private static final String TTS_STAGE_CUES = "苦笑|微笑|轻笑|冷笑|干笑|大笑|笑|"
+            + "叹气|叹了口气|沉默|停顿|思考|皱眉|摊手|扶额|耸肩|清嗓|咳嗽|"
+            + "哭笑不得|无奈|认真|温柔|低声|小声";
+    private static final Pattern TTS_BRACKETED_STAGE_PATTERN = Pattern.compile(
+            "[（(【\\[]\\s*[^）)】\\]]{0,18}(?:" + TTS_STAGE_CUES
+                    + ")[^）)】\\]]{0,18}\\s*[）)】\\]]");
+    private static final Pattern TTS_MARKDOWN_STAGE_PATTERN = Pattern.compile(
+            "[*_]{1,2}\\s*[^*_]{0,18}(?:" + TTS_STAGE_CUES
+                    + ")[^*_]{0,18}\\s*[*_]{1,2}");
+    private static final Pattern TTS_STANDALONE_STAGE_PATTERN = Pattern.compile(
+            "(^|[\\s。！？!?；;，,、:：])(?:苦笑|微笑|轻笑|冷笑|干笑|大笑|"
+                    + "叹气|叹了口气|沉默|停顿|思考|皱眉|摊手|扶额|耸肩|清嗓|咳嗽|"
+                    + "哭笑不得)(?:了?一下|一声|地|着(?:说)?|说)?(?=$|[\\s。！？!?；;，,、:：])");
 
     public interface StatusListener { void onStatus(String s); }
     public interface SpeechConsumer { boolean onFinalSpeech(String text); }
@@ -412,10 +427,9 @@ public class VoiceController {
 
                 if (!speechActive) {
                     if (!ttsNow) {
-                        if (noiseFloor == 0) noiseFloor = level;
-                        else noiseFloor = (noiseFloor * 31 + level) / 32;
+                        noiseFloor = updateNoiseFloor(noiseFloor, level, baseThreshold);
                     }
-                    int adaptiveThreshold = Math.max(baseThreshold, (int) Math.min(4000, noiseFloor * 2 + 100));
+                    int adaptiveThreshold = adaptiveVoiceThreshold(baseThreshold, noiseFloor);
                     boolean voiced = isVoiceFrame(level, adaptiveThreshold, ttsNow, bargeMode);
                     preRoll[preIdx] = pcm;
                     preIdx = (preIdx + 1) % preRoll.length;
@@ -478,7 +492,7 @@ public class VoiceController {
                 utterancePcm.write(pcm, 0, pcm.length);
                 speechMs += frameMs;
                 if (level > maxSpeechLevel) maxSpeechLevel = level;
-                int adaptiveThreshold = Math.max(baseThreshold, (int) Math.min(4000, noiseFloor * 2 + 100));
+                int adaptiveThreshold = adaptiveVoiceThreshold(baseThreshold, noiseFloor);
                 boolean voiced = isVoiceFrame(level, adaptiveThreshold, ttsNow, bargeMode);
                 if (voiced) silenceMs = 0;
                 else silenceMs += frameMs;
@@ -620,6 +634,22 @@ public class VoiceController {
         return level > bargeThreshold;
     }
 
+    private long updateNoiseFloor(long noiseFloor, long level, int baseThreshold) {
+        if (noiseFloor <= 0) return Math.min(level, baseThreshold);
+        long speechLikeGate = Math.max(baseThreshold, noiseFloor * 3 + 120);
+        long sample = level > speechLikeGate ? noiseFloor : level;
+        return (noiseFloor * 63 + sample) / 64;
+    }
+
+    private int adaptiveVoiceThreshold(int baseThreshold, long noiseFloor) {
+        int floorThreshold = noiseFloor <= 0 ? 260
+                : (int) Math.min(3200, noiseFloor * 3 / 2 + 180);
+        if (noiseFloor > baseThreshold) {
+            return Math.max(baseThreshold, floorThreshold);
+        }
+        return Math.max(220, Math.min(baseThreshold, Math.max(260, floorThreshold)));
+    }
+
     private String bargeMode() {
         String s = Prefs.get(ctx, Prefs.K_BARGE_MODE, Prefs.DEFAULT_BARGE_MODE);
         if (s == null) return Prefs.DEFAULT_BARGE_MODE;
@@ -646,7 +676,22 @@ public class VoiceController {
     }
 
     private boolean shouldConfirmBargePartial(String text, int sessionId) {
-        return confirmedBargeSession.get() == sessionId || isExplicitBargeCommand(text);
+        if (confirmedBargeSession.get() == sessionId) return true;
+        String t = applyHotwordCorrections(cleanupAsrText(text));
+        if (t.isEmpty()) return false;
+        if (isLikelyEcho(t) || isWeakBargeText(t) || isIgnorableAsrText(t, null)
+                || looksLikeBackgroundSpeech(t)) {
+            return false;
+        }
+        if (isExplicitBargeCommand(t) || looksAddressedOrQuestion(t)
+                || looksLikeCurrentInterruption(t) || looksLikeFollowup(t)) {
+            return true;
+        }
+        String norm = normalizeSpeechText(t);
+        if (Prefs.BARGE_MODE_SENSITIVE.equals(bargeMode())) {
+            return norm.length() >= 5 && containsCjkText(t);
+        }
+        return norm.length() >= 8 && containsCjkText(t);
     }
 
     private boolean shouldConfirmBargeFinal(String text, AsrTurn turn, int sessionId) {
@@ -672,7 +717,7 @@ public class VoiceController {
                 + (turn == null ? "" : " speechMs=" + turn.speechMs
                 + " maxLevel=" + turn.maxLevel + " threshold=" + turn.threshold)
                 + " text=" + compact(text, 70));
-        stopTtsPlayback();
+        stopTtsPlayback(true);
         cancelActiveCalls();
         setStatus("收到打断...");
     }
@@ -1034,7 +1079,7 @@ public class VoiceController {
                 ConversationLog.append(ctx, "system", "新语音打断上一轮：" + compact(text, 40));
             }
             cancelActiveCalls();
-            stopTtsPlayback();
+            stopTtsPlayback(CloudTts.isPlaying() || CloudTts.isFading());
             ConversationLog.append(ctx, "user", text);
             setStatus("思考中...");
 
@@ -1363,13 +1408,17 @@ public class VoiceController {
 
     private String voiceInteractionInstruction() {
         String mode = Prefs.interactionMode(ctx);
+        String noStage = "不要输出括号情绪或动作提示，如“苦笑、叹气、沉默”；这些不要写进回答。";
         if (Prefs.INTERACTION_QUIET.equals(mode)) {
-            return "常驻语音：少插话，主要回答明确问题、命令和追问；回复简短自然，勿提监听。";
+            return "常驻语音：少插话，主要回答明确问题、命令和追问；回复简短自然，勿提监听。"
+                    + noStage;
         }
         if (Prefs.INTERACTION_ACTIVE.equals(mode)) {
-            return "常驻语音：你像在场的人，可以主动接入闲聊、补观点、给建议、轻松吐槽；每次先短句，勿提监听。";
+            return "常驻语音：你像在场的人，可以主动接入闲聊、补观点、给建议、轻松吐槽；每次先短句，勿提监听。"
+                    + noStage;
         }
-        return "常驻语音：你像在场的人，在合适的闲聊空档自然插一句；不要抢话，回复简短自然，勿提监听。";
+        return "常驻语音：你像在场的人，在合适的闲聊空档自然插一句；不要抢话，回复简短自然，勿提监听。"
+                + noStage;
     }
 
     private boolean looksExplicitAddressOrCommand(String text) {
@@ -1687,6 +1736,7 @@ public class VoiceController {
     private String prepareTtsText(String text) {
         String s = text == null ? "" : text.trim();
         if (s.isEmpty()) return "";
+        s = stripTtsStageDirections(s);
         s = s.replace("**", "")
                 .replace("__", "")
                 .replace("`", "")
@@ -1707,6 +1757,20 @@ public class VoiceController {
         if (s.length() <= 14 && !s.matches(".*[。！？!?；;，,]$")) {
             s += "。";
         }
+        return s;
+    }
+
+    private String stripTtsStageDirections(String text) {
+        String s = text == null ? "" : text.trim();
+        if (s.isEmpty()) return "";
+        s = TTS_BRACKETED_STAGE_PATTERN.matcher(s).replaceAll("");
+        s = TTS_MARKDOWN_STAGE_PATTERN.matcher(s).replaceAll("");
+        s = TTS_STANDALONE_STAGE_PATTERN.matcher(s).replaceAll("$1");
+        s = s.replaceAll("^[\\s。！？!?；;，,、:：]+", "")
+                .replaceAll("\\s+([。！？!?；;，,、:：])", "$1")
+                .replaceAll("([。！？!?；;，,、:：]){2,}", "$1")
+                .replaceAll("\\s+", " ")
+                .trim();
         return s;
     }
 
@@ -1972,16 +2036,25 @@ public class VoiceController {
                 && !shuttingDown.get() && System.currentTimeMillis() < deadline) {
             try { Thread.sleep(60); } catch (InterruptedException ignored) { break; }
         }
-        if (job.turnId != turnSerial.get()) CloudTts.stop();
+        if (job.turnId != turnSerial.get() && !CloudTts.isFading()) CloudTts.stop();
         ttsSpeaking.set(false);
         lastTtsEndAt = System.currentTimeMillis();
         ttsHoldoffUntil = lastTtsEndAt + TTS_END_HOLDOFF_MS;
     }
 
     private void stopTtsPlayback() {
+        stopTtsPlayback(false);
+    }
+
+    private void stopTtsPlayback(boolean fadeCurrentAudio) {
         ttsQueue.clear();
         readyTtsQueue.clear();
-        CloudTts.stop();
+        if (fadeCurrentAudio) {
+            CloudTts.fadeOutAndStop(BARGE_TTS_FADE_MS);
+            ConversationLog.append(ctx, "system", "TTS fade out for interruption");
+        } else {
+            CloudTts.stop();
+        }
         LocalTts.stopPlayback();
         ttsSpeaking.set(false);
         lastTtsEndAt = System.currentTimeMillis();
