@@ -37,6 +37,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     private SensorHub hub;
     private VoiceController voice;
     private WifiLocator locator;
+    private KeyguardManager.KeyguardLock keyguardLock;
     private Call oracleCall;
     private long oracleUiUpdateMs = 0;
     private final Handler uiTicker = new Handler();
@@ -141,6 +142,21 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         }
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                 | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
+        try {
+            keyguardLock = keyguard.newKeyguardLock("OracleCompassHome");
+            keyguardLock.disableKeyguard();
+        } catch (Throwable ignored) {
+            keyguardLock = null;
+        }
+    }
+
+    private void dismissSeamlessKeyguard() {
+        if (keyguardLock == null) return;
+        try {
+            keyguardLock.disableKeyguard();
+        } catch (Throwable ignored) {
+            // A vendor keyguard may reject the deprecated API after boot.
+        }
     }
 
     @Override
@@ -156,6 +172,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         uiTicker.post(uiTick);
         if (voice != null) voice = VoiceController.get(this, this::setMainVoiceStatus);
         syncVoiceServiceFromPrefs();
+        dismissSeamlessKeyguard();
         hideSystemUi();
     }
 

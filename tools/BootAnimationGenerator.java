@@ -33,6 +33,7 @@ public final class BootAnimationGenerator {
     private static final int SIZE = 800;
     private static final int FPS = 12;
     private static final int PART0_FRAMES = 70;
+    private static final int PART1_FRAMES = 36;
     private static final long MAX_BOOT_ZIP_BYTES = 6L * 1024L * 1024L;
 
     private static final Color BG = new Color(7, 6, 4);
@@ -55,7 +56,11 @@ public final class BootAnimationGenerator {
         for (int i = 0; i < PART0_FRAMES; i++) {
             frames.add(encodeJpeg(drawFrame(i), 0.88f));
         }
-        byte[] bootZip = buildBootZip(frames);
+        List<byte[]> loopFrames = new ArrayList<>(PART1_FRAMES);
+        for (int i = 0; i < PART1_FRAMES; i++) {
+            loopFrames.add(encodeJpeg(drawLoopFrame(i), 0.88f));
+        }
+        byte[] bootZip = buildBootZip(frames, loopFrames);
         verifyBootZip(bootZip);
         if (bootZip.length > MAX_BOOT_ZIP_BYTES) {
             throw new IOException("bootanimation.zip is too large: " + bootZip.length);
@@ -67,7 +72,8 @@ public final class BootAnimationGenerator {
         Files.write(preview, frames.get(PART0_FRAMES - 1));
 
         System.out.println("bootanimation: " + bootZip.length + " bytes, "
-                + PART0_FRAMES + "+1 frames, " + SIZE + "x" + SIZE + "@" + FPS);
+                + PART0_FRAMES + "+" + PART1_FRAMES + " frames, "
+                + SIZE + "x" + SIZE + "@" + FPS);
         System.out.println("module: " + module);
         System.out.println("preview: " + preview);
     }
@@ -90,7 +96,7 @@ public final class BootAnimationGenerator {
         double cy = SIZE / 2.0;
 
         drawGlow(g, cx, cy, 16 + spark * 70, GOLD, (float) (0.32 * spark));
-        drawOuterInstrument(g, cx, cy, rings, frame, pulse);
+        drawOuterInstrument(g, cx, cy, rings, frame * 4.6, pulse);
         drawIris(g, cx, cy, eye, frame);
         drawScanner(g, cx, cy, rings * (1.0 - settle), frame);
         drawTaiji(g, cx, cy, 90, settle);
@@ -99,8 +105,31 @@ public final class BootAnimationGenerator {
         return image;
     }
 
+    private static BufferedImage drawLoopFrame(int frame) {
+        BufferedImage image = new BufferedImage(SIZE, SIZE, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = image.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+        g.setColor(BG);
+        g.fillRect(0, 0, SIZE, SIZE);
+
+        double phase = Math.PI * 2.0 * frame / PART1_FRAMES;
+        double pulse = 0.5 + 0.5 * Math.sin((PART0_FRAMES - 1) * 0.43 + phase);
+        double breathe = 0.5 - 0.5 * Math.cos(phase);
+        double rotation = (PART0_FRAMES - 1) * 4.6 + 360.0 * frame / PART1_FRAMES;
+        double cx = SIZE / 2.0;
+        double cy = SIZE / 2.0;
+
+        drawGlow(g, cx, cy, 86 + breathe * 5, GOLD, (float) (0.30 + breathe * 0.04));
+        drawOuterInstrument(g, cx, cy, 1.0, rotation, pulse);
+        drawTaiji(g, cx, cy, 90 + breathe * 1.5, 1.0);
+
+        g.dispose();
+        return image;
+    }
+
     private static void drawOuterInstrument(Graphics2D g, double cx, double cy,
-                                            double amount, int frame, double pulse) {
+                                            double amount, double rotation, double pulse) {
         if (amount <= 0) return;
         float a = (float) amount;
         g.setComposite(AlphaComposite.SrcOver.derive(0.68f * a));
@@ -128,7 +157,6 @@ public final class BootAnimationGenerator {
         g.setComposite(AlphaComposite.SrcOver.derive((float) ((0.38 + pulse * 0.34) * a)));
         g.setColor(AETHER);
         g.setStroke(new BasicStroke(4f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-        double rotation = frame * 4.6;
         g.draw(new Arc2D.Double(cx - 349, cy - 349, 698, 698, rotation, 74, Arc2D.OPEN));
         g.setComposite(AlphaComposite.SrcOver);
     }
@@ -220,7 +248,8 @@ public final class BootAnimationGenerator {
         g.setComposite(AlphaComposite.SrcOver);
     }
 
-    private static byte[] buildBootZip(List<byte[]> frames) throws IOException {
+    private static byte[] buildBootZip(List<byte[]> frames, List<byte[]> loopFrames)
+            throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
             putStored(zip, "desc.txt", (SIZE + " " + SIZE + " " + FPS
@@ -228,7 +257,10 @@ public final class BootAnimationGenerator {
             for (int i = 0; i < frames.size(); i++) {
                 putStored(zip, String.format(Locale.ROOT, "part0/%03d.jpg", i), frames.get(i));
             }
-            putStored(zip, "part1/000.jpg", frames.get(frames.size() - 1));
+            for (int i = 0; i < loopFrames.size(); i++) {
+                putStored(zip, String.format(Locale.ROOT, "part1/%03d.jpg", i),
+                        loopFrames.get(i));
+            }
         }
         return bytes.toByteArray();
     }
@@ -239,14 +271,54 @@ public final class BootAnimationGenerator {
                 + "version=" + version + "\n"
                 + "versionCode=6\n"
                 + "author=oracle-compass\n"
-                + "description=800x800 systemless boot animation for MAGNEO C110001 / Android 5.1\n";
+                + "description=800x800 boot animation and seamless HOME handoff for MAGNEO C110001 / Android 5.1\n";
         String customize = "ui_print \"- Oracle Compass golden mechanical eye\"\n"
                 + "[ \"$API\" = \"22\" ] || abort \"Android 5.1 / API 22 required\"\n"
                 + "[ -f /system/media/bootanimation.zip ] || abort \"Original bootanimation.zip not found\"\n"
-                + "set_perm \"$MODPATH/system/media/bootanimation.zip\" 0 0 0644\n";
+                + "set_perm \"$MODPATH/system/media/bootanimation.zip\" 0 0 0644\n"
+                + "set_perm \"$MODPATH/post-fs-data.sh\" 0 0 0755\n"
+                + "set_perm \"$MODPATH/service.sh\" 0 0 0755\n";
+        String systemProp = "curlockscreen=0\n"
+                + "ro.lockscreen.disable.default=true\n";
+        String postFsData = "#!/system/bin/sh\n"
+                + "settings put secure lockscreen.disabled 1\n"
+                + "resetprop -n curlockscreen 0\n"
+                + "resetprop -n ro.lockscreen.disable.default true\n";
+        String service = "#!/system/bin/sh\n"
+                + "i=0\n"
+                + "bridge=0\n"
+                + "settings put secure lockscreen.disabled 1\n"
+                + "while [ \"$(getprop sys.boot_completed)\" != \"1\" ] && [ \"$i\" -lt 120 ]; do\n"
+                + "  resetprop -n curlockscreen 0\n"
+                + "  resetprop -n ro.lockscreen.disable.default true\n"
+                + "  if [ \"$bridge\" = \"0\" ]; then\n"
+                + "    am start -a android.intent.action.MAIN -f 0x04000000 "
+                + "-n com.magneo.compass/.BootHandoffActivity >/dev/null 2>&1\n"
+                + "    if dumpsys activity activities | grep -q 'com.magneo.compass/.BootHandoffActivity'; then\n"
+                + "      bridge=1\n"
+                + "    fi\n"
+                + "  fi\n"
+                + "  sleep 1\n"
+                + "  i=$((i + 1))\n"
+                + "done\n"
+                + "settings put secure lockscreen.disabled 1\n"
+                + "am start -a android.intent.action.MAIN -c android.intent.category.HOME "
+                + "-f 0x04000000 -n com.magneo.compass/.MainActivity >/dev/null 2>&1\n"
+                + "j=0\n"
+                + "while [ \"$j\" -lt 6 ]; do\n"
+                + "  if [ \"$(settings get secure lockscreen.disabled)\" = \"1\" ] && "
+                + "dumpsys window policy | grep -q 'mShowingLockscreen=true'; then\n"
+                + "    input swipe 400 760 400 120 350 >/dev/null 2>&1\n"
+                + "  fi\n"
+                + "  sleep 1\n"
+                + "  j=$((j + 1))\n"
+                + "done\n";
         try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(output))) {
             putDeflated(zip, "module.prop", moduleProp.getBytes(StandardCharsets.UTF_8));
             putDeflated(zip, "customize.sh", customize.getBytes(StandardCharsets.UTF_8));
+            putDeflated(zip, "system.prop", systemProp.getBytes(StandardCharsets.US_ASCII));
+            putDeflated(zip, "post-fs-data.sh", postFsData.getBytes(StandardCharsets.US_ASCII));
+            putDeflated(zip, "service.sh", service.getBytes(StandardCharsets.US_ASCII));
             putDeflated(zip, "system/media/bootanimation.zip", bootZip);
         }
     }
@@ -276,7 +348,7 @@ public final class BootAnimationGenerator {
                 }
             }
         }
-        if (!descOk || part0 != PART0_FRAMES || part1 != 1) {
+        if (!descOk || part0 != PART0_FRAMES || part1 != PART1_FRAMES) {
             throw new IOException("invalid boot archive: desc=" + descOk
                     + " part0=" + part0 + " part1=" + part1);
         }

@@ -65,9 +65,9 @@ Action 会使用 `zipalign` 和 `apksigner` 签名，并显式启用 v1 签名�
 
 ## 金色机械开机动画
 
-Release 中的 `oracle-compass-bootanimation-v*.zip` 是为 C110001 / Android 5.1 制作的 Magisk 模块。它以 systemless 方式覆盖 `/system/media/bootanimation.zip`，不修改原厂文件；在 Magisk 中禁用或卸载模块即可恢复原动画。
+Release 中的 `oracle-compass-bootanimation-v*.zip` 是为 C110001 / Android 5.1 制作的 Magisk 模块。它以 systemless 方式覆盖 `/system/media/bootanimation.zip`，覆盖该 ROM 的 `curlockscreen=1` 厂商属性，并在开机完成时直接拉起真理罗盘 HOME；不修改原厂文件，在 Magisk 中禁用或卸载模块即可恢复原动画和原厂锁屏行为。
 
-动画固定为 `800x800 / 12fps`，由 JDK 21 可复现生成：
+动画固定为 `800x800 / 12fps`：前段 70 帧完成机械眼展开，末段 36 帧以 3 秒周期持续扫描和呼吸，直到系统完成 HOME 交接。由 JDK 21 可复现生成：
 
 ```bash
 javac -d build/bootanimation-tool tools/BootAnimationGenerator.java

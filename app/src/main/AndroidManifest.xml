@@ -13,6 +13,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
@@ -42,14 +43,16 @@
             </intent-filter>
         </activity>
 
-        <activity android:name=".FakeHomeActivity" android:exported="true" android:excludeFromRecents="true"
-            android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.HOME" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </activity>
+        <activity
+            android:name=".BootHandoffActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <activity android:name=".FakeHomeActivity" android:exported="false" android:excludeFromRecents="true"
+            android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden" />
 
         <activity android:name=".AppDrawerActivity" android:exported="false" android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden" />
         <activity android:name=".PriorityAppsActivity" android:exported="false" android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden" />

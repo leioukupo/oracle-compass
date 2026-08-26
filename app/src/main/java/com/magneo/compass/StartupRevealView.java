@@ -13,7 +13,7 @@ import com.magneo.compass.ui.Ui;
 
 /** Short bridge from the final boot-animation frame into the live compass. */
 public final class StartupRevealView extends View {
-    private static final long DURATION_MS = 900;
+    private static final long DURATION_MS = 1800;
     private static final long FOCUS_SETTLE_MS = 80;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -21,6 +21,7 @@ public final class StartupRevealView extends View {
     private long startedAt;
     private Runnable onFinished;
     private boolean armed;
+    private boolean released;
     private boolean startPosted;
     private boolean finished;
 
@@ -30,10 +31,20 @@ public final class StartupRevealView extends View {
     }
 
     public void start(Runnable finishedCallback) {
+        hold(finishedCallback);
+        release();
+    }
+
+    public void hold(Runnable finishedCallback) {
         onFinished = finishedCallback;
         armed = true;
-        beginWhenVisible();
+        released = false;
         invalidate();
+    }
+
+    public void release() {
+        released = true;
+        beginWhenVisible();
     }
 
     @Override public void onWindowFocusChanged(boolean hasWindowFocus) {
@@ -42,11 +53,12 @@ public final class StartupRevealView extends View {
     }
 
     private void beginWhenVisible() {
-        if (!armed || finished || startedAt != 0 || startPosted || !hasWindowFocus()) return;
+        if (!armed || !released || finished || startedAt != 0 || startPosted
+                || !hasWindowFocus()) return;
         startPosted = true;
         postDelayed(() -> {
             startPosted = false;
-            if (!armed || finished || startedAt != 0 || !hasWindowFocus()) return;
+            if (!armed || !released || finished || startedAt != 0 || !hasWindowFocus()) return;
             startedAt = SystemClock.uptimeMillis();
             invalidate();
         }, FOCUS_SETTLE_MS);
@@ -92,7 +104,9 @@ public final class StartupRevealView extends View {
                 eased * 28f, Math.round(alpha * (1f - eased * 0.75f)));
         drawTaiji(canvas, cx, cy, taiji, alpha);
 
-        if (progress < 1f) {
+        if (startedAt == 0) {
+            return;
+        } else if (progress < 1f) {
             postInvalidateDelayed(16);
         } else if (!finished) {
             finished = true;
