@@ -14,11 +14,14 @@ import com.magneo.compass.ui.Ui;
 /** Short bridge from the final boot-animation frame into the live compass. */
 public final class StartupRevealView extends View {
     private static final long DURATION_MS = 900;
+    private static final long FOCUS_SETTLE_MS = 80;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path blade = new Path();
     private long startedAt;
     private Runnable onFinished;
+    private boolean armed;
+    private boolean startPosted;
     private boolean finished;
 
     public StartupRevealView(Context context) {
@@ -28,13 +31,30 @@ public final class StartupRevealView extends View {
 
     public void start(Runnable finishedCallback) {
         onFinished = finishedCallback;
-        startedAt = SystemClock.uptimeMillis();
+        armed = true;
+        beginWhenVisible();
         invalidate();
     }
 
+    @Override public void onWindowFocusChanged(boolean hasWindowFocus) {
+        super.onWindowFocusChanged(hasWindowFocus);
+        if (hasWindowFocus) beginWhenVisible();
+    }
+
+    private void beginWhenVisible() {
+        if (!armed || finished || startedAt != 0 || startPosted || !hasWindowFocus()) return;
+        startPosted = true;
+        postDelayed(() -> {
+            startPosted = false;
+            if (!armed || finished || startedAt != 0 || !hasWindowFocus()) return;
+            startedAt = SystemClock.uptimeMillis();
+            invalidate();
+        }, FOCUS_SETTLE_MS);
+    }
+
     @Override protected void onDraw(Canvas canvas) {
-        if (startedAt == 0) return;
-        float progress = Math.min(1f,
+        if (!armed && startedAt == 0) return;
+        float progress = startedAt == 0 ? 0f : Math.min(1f,
                 (SystemClock.uptimeMillis() - startedAt) / (float) DURATION_MS);
         float eased = smooth(progress);
         float fade = 1f - smooth(clamp((progress - 0.34f) / 0.66f));
@@ -76,6 +96,7 @@ public final class StartupRevealView extends View {
             postInvalidateDelayed(16);
         } else if (!finished) {
             finished = true;
+            armed = false;
             Runnable callback = onFinished;
             if (callback != null) post(callback);
         }

@@ -1,6 +1,7 @@
 package com.magneo.compass;
 
 import android.app.Activity;
+import android.app.KeyguardManager;
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
@@ -52,6 +53,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         QuitFix.apply(this);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        configureSeamlessKeyguard();
         hideSystemUi();
 
         Prefs.restoreBackupIfPresent(this);
@@ -130,6 +132,15 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
             android.os.Process.killProcess(android.os.Process.myPid());
         });
         syncVoiceServiceFromPrefs();
+    }
+
+    private void configureSeamlessKeyguard() {
+        KeyguardManager keyguard = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+        if (keyguard != null && keyguard.isKeyguardSecure()) {
+            return;
+        }
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
     }
 
     @Override

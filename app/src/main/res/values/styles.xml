@@ -2,10 +2,10 @@
 <resources>
     <style name="Theme.Bagua" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowFullscreen">true</item>
-        <item name="android:windowBackground">#0A0A0A</item>
+        <item name="android:windowBackground">#070604</item>
         <item name="android:colorAccent">#D4AF37</item>
-        <item name="android:statusBarColor">#0A0A0A</item>
-        <item name="android:navigationBarColor">#0A0A0A</item>
+        <item name="android:statusBarColor">#070604</item>
+        <item name="android:navigationBarColor">#070604</item>
         <item name="android:dialogTheme">@style/Theme.Bagua.Dialog</item>
     </style>
 

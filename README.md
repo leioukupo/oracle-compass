@@ -76,6 +76,20 @@ java -Djava.awt.headless=true -cp build/bootanimation-tool BootAnimationGenerato
 
 安装前应确认设备为 API 22 且已安装 Magisk。模块内也会执行同样的兼容性检查。
 
+专用设备如需让开机动画直接衔接真理罗盘，可在确认系统未设置 PIN、图案或密码后，使用 root 关闭仅上滑的锁屏（当前设备已应用）：
+
+```bash
+su -c 'settings put secure lockscreen.disabled 1'
+```
+
+需要恢复上滑锁屏时执行：
+
+```bash
+su -c 'settings put secure lockscreen.disabled 0'
+```
+
+真理罗盘作为默认 HOME 时会在开机广播后主动回到主屏；如果系统存在安全凭据，应用不会尝试绕过安全锁屏。
+
 ## 文档
 
 - [旧 README 原文](docs/original-readme.md)
