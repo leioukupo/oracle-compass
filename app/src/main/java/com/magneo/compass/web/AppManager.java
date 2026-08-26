@@ -231,10 +231,11 @@ public class AppManager {
             PackageInfo pi = ctx.getPackageManager().getPackageArchiveInfo(apk.getAbsolutePath(), 0);
             if (pi == null || pi.packageName == null) return err("APK 解析失败，不能安装");
             boolean self = ctx.getPackageName().equals(pi.packageName);
+            String rootApk = rootReadablePath(apk);
             String stage = "/data/local/tmp/oracle-compass-install.apk";
             String cmd = "mkdir -p /data/local/tmp; "
                     + "rm -f " + q(stage) + "; "
-                    + "cat " + q(apk.getAbsolutePath()) + " > " + q(stage) + "; R=$?; "
+                    + "cat " + q(rootApk) + " > " + q(stage) + "; R=$?; "
                     + "if [ $R -ne 0 ]; then echo copy failed; exit $R; fi; "
                     + "chmod 644 " + q(stage) + "; "
                     + "pm install -r -d " + q(stage) + " 2>&1; R=$?; "
@@ -400,6 +401,17 @@ public class AppManager {
 
     private static File taskLog(Context ctx) {
         return new File(uploadDir(ctx), "last-task.log");
+    }
+
+    private static String rootReadablePath(File file) {
+        String path = file.getAbsolutePath();
+        String external = Environment.getExternalStorageDirectory().getAbsolutePath();
+        String prefix = external.endsWith(File.separator) ? external : external + File.separator;
+        if (path.startsWith(prefix)) {
+            // Android 5.1 FUSE can deny uid 0 on /storage/emulated/0; use its backing path.
+            return "/data/media/0/" + path.substring(prefix.length());
+        }
+        return path;
     }
 
     private static File uploadDir(Context ctx) {
