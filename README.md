@@ -1,71 +1,69 @@
-# 真理罗盘（MAGNEO C110001）
+# 真理罗盘
 
-面向 MT6580 / Android 5.1 / 800×800 圆屏的桌面级 App：罗盘桌面 + 全传感器 + 大模型（视觉/语音）+ 内置浏览器 + 网络文件系统（FTP/WebDAV/SMB）。
+真理罗盘是为 MAGNEO C110001 / MT6580 / 800x800 圆形屏打造的 Android 5.1 桌面 App。它把罗盘主页、八卦导航、设备传感器、AI 对话与视觉、语音、浏览器、网络文件系统和远程设置集中到一个适合小圆屏反复使用的界面里。
+
+## 界面预览
+
+| 主屏 | 设置 | 应用抽屉 |
+| --- | --- | --- |
+| ![真理罗盘主屏实机截图](docs/screenshots/main.png) | ![真理罗盘设置页实机截图](docs/screenshots/settings.png) | ![真理罗盘应用抽屉实机截图](docs/screenshots/apps.png) |
+
+## 目标设备
+
+- Android 5.1 / API 22：项目 `minSdk 22`、`targetSdk 22`，运行行为按旧系统适配。
+- CPU/ABI：MT6580 级别设备，`armeabi-v7a` 单 ABI。
+- 屏幕：800x800 圆屏，主界面和设置页都按物理圆屏可触控区域设计。
+- 构建工具链：JDK 21、Gradle wrapper 8.14.5、Android SDK platform 36、build-tools 36.1.0、NDK 27.0.12077973、CMake 3.22.1。
+
+## 主要功能
+
+- 罗盘桌面：可注册为 HOME 桌面；外圈八区进入应用、网盘、设置、系统设置、音乐、灵眼、浏览和详情。
+- 传感器与诊断：显示方位、姿态、电量、磁力、GPS/卫星、光线、近距、气压等状态，并提供磁力校准和硬件诊断页。
+- AI 与占筮：支持 OpenAI 兼容的大模型端点，文字和视觉模型可分开配置；卦象可触发本地简解与 AI 解读播报。
+- 语音系统：支持 VAD 常驻监听、ASR/TTS 接口配置、本地 eSpeak NG 离线 TTS，并注册为系统 TTS 引擎。
+- 浏览与文件：内置圆屏 WebView，支持 FTP/WebDAV/SMB/NFS 网络文件浏览、下载、上传和流式播放。
+- 远程维护：内置网页设置服务，可查看配置和对话记录，并配合 ADB TCP、frpc、屏幕/摄像头推流做远程调试。
 
 ## 构建
 
-环境：JDK 21、Gradle 8.14.3、Android SDK（platform-36、build-tools 36.1.0、NDK 27.0.12077973、CMake 3.22.1）。
+首次从干净仓库构建时，需要额外克隆 eSpeak NG 源码来提供 native 头文件；静态库和精简语音数据已经随仓库提交。
 
 ```bash
-export JAVA_HOME=/root/android/jdk
-export ANDROID_HOME=/root/android/sdk
-cd /root/oracle-compass
-# 首次需要 espeak-ng 源码（本地中文 TTS）：
 git clone --depth 1 https://github.com/espeak-ng/espeak-ng.git third_party/espeak-ng
-# 生成语音数据（主机版）与 Android 静态库：
-cmake -B third_party/espeak-ng/build-host -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release
-cmake --build third_party/espeak-ng/build-host -j8
-cmake -B third_party/espeak-ng/build-android \
-  -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/27.0.12077973/build/cmake/android.toolchain.cmake \
-  -DANDROID_ABI=armeabi-v7a -DANDROID_PLATFORM=android-22 \
-  -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-fPIC -DCMAKE_CXX_FLAGS=-fPIC
-cmake --build third_party/espeak-ng/build-android -j8
-# 打包数据与库（脚本已按 cmn/en 精简）：
-mkdir -p app/src/main/cpp/prebuilt/armeabi-v7a app/src/main/assets/espeak-ng-data
-cp -r third_party/espeak-ng/build-host/espeak-ng-data/{lang,intonations,phondata,phondata-manifest,phonindex,phontab} app/src/main/assets/espeak-ng-data/
-cp third_party/espeak-ng/build-host/espeak-ng-data/{cmn_dict,en_dict} app/src/main/assets/espeak-ng-data/
-cp -r third_party/espeak-ng/build-host/espeak-ng-data/voices/!v app/src/main/assets/espeak-ng-data/voices/
-cp third_party/espeak-ng/build-android/src/libespeak-ng/libespeak-ng.a app/src/main/cpp/prebuilt/armeabi-v7a/
-cp third_party/espeak-ng/build-android/src/ucd-tools/libucd.a app/src/main/cpp/prebuilt/armeabi-v7a/
-cp third_party/espeak-ng/build-android/src/speechPlayer/libspeechPlayer.a app/src/main/cpp/prebuilt/armeabi-v7a/
-cp third_party/espeak-ng/COPYING app/src/main/assets/GPLv3.txt
-
-gradle assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+./gradlew assembleRelease
 ```
 
-## 使用
+生成的 APK 位于 `app/build/outputs/apk/release/`。更多历史构建步骤、圆屏 UI 规范和设备限制已移到 [docs/original-readme.md](docs/original-readme.md)。
 
-- 安装后打开即罗盘桌面；`设置 → 设为默认桌面` 可设为 HOME。
-- `设置`页：填大模型 Provider（默认通义，兼容 OpenAI 协议）、语音 API（ASR/TTS 独立配置）。
-- 罗盘外圈八区：应用抽屉 / 网盘 / 设置 / 语音 / 音乐 / 灵眼(视觉) / 浏览 / 详情。
-- 绕圈滑动：按住屏幕任意位置沿圆周滑动，中央放大显示对应功能，松手即打开；点按外圈或中心（语音）仍可用。
-- 语音：设备功能键可切换常驻监听；点中央太极开关对话；设置内也可开关持续监听（VAD）。
-- 本地 TTS：eSpeak NG（普通话/英文离线），同时注册为系统 TTS 引擎“真理罗盘 TTS”。
-- 网盘：`网盘`区添加 FTP/WebDAV/SMB 连接，可浏览/下载/上传/流式播放。
-- 浏览器：圆形视口 WebView，地址栏+Go、书签、历史、下载、UA 切换；无多余按钮（返回=物理返回键）。
+## GitHub Release 构建
 
-## 说明
+仓库提供 [Android Release workflow](.github/workflows/android-release.yml)，会在 GitHub runner 上安装 Android 5.1 兼容所需的编译环境：
 
-- eSpeak NG 为 GPLv3，许可文件随 APK 附带（assets/GPLv3.txt）。
-- 设备触摸屏存在物理盲区（边角/部分点不响应），扇区触摸带已放宽适配。
-- 密码明文存 SharedPreferences（API 22 无 Keystore AES），仅限个人设备使用。
+- `ubuntu-24.04`
+- Temurin JDK 21
+- Android SDK platform 36 / build-tools 36.1.0
+- Android NDK 27.0.12077973
+- CMake 3.22.1
 
-## 圆屏 UI 设计规范
+触发方式：
 
-800×800 / 物理直径 92mm / 系统 density 320（真实物理 dpi≈220）。圆屏适配要点：
+- 手动运行 `workflow_dispatch`
+- 推送到 `main` 或 `master`
+- 推送 `v*` 标签时自动创建 GitHub Release 并上传 APK
 
-- 物理：可见半径 R=400px=46mm；1dp≈0.229mm（物理上 1dp≈0.159mm，本机物理放大 ≈1.45×）；四角裁切深度约 19mm。
-- 范式（参考系统 `com.android.music` / `com.android.settings` 实测 bounds）：
-  - 顶/底带只放单个居中主键 + 居中 "⋯" overflow 圆键（弹 `RoundDialog` 收纳次键），不横排多键。
-  - 中带用大圆形主内容（Music 式 300×300 圆封面）或 ListView 沿圆中带滚动（Settings 范式，靠物理玻璃自然裁）。
-  - 真圆屏通常不需在 app 内再套 oval mask（物理玻璃已裁），仅在 ListView/GridView 触控防误命中角点时套 `OutlineUtil.oval(v)`。
-- 主屏视觉：以玄学黑金、八卦、太极为主，青蓝微光只做扫描线/反馈等弱科幻强调；外圈导航优先，天干地支等术数信息保持低亮辅助层。
-- 按钮规范：避免固定在方屏四角；边缘操作优先放在圆周可见区或顶/底居中，次级操作收进 `RoundDialog`。
-- 工具：`com.magneo.compass.ui.RoundScreen`（`R`、`safeHalfWidthAt(y)`、`maxCellHalf(r, angle, R)`）、`RoundFrame`、`OutlineUtil`、`Ui.dp`/共享色板/控件样式 helper。详见 [设备说明.md](设备说明.md)。
+默认会上传 release build type 的 unsigned APK。若要产出可直接安装的 signed APK，在仓库 `Settings -> Secrets and variables -> Actions` 中配置：
 
-## 已知限制
+- `ANDROID_KEYSTORE_BASE64`：release keystore 的 base64 内容
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
 
-- 本机 MAGNEO ROM 有全局“防误退”机制（checkAllowQuitState / isAllowQuit=false），返回键被框架拦截。本 App 通过 BaseActivity 覆写 dispatchKeyEvent 直接 finish() 绕过，物理返回键可正常退出；浏览器已无内置返回按钮，其余页面保留“◀ 返回”按钮兜底。
+Action 会使用 `zipalign` 和 `apksigner` 签名，并显式启用 v1 签名以兼容 Android 5.1。
 
-> 儿童机制与防退的排查/处理详见 [docs/去除儿童机制-重置操作手册.md](docs/去除儿童机制-重置操作手册.md)
+## 文档
+
+- [旧 README 原文](docs/original-readme.md)
+- [设备说明](设备说明.md)
+- [TTS/ASR 部署](docs/tts-asr-deploy.md)
+- [GPS 诊断记录](docs/gps-diagnostic-log.md)
+- [儿童机制与防退处理](docs/去除儿童机制-重置操作手册.md)

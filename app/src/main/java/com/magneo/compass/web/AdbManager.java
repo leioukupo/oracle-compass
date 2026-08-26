@@ -28,14 +28,22 @@ public class AdbManager {
             int port = port(ctx);
             String servicePort = prop("service.adb.tcp.port");
             String persistPort = prop("persist.service.adb.tcp.port");
-            boolean listening = isListening(port);
+            int activePort = firstValidPort(servicePort, persistPort);
+            boolean configuredListening = isListening(port);
+            boolean activeListening = activePort > 0 && isListening(activePort);
             o.put("ok", true);
             o.put("autoStart", Prefs.getB(ctx, Prefs.K_ADB_TCP_AUTO, false));
             o.put("port", port);
+            o.put("configuredPort", port);
+            if (activePort > 0) o.put("activePort", activePort);
+            else o.put("activePort", JSONObject.NULL);
             o.put("servicePort", servicePort);
             o.put("persistPort", persistPort);
-            o.put("listening", listening);
-            o.put("running", listening || String.valueOf(port).equals(servicePort));
+            o.put("configuredListening", configuredListening);
+            o.put("activeListening", activeListening);
+            o.put("listening", configuredListening || activeListening);
+            o.put("running", configuredListening || activeListening
+                    || String.valueOf(port).equals(servicePort));
             o.put("log", lastLog);
         } catch (Exception e) {
             putErr(o, e.getMessage());
@@ -103,9 +111,13 @@ public class AdbManager {
             int p = port(ctx);
             String servicePort = prop("service.adb.tcp.port");
             String persistPort = prop("persist.service.adb.tcp.port");
-            if (isListening(p) && String.valueOf(p).equals(servicePort)
-                    && String.valueOf(p).equals(persistPort)) {
-                return "adb tcp already running port=" + p;
+            int activePort = firstValidPort(servicePort, persistPort);
+            if (isListening(p)) {
+                return "adb tcp already listening port=" + p;
+            }
+            if (activePort > 0 && activePort != p && isListening(activePort)) {
+                return "adb tcp already listening port=" + activePort
+                        + " (configured=" + p + ", keep existing)";
             }
             return startPort(p);
         } catch (Exception e) {
@@ -134,6 +146,22 @@ public class AdbManager {
             return clampPort(Integer.parseInt(s == null ? "" : s.trim()));
         } catch (Exception e) {
             throw new IllegalArgumentException("端口必须是 1024-65535");
+        }
+    }
+
+    private static int firstValidPort(String... values) {
+        for (String s : values) {
+            int p = maybePort(s);
+            if (p > 0) return p;
+        }
+        return -1;
+    }
+
+    private static int maybePort(String s) {
+        try {
+            return clampPort(Integer.parseInt(s == null ? "" : s.trim()));
+        } catch (Exception e) {
+            return -1;
         }
     }
 

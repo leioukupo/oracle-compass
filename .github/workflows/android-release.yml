@@ -1,0 +1,116 @@
+name: Android Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build release APK
+    runs-on: ubuntu-24.04
+    env:
+      ANDROID_COMPILE_SDK: "36"
+      ANDROID_BUILD_TOOLS: "36.1.0"
+      ANDROID_NDK_VERSION: "27.0.12077973"
+      ANDROID_CMAKE_VERSION: "3.22.1"
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager \
+            "platforms;android-${ANDROID_COMPILE_SDK}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "ndk;${ANDROID_NDK_VERSION}" \
+            "cmake;${ANDROID_CMAKE_VERSION}"
+
+      - name: Prepare eSpeak NG headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p third_party
+          git clone --depth 1 https://github.com/espeak-ng/espeak-ng.git third_party/espeak-ng
+
+      - name: Build release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon clean assembleRelease
+
+      - name: Collect and optionally sign APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          mapfile -t apks < <(find app/build/outputs/apk/release -type f -name "*.apk" | sort)
+          if (( ${#apks[@]} == 0 )); then
+            echo "No release APK found under app/build/outputs/apk/release"
+            exit 1
+          fi
+
+          unsigned_apk="${apks[0]}"
+          cp "${unsigned_apk}" release/app-release-unsigned.apk
+
+          if [[ -n "${ANDROID_KEYSTORE_BASE64}" && -n "${ANDROID_KEYSTORE_PASSWORD}" && -n "${ANDROID_KEY_ALIAS}" && -n "${ANDROID_KEY_PASSWORD}" ]]; then
+            keystore="${RUNNER_TEMP}/release.keystore"
+            aligned_apk="${RUNNER_TEMP}/app-release-aligned.apk"
+            printf "%s" "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "${keystore}"
+
+            "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}/zipalign" -p -f 4 "${unsigned_apk}" "${aligned_apk}"
+            "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}/apksigner" sign \
+              --ks "${keystore}" \
+              --ks-pass "pass:${ANDROID_KEYSTORE_PASSWORD}" \
+              --ks-key-alias "${ANDROID_KEY_ALIAS}" \
+              --key-pass "pass:${ANDROID_KEY_PASSWORD}" \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --out release/app-release-signed.apk \
+              "${aligned_apk}"
+            "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}/apksigner" verify --verbose release/app-release-signed.apk
+          else
+            echo "Release signing secrets are incomplete; uploaded APK will be unsigned."
+          fi
+
+          (cd release && sha256sum *.apk > SHA256SUMS.txt)
+          ls -lh release
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-compass-release-apk
+          path: release/*
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
