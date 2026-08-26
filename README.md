@@ -13,7 +13,7 @@
 - Android 5.1 / API 22：项目 `minSdk 22`、`targetSdk 22`，运行行为按旧系统适配。
 - CPU/ABI：MT6580 级别设备，`armeabi-v7a` 单 ABI。
 - 屏幕：800x800 圆屏，主界面和设置页都按物理圆屏可触控区域设计。
-- 构建工具链：JDK 21、Gradle wrapper 8.14.5、Android SDK platform 36、build-tools 36.1.0、NDK 27.0.12077973、CMake 3.22.1。
+- 构建工具链：JDK 21、Gradle wrapper 8.14.5、Android SDK platform 36、build-tools 36.0.0、NDK 27.0.12077973、CMake 3.22.1。
 
 ## 主要功能
 
@@ -41,7 +41,7 @@ git clone --depth 1 https://github.com/espeak-ng/espeak-ng.git third_party/espea
 
 - `ubuntu-24.04`
 - Temurin JDK 21
-- Android SDK platform 36 / build-tools 36.1.0
+- Android SDK platform 36 / build-tools 36.0.0
 - Android NDK 27.0.12077973
 - CMake 3.22.1
 
