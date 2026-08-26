@@ -66,6 +66,7 @@
         <service android:name="com.magneo.compass.cam.CameraStreamService" android:exported="false" />
         <service android:name=".voice.VadService" android:exported="false" />
         <service android:name=".netfs.MusicService" android:exported="false" />
+        <service android:name=".RemoteAccessService" android:exported="false" />
 
         <service
             android:name=".tts.BaguaTtsService"

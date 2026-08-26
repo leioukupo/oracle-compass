@@ -2,9 +2,6 @@ package com.magneo.compass;
 
 /** Keeps remote maintenance access alive while the app process is running. */
 public final class RemoteAccessWatchdog {
-    private static final long INTERVAL_MS = 60000L;
-    private static volatile boolean started;
-
     private RemoteAccessWatchdog() {}
 
     public static String tickOnce(android.content.Context context) {
@@ -28,25 +25,4 @@ public final class RemoteAccessWatchdog {
         return out.toString();
     }
 
-    public static void start(android.content.Context context) {
-        synchronized (RemoteAccessWatchdog.class) {
-            if (started) return;
-            started = true;
-        }
-        final android.content.Context app = context.getApplicationContext();
-        Thread t = new Thread(new Runnable() {
-            @Override public void run() {
-                while (true) {
-                    try {
-                        Thread.sleep(INTERVAL_MS);
-                    } catch (InterruptedException e) {
-                        return;
-                    }
-                    tickOnce(app);
-                }
-            }
-        }, "remote-access-watchdog");
-        t.setDaemon(true);
-        t.start();
-    }
 }

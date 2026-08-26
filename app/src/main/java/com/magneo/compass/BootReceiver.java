@@ -11,15 +11,6 @@ public class BootReceiver extends BroadcastReceiver {
         String action = intent == null ? "" : intent.getAction();
         if (!Intent.ACTION_BOOT_COMPLETED.equals(action)
                 && !"android.intent.action.QUICKBOOT_POWERON".equals(action)) return;
-        final PendingResult pr = goAsync();
-        final Context app = context.getApplicationContext();
-        new Thread(() -> {
-            try {
-                RemoteAccessWatchdog.tickOnce(app);
-                RemoteAccessWatchdog.start(app);
-            } finally {
-                pr.finish();
-            }
-        }, "boot-adb").start();
+        RemoteAccessService.start(context);
     }
 }

@@ -17,8 +17,24 @@ import java.util.Map;
 /** Root-backed ADB-over-TCP control so the device does not depend on an external ADBWireless app. */
 public class AdbManager {
     private static final int DEFAULT_PORT = 5555;
+    private static final int FAILURE_THRESHOLD = 2;
+    private static final int STALE_SOCKET_THRESHOLD = 2;
+    private static final long RECOVERY_COOLDOWN_MS = 180000L;
+    private static final long CHECK_FRESH_MS = 90000L;
     private static final Object LOCK = new Object();
+    private static final Object HEALTH_LOCK = new Object();
     private static String lastLog = "";
+    private static volatile boolean tuningApplied;
+    private static volatile boolean lastCheckKnown;
+    private static volatile boolean lastCheckHealthy;
+    private static volatile int lastCheckPort = -1;
+    private static volatile int lastCloseWaitCount;
+    private static volatile int lastStuckSocketCount;
+    private static volatile int consecutiveFailures;
+    private static volatile long lastCheckAt;
+    private static volatile long lastRecoveryAt;
+    private static volatile long lastRestartAt;
+    private static volatile String lastCheckDetail = "waiting for watchdog";
 
     private AdbManager() {}
 
@@ -28,9 +44,17 @@ public class AdbManager {
             int port = port(ctx);
             String servicePort = prop("service.adb.tcp.port");
             String persistPort = prop("persist.service.adb.tcp.port");
+            String daemonState = prop("init.svc.adbd");
             int activePort = firstValidPort(servicePort, persistPort);
             boolean configuredListening = isListening(port);
             boolean activeListening = activePort > 0 && isListening(activePort);
+            boolean listening = configuredListening || activeListening;
+            int checkedPort = activePort > 0 ? activePort : port;
+            boolean checkFresh = lastCheckKnown && lastCheckPort == checkedPort
+                    && System.currentTimeMillis() - lastCheckAt <= CHECK_FRESH_MS;
+            String health = !listening ? "down"
+                    : !checkFresh ? "checking"
+                    : lastCheckHealthy ? "healthy" : "degraded";
             o.put("ok", true);
             o.put("autoStart", Prefs.getB(ctx, Prefs.K_ADB_TCP_AUTO, false));
             o.put("port", port);
@@ -39,11 +63,20 @@ public class AdbManager {
             else o.put("activePort", JSONObject.NULL);
             o.put("servicePort", servicePort);
             o.put("persistPort", persistPort);
+            o.put("daemonState", daemonState);
             o.put("configuredListening", configuredListening);
             o.put("activeListening", activeListening);
-            o.put("listening", configuredListening || activeListening);
-            o.put("running", configuredListening || activeListening
-                    || String.valueOf(port).equals(servicePort));
+            o.put("listening", listening);
+            o.put("running", listening && "running".equals(daemonState));
+            o.put("health", health);
+            o.put("deviceHealthy", checkFresh ? lastCheckHealthy : JSONObject.NULL);
+            o.put("hostState", "unknown");
+            o.put("lastCheckAt", lastCheckAt > 0 ? lastCheckAt : JSONObject.NULL);
+            o.put("lastCheckDetail", lastCheckDetail);
+            o.put("consecutiveFailures", consecutiveFailures);
+            o.put("closeWaitSockets", lastCloseWaitCount);
+            o.put("stuckSockets", lastStuckSocketCount);
+            o.put("lastRecoveryAt", lastRecoveryAt > 0 ? lastRecoveryAt : JSONObject.NULL);
             o.put("log", lastLog);
         } catch (Exception e) {
             putErr(o, e.getMessage());
@@ -78,7 +111,7 @@ public class AdbManager {
                     Prefs.putI(ctx, Prefs.K_ADB_TCP_PORT, p);
                 }
             }
-            String msg = startPort(p);
+            String msg = startPort(p, "manual restart");
             JSONObject o = status(ctx);
             o.put("ok", true);
             o.put("msg", msg);
@@ -96,6 +129,13 @@ public class AdbManager {
                     + "echo service=$(getprop service.adb.tcp.port); "
                     + "echo persist=$(getprop persist.service.adb.tcp.port)");
             append("stop adb tcp\n" + out);
+            synchronized (HEALTH_LOCK) {
+                lastCheckKnown = false;
+                lastCheckHealthy = false;
+                lastCheckPort = -1;
+                consecutiveFailures = 0;
+                lastCheckDetail = "ADB TCP disabled";
+            }
             JSONObject o = status(ctx);
             o.put("ok", true);
             o.put("msg", "ADB TCP 已关闭");
@@ -107,34 +147,115 @@ public class AdbManager {
 
     public static String ensureAutoStart(Context ctx) {
         try {
-            if (!Prefs.getB(ctx, Prefs.K_ADB_TCP_AUTO, false)) return "adb tcp auto disabled";
+            if (!Prefs.getB(ctx, Prefs.K_ADB_TCP_AUTO, false)) {
+                synchronized (HEALTH_LOCK) {
+                    lastCheckKnown = false;
+                    consecutiveFailures = 0;
+                    lastCheckDetail = "auto recovery disabled";
+                }
+                return "adb tcp auto disabled";
+            }
+            applyTcpHardening();
             int p = port(ctx);
             String servicePort = prop("service.adb.tcp.port");
             String persistPort = prop("persist.service.adb.tcp.port");
+            String daemonState = prop("init.svc.adbd");
             int activePort = firstValidPort(servicePort, persistPort);
-            if (isListening(p)) {
-                return "adb tcp already listening port=" + p;
+            int checkedPort = activePort > 0 ? activePort : p;
+            boolean listening = isListening(checkedPort);
+            if (!"running".equals(daemonState) || !listening) {
+                return recoverIfAllowed(p, "daemon=" + daemonState + " listening=" + listening, true);
             }
-            if (activePort > 0 && activePort != p && isListening(activePort)) {
-                return "adb tcp already listening port=" + activePort
-                        + " (configured=" + p + ", keep existing)";
+
+            TcpSocketStats sockets = tcpSocketStats(checkedPort);
+            boolean stale = sockets.closeWait >= 3
+                    || sockets.stuck >= STALE_SOCKET_THRESHOLD
+                    || sockets.established + sockets.closeWait >= 16;
+            boolean healthy = !stale;
+            int failures;
+            synchronized (HEALTH_LOCK) {
+                lastCheckKnown = true;
+                lastCheckHealthy = healthy;
+                lastCheckPort = checkedPort;
+                lastCheckAt = System.currentTimeMillis();
+                lastCloseWaitCount = sockets.closeWait;
+                lastStuckSocketCount = sockets.stuck;
+                lastCheckDetail = "listener ok closeWait=" + sockets.closeWait
+                        + " stuck=" + sockets.stuck + " established=" + sockets.established;
+                consecutiveFailures = healthy ? 0 : consecutiveFailures + 1;
+                failures = consecutiveFailures;
             }
-            return startPort(p);
+            if (healthy) {
+                return "adb tcp device side healthy port=" + checkedPort;
+            }
+            String reason = "stale sockets closeWait=" + sockets.closeWait
+                    + " stuck=" + sockets.stuck + " established=" + sockets.established;
+            if (failures < FAILURE_THRESHOLD) {
+                append("watchdog warning " + failures + "/" + FAILURE_THRESHOLD + ": " + reason);
+                return "adb tcp degraded, confirming: " + reason;
+            }
+            return recoverIfAllowed(p, reason, false);
         } catch (Exception e) {
             append("auto start failed: " + e.getMessage());
             return "adb tcp auto failed: " + e.getMessage();
         }
     }
 
-    private static String startPort(int port) throws Exception {
+    private static String recoverIfAllowed(int port, String reason, boolean serviceDown) throws Exception {
+        long now = System.currentTimeMillis();
+        long sinceRestart = now - lastRestartAt;
+        long cooldown = serviceDown ? 30000L : RECOVERY_COOLDOWN_MS;
+        if (lastRestartAt > 0 && sinceRestart < cooldown) {
+            String msg = "recovery cooldown " + ((cooldown - sinceRestart + 999L) / 1000L)
+                    + "s: " + reason;
+            append(msg);
+            return msg;
+        }
+        return startPort(port, "watchdog: " + reason);
+    }
+
+    private static String startPort(int port, String reason) throws Exception {
+        applyTcpHardening();
         String out = runRoot("setprop service.adb.tcp.port " + port + "; "
                 + "setprop persist.service.adb.tcp.port " + port + "; "
-                + "stop adbd; sleep 1; start adbd; sleep 1; "
+                + "stop adbd; sleep 1; start adbd; sleep 2; "
                 + "echo service=$(getprop service.adb.tcp.port); "
                 + "echo persist=$(getprop persist.service.adb.tcp.port)");
-        String msg = "ADB TCP 已启动 port=" + port;
-        append(msg + "\n" + out);
+        String daemonState = prop("init.svc.adbd");
+        boolean listening = isListening(port);
+        TcpSocketStats sockets = tcpSocketStats(port);
+        boolean healthy = "running".equals(daemonState) && listening;
+        long now = System.currentTimeMillis();
+        synchronized (HEALTH_LOCK) {
+            lastRestartAt = now;
+            lastRecoveryAt = now;
+            lastCheckKnown = true;
+            lastCheckHealthy = healthy;
+            lastCheckPort = port;
+            lastCheckAt = now;
+            lastCloseWaitCount = sockets.closeWait;
+            lastStuckSocketCount = sockets.stuck;
+            consecutiveFailures = healthy ? 0 : 1;
+            lastCheckDetail = "daemon=" + daemonState + " listening=" + listening
+                    + " closeWait=" + sockets.closeWait
+                    + " stuck=" + sockets.stuck + " established=" + sockets.established;
+        }
+        if (!healthy) throw new IllegalStateException("adbd restart did not restore listener");
+        String msg = "ADB TCP 已恢复 port=" + port;
+        append(msg + " reason=" + reason + "\n" + out);
         return msg;
+    }
+
+    private static void applyTcpHardening() throws Exception {
+        if (tuningApplied) return;
+        String out = runRoot("[ ! -w /proc/sys/net/ipv4/tcp_keepalive_time ] || echo 60 > /proc/sys/net/ipv4/tcp_keepalive_time; "
+                + "[ ! -w /proc/sys/net/ipv4/tcp_keepalive_intvl ] || echo 10 > /proc/sys/net/ipv4/tcp_keepalive_intvl; "
+                + "[ ! -w /proc/sys/net/ipv4/tcp_keepalive_probes ] || echo 3 > /proc/sys/net/ipv4/tcp_keepalive_probes; "
+                + "[ ! -w /proc/sys/net/ipv4/tcp_fin_timeout ] || echo 30 > /proc/sys/net/ipv4/tcp_fin_timeout; "
+                + "echo keepalive=$(cat /proc/sys/net/ipv4/tcp_keepalive_time 2>/dev/null)/$(cat /proc/sys/net/ipv4/tcp_keepalive_intvl 2>/dev/null)/$(cat /proc/sys/net/ipv4/tcp_keepalive_probes 2>/dev/null) "
+                + "fin=$(cat /proc/sys/net/ipv4/tcp_fin_timeout 2>/dev/null)");
+        tuningApplied = true;
+        append("tcp tuning applied: " + out);
     }
 
     private static int port(Context ctx) {
@@ -204,6 +325,34 @@ public class AdbManager {
         return isListeningFile("/proc/net/tcp", port) || isListeningFile("/proc/net/tcp6", port);
     }
 
+    private static TcpSocketStats tcpSocketStats(int port) {
+        TcpSocketStats out = new TcpSocketStats();
+        readTcpSocketStats("/proc/net/tcp", port, out);
+        readTcpSocketStats("/proc/net/tcp6", port, out);
+        return out;
+    }
+
+    private static void readTcpSocketStats(String path, int port, TcpSocketStats out) {
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(path), "UTF-8"))) {
+            String line;
+            boolean first = true;
+            while ((line = r.readLine()) != null) {
+                if (first) { first = false; continue; }
+                String[] p = line.trim().split("\\s+");
+                if (p.length < 5) continue;
+                int idx = p[1].lastIndexOf(':');
+                if (idx < 0 || Integer.parseInt(p[1].substring(idx + 1), 16) != port) continue;
+                String state = p[3];
+                long rxQueue = 0;
+                String[] queues = p[4].split(":", 2);
+                if (queues.length == 2) rxQueue = Long.parseLong(queues[1], 16);
+                if ("01".equals(state)) out.established++;
+                if ("08".equals(state)) out.closeWait++;
+                if (("01".equals(state) || "08".equals(state)) && rxQueue > 0) out.stuck++;
+            }
+        } catch (Exception ignored) {}
+    }
+
     private static boolean isListeningFile(String path, int port) {
         try (BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(path), "UTF-8"))) {
             String line;
@@ -252,5 +401,11 @@ public class AdbManager {
             o.put("err", msg == null || msg.isEmpty() ? "操作失败" : msg);
             o.put("log", lastLog);
         } catch (Exception ignored) {}
+    }
+
+    private static final class TcpSocketStats {
+        int established;
+        int closeWait;
+        int stuck;
     }
 }

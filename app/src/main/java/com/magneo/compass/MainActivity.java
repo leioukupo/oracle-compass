@@ -90,14 +90,12 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         LocalTts.ensureInit(this);
         com.magneo.compass.web.SettingsWebServer.start(this);
         // 自动启动 ADB TCP / frpc（按网页配置）；摄像头推流不再随主屏冷启，改由 Vision 前后 onResume/onPause 或 web /cam/start|stop 按需启停，避免冷启即占 CPU
-        new Thread(() -> {
-            try {
-                logAuto(RemoteAccessWatchdog.tickOnce(getApplicationContext()));
-                RemoteAccessWatchdog.start(getApplicationContext());
-            } catch (Throwable t) {
-                logAuto("frpc auto FAILED: " + t);
-            }
-        }, "auto-stream").start();
+        try {
+            RemoteAccessService.start(getApplicationContext());
+            logAuto("remote access watchdog service started");
+        } catch (Throwable t) {
+            logAuto("remote access watchdog FAILED: " + t);
+        }
         // 兜底：应用每次冷启动清理上次崩溃遗留的推流编码进程，防止 CPU 被占满；
         // 若上次推流是被强杀/崩溃终止的，屏幕常亮设置会残留，一并恢复自动休眠
         new Thread(() -> {
