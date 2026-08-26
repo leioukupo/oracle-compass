@@ -69,7 +69,7 @@ jobs:
           set -euo pipefail
           gradle --no-daemon clean assembleRelease
 
-      - name: Collect and optionally sign APK
+      - name: Collect and sign APK
         shell: bash
         run: |
           set -euo pipefail
@@ -83,6 +83,7 @@ jobs:
           unsigned_apk="${apks[0]}"
           cp "${unsigned_apk}" release/app-release-unsigned.apk
 
+          signed_apk=""
           if [[ -n "${ANDROID_KEYSTORE_BASE64}" && -n "${ANDROID_KEYSTORE_PASSWORD}" && -n "${ANDROID_KEY_ALIAS}" && -n "${ANDROID_KEY_PASSWORD}" ]]; then
             keystore="${RUNNER_TEMP}/release.keystore"
             aligned_apk="${RUNNER_TEMP}/app-release-aligned.apk"
@@ -98,11 +99,37 @@ jobs:
               --v2-signing-enabled true \
               --out release/app-release-signed.apk \
               "${aligned_apk}"
-            "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}/apksigner" verify --verbose release/app-release-signed.apk
+            signed_apk="release/app-release-signed.apk"
           else
-            echo "Release signing secrets are incomplete; uploaded APK will be unsigned."
+            echo "Release signing secrets are incomplete; generating a temporary CI signing key."
+            keystore="${RUNNER_TEMP}/ci-release.keystore"
+            aligned_apk="${RUNNER_TEMP}/app-release-ci-aligned.apk"
+            keytool -genkeypair -v \
+              -keystore "${keystore}" \
+              -storetype PKCS12 \
+              -storepass android \
+              -keypass android \
+              -alias oracle-compass-ci \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 3650 \
+              -dname "CN=Oracle Compass CI,O=Oracle Compass,C=US" \
+              -noprompt
+
+            "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}/zipalign" -p -f 4 "${unsigned_apk}" "${aligned_apk}"
+            "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}/apksigner" sign \
+              --ks "${keystore}" \
+              --ks-pass "pass:android" \
+              --ks-key-alias oracle-compass-ci \
+              --key-pass "pass:android" \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --out release/app-release-ci-signed.apk \
+              "${aligned_apk}"
+            signed_apk="release/app-release-ci-signed.apk"
           fi
 
+          "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}/apksigner" verify --verbose "${signed_apk}"
           (cd release && sha256sum *.apk > SHA256SUMS.txt)
           ls -lh release
 

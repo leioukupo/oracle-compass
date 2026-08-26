@@ -13,7 +13,7 @@
 - Android 5.1 / API 22：项目 `minSdk 22`、`targetSdk 22`，运行行为按旧系统适配。
 - CPU/ABI：MT6580 级别设备，`armeabi-v7a` 单 ABI。
 - 屏幕：800x800 圆屏，主界面和设置页都按物理圆屏可触控区域设计。
-- 构建工具链：JDK 21、Gradle wrapper 8.14.5、Android SDK platform 36、build-tools 36.0.0、NDK 27.0.12077973、CMake 3.22.1。
+- 构建工具链：JDK 21、Gradle 8.14.5、Android SDK platform 36、build-tools 36.0.0、NDK 27.0.12077973、CMake 3.22.1。
 
 ## 主要功能
 
@@ -51,7 +51,7 @@ git clone --depth 1 https://github.com/espeak-ng/espeak-ng.git third_party/espea
 - 推送到 `main` 或 `master`
 - 推送 `v*` 标签时自动创建 GitHub Release 并上传 APK
 
-默认会上传 release build type 的 unsigned APK。若要产出可直接安装的 signed APK，在仓库 `Settings -> Secrets and variables -> Actions` 中配置：
+默认会上传 release build type 的 unsigned APK，并在缺少签名 secrets 时额外生成 `app-release-ci-signed.apk` 便于安装测试。这个 CI 临时签名不适合作为长期升级签名；若要产出稳定的正式 signed APK，在仓库 `Settings -> Secrets and variables -> Actions` 中配置：
 
 - `ANDROID_KEYSTORE_BASE64`：release keystore 的 base64 内容
 - `ANDROID_KEYSTORE_PASSWORD`
