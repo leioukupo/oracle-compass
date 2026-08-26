@@ -4,9 +4,11 @@
 
 ## 界面预览
 
-| 主屏 | 设置 | 应用抽屉 |
-| --- | --- | --- |
-| ![真理罗盘主屏实机截图](docs/screenshots/main.png) | ![真理罗盘设置页实机截图](docs/screenshots/settings.png) | ![真理罗盘应用抽屉实机截图](docs/screenshots/apps.png) |
+| 主屏 | 金色机械灵眼 |
+| --- | --- |
+| ![真理罗盘主屏实机截图](docs/screenshots/main.png) | ![金色机械灵眼实机截图](docs/screenshots/vision.png) |
+| 设置 | 应用抽屉 |
+| ![真理罗盘设置页实机截图](docs/screenshots/settings.png) | ![真理罗盘应用抽屉实机截图](docs/screenshots/apps.png) |
 
 ## 目标设备
 
