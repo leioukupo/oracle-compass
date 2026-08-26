@@ -45,6 +45,7 @@ app/.cxx/
 *.prefs.xml
 prefs.json
 oracle-compass-backup/
+artifacts/
 *.jks
 *.keystore
 *.p12
