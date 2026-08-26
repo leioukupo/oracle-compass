@@ -53,6 +53,7 @@ public class Prefs {
     public static final String K_VISION_ENABLED = "visionEnabled";
     public static final String K_VISION_INTERVAL = "visionInterval";
     public static final String K_VISION_FRAME_SOURCE = "visionFrameSource";
+    public static final String K_VISION_OVERLAY_STYLE = "visionOverlayStyle";
     public static final String K_VAD_ENABLED = "vadEnabled";
     public static final String K_VAD_SENSITIVITY = "vadSensitivity";
     public static final String K_PINNED_APPS = "pinnedApps";
@@ -112,6 +113,9 @@ public class Prefs {
     public static final String VISION_FRAME_SOURCE_HAL = "hal";
     public static final String VISION_FRAME_SOURCE_RTSP = "rtsp";
     public static final String DEFAULT_VISION_FRAME_SOURCE = VISION_FRAME_SOURCE_HAL;
+    public static final String VISION_OVERLAY_MECHANICAL = "mechanical";
+    public static final String VISION_OVERLAY_PLAIN = "plain";
+    public static final String DEFAULT_VISION_OVERLAY_STYLE = VISION_OVERLAY_MECHANICAL;
     public static final String LOC_SOURCE_OFF = "off";
     public static final String LOC_SOURCE_WIFI_IP = "wifi_ip";
     public static final String LOC_SOURCE_GPS_DIAG = "gps_diag";
@@ -336,6 +340,20 @@ public class Prefs {
 
     public static String visionFrameSourceLabel(Context c) {
         return VISION_FRAME_SOURCE_RTSP.equals(visionFrameSource(c)) ? "RTSP同源" : "HAL直出";
+    }
+
+    public static String normalizeVisionOverlayStyle(String v) {
+        return VISION_OVERLAY_PLAIN.equalsIgnoreCase(v)
+                ? VISION_OVERLAY_PLAIN : VISION_OVERLAY_MECHANICAL;
+    }
+
+    public static String visionOverlayStyle(Context c) {
+        return normalizeVisionOverlayStyle(get(c, K_VISION_OVERLAY_STYLE,
+                DEFAULT_VISION_OVERLAY_STYLE));
+    }
+
+    public static boolean visionOverlayMechanical(Context c) {
+        return VISION_OVERLAY_MECHANICAL.equals(visionOverlayStyle(c));
     }
 
     public static String normalizeMainRenderer(String v) {

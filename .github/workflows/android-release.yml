@@ -42,6 +42,17 @@ jobs:
         with:
           gradle-version: "8.14.5"
 
+      - name: Build boot animation module
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/bootanimation-tool release
+          app_version="$(sed -n 's/.*versionName "\([^"]*\)".*/\1/p' app/build.gradle | head -n 1)"
+          test -n "${app_version}"
+          javac -d build/bootanimation-tool tools/BootAnimationGenerator.java
+          java -Djava.awt.headless=true -cp build/bootanimation-tool \
+            BootAnimationGenerator release "${app_version}"
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
@@ -130,13 +141,13 @@ jobs:
           fi
 
           "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}/apksigner" verify --verbose "${signed_apk}"
-          (cd release && sha256sum *.apk > SHA256SUMS.txt)
+          (cd release && sha256sum *.apk *.zip *.jpg > SHA256SUMS.txt)
           ls -lh release
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: oracle-compass-release-apk
+          name: oracle-compass-release
           path: release/*
           retention-days: 30
 

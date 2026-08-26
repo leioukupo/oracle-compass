@@ -292,6 +292,8 @@ public class SettingsActivity extends BaseActivity {
 
     private void buildVision(LinearLayout b) {
         summaryRow(b, "画面源", Prefs.visionFrameSourceLabel(this), this::chooseVisionFrameSource);
+        summaryRow(b, "显示样式", Prefs.visionOverlayMechanical(this) ? "机械灵眼" : "纯净相机",
+                this::chooseVisionOverlayStyle);
         toggleRow(b, "灵眼自动感知", Prefs.K_VISION_ENABLED, true);
         int cur = Prefs.getI(this, Prefs.K_VISION_INTERVAL, 2);
         segmentedInt(b, "感知间隔", Prefs.K_VISION_INTERVAL, cur,
@@ -312,6 +314,22 @@ public class SettingsActivity extends BaseActivity {
                 })
                 .item((Prefs.VISION_FRAME_SOURCE_RTSP.equals(cur) ? "✓ " : "") + "RTSP同源", () -> {
                     Prefs.put(this, Prefs.K_VISION_FRAME_SOURCE, Prefs.VISION_FRAME_SOURCE_RTSP);
+                    selectCategory(cat);
+                })
+                .cancel()
+                .show();
+    }
+
+    private void chooseVisionOverlayStyle() {
+        String cur = Prefs.visionOverlayStyle(this);
+        new RoundDialog(this)
+                .title("灵眼显示样式")
+                .item((Prefs.VISION_OVERLAY_MECHANICAL.equals(cur) ? "✓ " : "") + "机械灵眼", () -> {
+                    Prefs.put(this, Prefs.K_VISION_OVERLAY_STYLE, Prefs.VISION_OVERLAY_MECHANICAL);
+                    selectCategory(cat);
+                })
+                .item((Prefs.VISION_OVERLAY_PLAIN.equals(cur) ? "✓ " : "") + "纯净相机", () -> {
+                    Prefs.put(this, Prefs.K_VISION_OVERLAY_STYLE, Prefs.VISION_OVERLAY_PLAIN);
                     selectCategory(cat);
                 })
                 .cancel()

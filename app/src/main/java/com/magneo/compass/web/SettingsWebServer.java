@@ -514,6 +514,7 @@ public class SettingsWebServer {
                 .append("<section class='panel' id='tab-vision'><div class='sectionTitle'><h2>视觉 / 摄像头</h2><small>默认折叠高开销推流预览</small></div><div class='cols'><div class='box'><h3>灵眼</h3>")
                 .append(rowInput("视觉间隔秒", "visionInterval", "text", "2"))
                 .append(rowSelect("灵眼画面源", "visionFrameSource", null, "<option value='hal'>HAL直出</option><option value='rtsp'>RTSP同源</option>", null))
+                .append(rowSelect("灵眼显示", "visionOverlayStyle", null, "<option value='mechanical'>机械灵眼</option><option value='plain'>纯净相机</option>", null))
                 .append("<h3 style='margin-top:16px'>显示性能</h3>")
                 .append(rowSelect("主屏渲染", "mainRenderer", null, "<option value='gl'>OpenGL</option><option value='canvas'>Canvas</option>", null))
                 .append(rowSelect("帧率策略", "mainFpsMode", null, "<option value='adaptive'>自适应</option><option value='power'>省电</option><option value='smooth'>流畅</option>", null))
@@ -757,6 +758,8 @@ public class SettingsWebServer {
                 + "<textarea name='sysPromptVision' style='width:calc(100% - 14px);height:80px;background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'></textarea>"
                 + "<div class='row'><label>灵眼画面源</label><select name='visionFrameSource' style='width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'>"
                 + "<option value='hal'>HAL直出</option><option value='rtsp'>RTSP同源</option></select></div>"
+                + "<div class='row'><label>灵眼显示</label><select name='visionOverlayStyle' style='width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'>"
+                + "<option value='mechanical'>机械灵眼</option><option value='plain'>纯净相机</option></select></div>"
                 + "<div class='row'><label>主屏渲染</label><select name='mainRenderer' style='width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'>"
                 + "<option value='gl'>OpenGL</option><option value='canvas'>Canvas</option></select></div>"
                 + "<div class='row'><label>帧率策略</label><select name='mainFpsMode' style='width:calc(100% - 130px);background:#171512;color:#e8dcc0;border:1px solid #6b5a2e;border-radius:8px;padding:6px'>"
@@ -1353,6 +1356,7 @@ public class SettingsWebServer {
             o.put("interactionMode", Prefs.interactionMode(app));
             o.put("visionInterval", String.valueOf(Prefs.getI(app, Prefs.K_VISION_INTERVAL, 2)));
             o.put("visionFrameSource", Prefs.visionFrameSource(app));
+            o.put("visionOverlayStyle", Prefs.visionOverlayStyle(app));
             o.put("vadEnabled", Prefs.vadEnabled(app));
             o.put("vadSensitivity", String.valueOf(Prefs.getI(app, Prefs.K_VAD_SENSITIVITY, 600)));
             int oracleShakeForce = oracleShakeForce();
@@ -1429,6 +1433,8 @@ public class SettingsWebServer {
                     } catch (Exception ignored) {}
                 } else if (k.equals(Prefs.K_VISION_FRAME_SOURCE)) {
                     Prefs.put(app, k, Prefs.normalizeVisionFrameSource(v));
+                } else if (k.equals(Prefs.K_VISION_OVERLAY_STYLE)) {
+                    Prefs.put(app, k, Prefs.normalizeVisionOverlayStyle(v));
                 } else if (k.equals(Prefs.K_MAIN_RENDERER)) {
                     Prefs.put(app, k, Prefs.normalizeMainRenderer(v));
                 } else if (k.equals(Prefs.K_MAIN_FPS_MODE)) {

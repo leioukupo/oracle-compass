@@ -8,6 +8,8 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
 import android.widget.Toast;
 
 import com.magneo.compass.browser.BrowserActivity;
@@ -28,6 +30,7 @@ import okhttp3.Call;
 public class MainActivity extends BaseActivity implements CompassView.Actions {
 
     private static volatile MainActivity activeMain;
+    private static boolean startupRevealShown;
 
     private CompassHostView view;
     private SensorHub hub;
@@ -82,7 +85,19 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
             }
         });
         view = new CompassHostView(this, hub, this);
-        setContentView(view);
+        if (!startupRevealShown && savedInstanceState == null) {
+            startupRevealShown = true;
+            FrameLayout root = new FrameLayout(this);
+            root.addView(view, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            StartupRevealView reveal = new StartupRevealView(this);
+            root.addView(reveal, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            setContentView(root);
+            reveal.start(() -> root.removeView(reveal));
+        } else {
+            setContentView(view);
+        }
         // GPS 硬件不可用时用系统网络/WiFi 定位兜底（每 30s 更新一次，onResume 启动）
         locator = new WifiLocator(this);
 

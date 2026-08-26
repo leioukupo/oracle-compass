@@ -20,6 +20,7 @@
 - 罗盘桌面：可注册为 HOME 桌面；外圈八区进入应用、网盘、设置、系统设置、音乐、灵眼、浏览和详情。
 - 传感器与诊断：显示方位、姿态、电量、磁力、GPS/卫星、光线、近距、气压等状态，并提供磁力校准和硬件诊断页。
 - AI 与占筮：支持 OpenAI 兼容的大模型端点，文字和视觉模型可分开配置；卦象可触发本地简解与 AI 解读播报。
+- 金色机械灵眼：摄像头画面叠加圆屏机械虹膜，使用颜色和运动区分聆听、思考、播报、定格与错误状态；点击中央可冻结当前画面继续问图。
 - 语音系统：支持 VAD 常驻监听、ASR/TTS 接口配置、本地 eSpeak NG 离线 TTS，并注册为系统 TTS 引擎。
 - 浏览与文件：内置圆屏 WebView，支持 FTP/WebDAV/SMB/NFS 网络文件浏览、下载、上传和流式播放。
 - 远程维护：内置网页设置服务，可查看配置和对话记录，并配合 ADB TCP、frpc、屏幕/摄像头推流做远程调试；ADB 守护会清理死连接并限频自愈。
@@ -51,7 +52,7 @@ git clone --depth 1 https://github.com/espeak-ng/espeak-ng.git third_party/espea
 - 推送到 `main` 或 `master`
 - 推送 `v*` 标签时自动创建 GitHub Release 并上传 APK
 
-默认会上传 release build type 的 unsigned APK，并在缺少签名 secrets 时额外生成 `app-release-ci-signed.apk` 便于安装测试。这个 CI 临时签名不适合作为长期升级签名；若要产出稳定的正式 signed APK，在仓库 `Settings -> Secrets and variables -> Actions` 中配置：
+默认会上传 release build type 的 unsigned APK、签名 APK、开机动画 Magisk 模块和 SHA256 校验文件，并在缺少签名 secrets 时生成 `app-release-ci-signed.apk` 便于安装测试。这个 CI 临时签名不适合作为长期升级签名；若要产出稳定的正式 signed APK，在仓库 `Settings -> Secrets and variables -> Actions` 中配置：
 
 - `ANDROID_KEYSTORE_BASE64`：release keystore 的 base64 内容
 - `ANDROID_KEYSTORE_PASSWORD`
@@ -59,6 +60,19 @@ git clone --depth 1 https://github.com/espeak-ng/espeak-ng.git third_party/espea
 - `ANDROID_KEY_PASSWORD`
 
 Action 会使用 `zipalign` 和 `apksigner` 签名，并显式启用 v1 签名以兼容 Android 5.1。
+
+## 金色机械开机动画
+
+Release 中的 `oracle-compass-bootanimation-v*.zip` 是为 C110001 / Android 5.1 制作的 Magisk 模块。它以 systemless 方式覆盖 `/system/media/bootanimation.zip`，不修改原厂文件；在 Magisk 中禁用或卸载模块即可恢复原动画。
+
+动画固定为 `800x800 / 12fps`，由 JDK 21 可复现生成：
+
+```bash
+javac -d build/bootanimation-tool tools/BootAnimationGenerator.java
+java -Djava.awt.headless=true -cp build/bootanimation-tool BootAnimationGenerator release 0.2.4
+```
+
+安装前应确认设备为 API 22 且已安装 Magisk。模块内也会执行同样的兼容性检查。
 
 ## 文档
 
