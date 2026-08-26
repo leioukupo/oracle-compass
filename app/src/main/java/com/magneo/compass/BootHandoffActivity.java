@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.Bundle;
 import android.os.Handler;
+import android.util.Log;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
@@ -16,12 +17,20 @@ import java.lang.reflect.Method;
 
 /** Lightweight window prepared behind bootanimation so the vendor keyguard never becomes visible. */
 public final class BootHandoffActivity extends Activity {
+    private static final String TAG = "BootHandoff";
     private static final String QUICK_BOOT = "android.intent.action.QUICKBOOT_POWERON";
+    private static final int MAX_KEYGUARD_POLLS = 50;
 
     private final Handler handler = new Handler();
+    private KeyguardManager keyguardManager;
     private KeyguardManager.KeyguardLock keyguardLock;
     private BroadcastReceiver bootReceiver;
     private boolean homeStarted;
+    private int keyguardPolls;
+
+    private final Runnable homePoll = new Runnable() {
+        @Override public void run() { openHome(); }
+    };
 
     private final Runnable bootPoll = new Runnable() {
         @Override public void run() {
@@ -46,6 +55,7 @@ public final class BootHandoffActivity extends Activity {
                         | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                         | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+        keyguardManager = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
         disableNonSecureKeyguard();
 
         StartupRevealView holdFrame = new StartupRevealView(this);
@@ -68,10 +78,11 @@ public final class BootHandoffActivity extends Activity {
     }
 
     private void disableNonSecureKeyguard() {
-        KeyguardManager keyguard = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
-        if (keyguard == null || keyguard.isKeyguardSecure()) return;
+        if (keyguardManager == null || keyguardManager.isKeyguardSecure()) return;
         try {
-            keyguardLock = keyguard.newKeyguardLock("OracleCompassBootHandoff");
+            if (keyguardLock == null) {
+                keyguardLock = keyguardManager.newKeyguardLock("OracleCompassBootHandoff");
+            }
             keyguardLock.disableKeyguard();
         } catch (Throwable ignored) {
             keyguardLock = null;
@@ -80,8 +91,21 @@ public final class BootHandoffActivity extends Activity {
 
     private void openHome() {
         if (homeStarted || isFinishing()) return;
+        disableNonSecureKeyguard();
+        boolean secure = keyguardManager != null && keyguardManager.isKeyguardSecure();
+        boolean locked = keyguardManager != null && keyguardManager.isKeyguardLocked();
+        if (!secure && locked && keyguardPolls < MAX_KEYGUARD_POLLS) {
+            if (keyguardPolls == 0) Log.i(TAG, "boot ready; waiting for non-secure keyguard");
+            keyguardPolls++;
+            handler.removeCallbacks(homePoll);
+            handler.postDelayed(homePoll, 100);
+            return;
+        }
+        Log.i(TAG, "opening HOME secure=" + secure + " locked=" + locked
+                + " polls=" + keyguardPolls);
         homeStarted = true;
         handler.removeCallbacks(bootPoll);
+        handler.removeCallbacks(homePoll);
         unregisterBootReceiver();
         Intent home = new Intent(this, MainActivity.class);
         home.setAction(Intent.ACTION_MAIN);
@@ -112,6 +136,7 @@ public final class BootHandoffActivity extends Activity {
 
     @Override protected void onDestroy() {
         handler.removeCallbacks(bootPoll);
+        handler.removeCallbacks(homePoll);
         unregisterBootReceiver();
         super.onDestroy();
     }

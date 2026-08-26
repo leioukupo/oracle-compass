@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory = $true)]
     [ValidatePattern('^[A-Za-z0-9._:-]+$')]
-    [string]$Serial = '103.40.14.100:47866',
+    [string]$Serial,
 
     [ValidateRange(5, 300)]
     [int]$IntervalSeconds = 15,

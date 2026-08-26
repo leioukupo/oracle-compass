@@ -11,10 +11,13 @@ import android.view.View;
 
 import com.magneo.compass.ui.Ui;
 
+import java.lang.reflect.Method;
+
 /** Short bridge from the final boot-animation frame into the live compass. */
 public final class StartupRevealView extends View {
     private static final long DURATION_MS = 1800;
     private static final long FOCUS_SETTLE_MS = 80;
+    private static final long BOOT_POLL_MS = 100;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path blade = new Path();
@@ -59,9 +62,23 @@ public final class StartupRevealView extends View {
         postDelayed(() -> {
             startPosted = false;
             if (!armed || !released || finished || startedAt != 0 || !hasWindowFocus()) return;
+            if (!bootAnimationStopped()) {
+                beginWhenVisible();
+                return;
+            }
             startedAt = SystemClock.uptimeMillis();
             invalidate();
-        }, FOCUS_SETTLE_MS);
+        }, bootAnimationStopped() ? FOCUS_SETTLE_MS : BOOT_POLL_MS);
+    }
+
+    private static boolean bootAnimationStopped() {
+        try {
+            Class<?> properties = Class.forName("android.os.SystemProperties");
+            Method get = properties.getMethod("get", String.class, String.class);
+            return !"running".equals(get.invoke(null, "init.svc.bootanim", "stopped"));
+        } catch (Throwable ignored) {
+            return true;
+        }
     }
 
     @Override protected void onDraw(Canvas canvas) {

@@ -277,7 +277,8 @@ public final class BootAnimationGenerator {
                 + "[ -f /system/media/bootanimation.zip ] || abort \"Original bootanimation.zip not found\"\n"
                 + "set_perm \"$MODPATH/system/media/bootanimation.zip\" 0 0 0644\n"
                 + "set_perm \"$MODPATH/post-fs-data.sh\" 0 0 0755\n"
-                + "set_perm \"$MODPATH/service.sh\" 0 0 0755\n";
+                + "set_perm \"$MODPATH/service.sh\" 0 0 0755\n"
+                + "set_perm \"$MODPATH/uninstall.sh\" 0 0 0755\n";
         String systemProp = "curlockscreen=0\n"
                 + "ro.lockscreen.disable.default=true\n";
         String postFsData = "#!/system/bin/sh\n"
@@ -287,21 +288,38 @@ public final class BootAnimationGenerator {
         String service = "#!/system/bin/sh\n"
                 + "i=0\n"
                 + "bridge=0\n"
+                + "unlock_attempts=0\n"
+                + "boot_log=/data/local/oracle-compass-boot.log\n"
+                + ": > \"$boot_log\"\n"
+                + "echo \"service start\" >> \"$boot_log\"\n"
                 + "settings put secure lockscreen.disabled 1\n"
-                + "while [ \"$(getprop sys.boot_completed)\" != \"1\" ] && [ \"$i\" -lt 120 ]; do\n"
+                + "while [ \"$(getprop sys.boot_completed)\" != \"1\" ] && [ \"$i\" -lt 600 ]; do\n"
                 + "  resetprop -n curlockscreen 0\n"
                 + "  resetprop -n ro.lockscreen.disable.default true\n"
                 + "  if [ \"$bridge\" = \"0\" ]; then\n"
+                + "    pm disable fr.neamar.kiss/.MainActivity >/dev/null 2>&1\n"
+                + "    pm disable com.android.launcher3/.Launcher >/dev/null 2>&1\n"
                 + "    am start -a android.intent.action.MAIN -f 0x04000000 "
                 + "-n com.magneo.compass/.BootHandoffActivity >/dev/null 2>&1\n"
                 + "    if dumpsys activity activities | grep -q 'com.magneo.compass/.BootHandoffActivity'; then\n"
                 + "      bridge=1\n"
+                + "      echo \"handoff activity ready\" >> \"$boot_log\"\n"
                 + "    fi\n"
                 + "  fi\n"
-                + "  sleep 1\n"
+                + "  policy=\"$(dumpsys window policy 2>/dev/null)\"\n"
+                + "  if echo \"$policy\" | grep -q 'mScreenOnEarly=true' && [ \"$unlock_attempts\" -lt 3 ]; then\n"
+                + "    input keyevent 82 >/dev/null 2>&1\n"
+                + "    input swipe 400 760 400 120 250 >/dev/null 2>&1\n"
+                + "    unlock_attempts=$((unlock_attempts + 1))\n"
+                + "    echo \"unlock attempt $unlock_attempts\" >> \"$boot_log\"\n"
+                + "  fi\n"
+                + "  sleep 0.2\n"
                 + "  i=$((i + 1))\n"
                 + "done\n"
                 + "settings put secure lockscreen.disabled 1\n"
+                + "input keyevent 82 >/dev/null 2>&1\n"
+                + "input swipe 400 760 400 120 250 >/dev/null 2>&1\n"
+                + "echo \"boot complete; final unlock\" >> \"$boot_log\"\n"
                 + "am start -a android.intent.action.MAIN -c android.intent.category.HOME "
                 + "-f 0x04000000 -n com.magneo.compass/.MainActivity >/dev/null 2>&1\n"
                 + "j=0\n"
@@ -312,13 +330,20 @@ public final class BootAnimationGenerator {
                 + "  fi\n"
                 + "  sleep 1\n"
                 + "  j=$((j + 1))\n"
-                + "done\n";
+                + "done\n"
+                + "dumpsys window policy | grep -E 'mScreenOn|mShowingLockscreen' >> \"$boot_log\" 2>&1\n"
+                + "dumpsys window windows | grep -E 'mCurrentFocus|mFocusedApp' >> \"$boot_log\" 2>&1\n";
+        String uninstall = "#!/system/bin/sh\n"
+                + "pm enable fr.neamar.kiss/.MainActivity >/dev/null 2>&1\n"
+                + "pm enable com.android.launcher3/.Launcher >/dev/null 2>&1\n"
+                + "settings put secure lockscreen.disabled 0\n";
         try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(output))) {
             putDeflated(zip, "module.prop", moduleProp.getBytes(StandardCharsets.UTF_8));
             putDeflated(zip, "customize.sh", customize.getBytes(StandardCharsets.UTF_8));
             putDeflated(zip, "system.prop", systemProp.getBytes(StandardCharsets.US_ASCII));
             putDeflated(zip, "post-fs-data.sh", postFsData.getBytes(StandardCharsets.US_ASCII));
             putDeflated(zip, "service.sh", service.getBytes(StandardCharsets.US_ASCII));
+            putDeflated(zip, "uninstall.sh", uninstall.getBytes(StandardCharsets.US_ASCII));
             putDeflated(zip, "system/media/bootanimation.zip", bootZip);
         }
     }

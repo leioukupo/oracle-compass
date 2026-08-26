@@ -65,7 +65,7 @@ Action 会使用 `zipalign` 和 `apksigner` 签名，并显式启用 v1 签名�
 
 ## 金色机械开机动画
 
-Release 中的 `oracle-compass-bootanimation-v*.zip` 是为 C110001 / Android 5.1 制作的 Magisk 模块。它以 systemless 方式覆盖 `/system/media/bootanimation.zip`，覆盖该 ROM 的 `curlockscreen=1` 厂商属性，并在开机完成时直接拉起真理罗盘 HOME；不修改原厂文件，在 Magisk 中禁用或卸载模块即可恢复原动画和原厂锁屏行为。
+Release 中的 `oracle-compass-bootanimation-v*.zip` 是为 C110001 / Android 5.1 制作的 Magisk 模块。它以 systemless 方式覆盖 `/system/media/bootanimation.zip`，覆盖该 ROM 的 `curlockscreen=1` 厂商属性，并在开机完成时直接拉起真理罗盘 HOME。为避免系统 HOME 选择器打断衔接，模块只禁用 KISS 和原厂 Launcher3 的 HOME Activity，不卸载对应应用；卸载模块时会自动恢复这些 Activity 和滑动锁。
 
 动画固定为 `800x800 / 12fps`：前段 70 帧完成机械眼展开，末段 36 帧以 3 秒周期持续扫描和呼吸，直到系统完成 HOME 交接。由 JDK 21 可复现生成：
 
@@ -86,9 +86,13 @@ su -c 'settings put secure lockscreen.disabled 1'
 
 ```bash
 su -c 'settings put secure lockscreen.disabled 0'
+su -c 'pm enable fr.neamar.kiss/.MainActivity'
+su -c 'pm enable com.android.launcher3/.Launcher'
 ```
 
-真理罗盘作为默认 HOME 时会在开机广播后主动回到主屏；如果系统存在安全凭据，应用不会尝试绕过安全锁屏。
+如果只是停用而不是卸载 Magisk 模块，需要手动执行上面的三条恢复命令。真理罗盘作为唯一 HOME 时会在开机广播后主动回到主屏；如果系统存在安全凭据，应用不会尝试绕过安全锁屏。
+
+模块每次启动会覆盖写入 `/data/local/oracle-compass-boot.log`，记录衔接页启动、无密码滑动锁解除和最终前台窗口，便于排查厂商锁屏再次抢焦点的问题。
 
 ## 文档
 
