@@ -73,7 +73,7 @@ Release 中的 `oracle-compass-bootanimation-v*.zip` 是为 C110001 / Android 5.
 
 ```bash
 javac -d build/bootanimation-tool tools/BootAnimationGenerator.java
-java -Djava.awt.headless=true -cp build/bootanimation-tool BootAnimationGenerator release 0.2.4
+java -Djava.awt.headless=true -cp build/bootanimation-tool BootAnimationGenerator release 0.2.5
 ```
 
 安装前应确认设备为 API 22 且已安装 Magisk。模块内也会执行同样的兼容性检查。

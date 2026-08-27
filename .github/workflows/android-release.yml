@@ -2,6 +2,17 @@ name: Android Release
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Build and publish a GitHub Release"
+        required: true
+        type: boolean
+        default: true
+      release_tag:
+        description: "Release tag; blank uses v<versionName>"
+        required: false
+        type: string
+        default: ""
   push:
     branches:
       - main
@@ -29,6 +40,46 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        id: release_meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_PUBLISH: ${{ inputs.publish_release }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          app_version="$(sed -n 's/.*versionName "\([^"]*\)".*/\1/p' app/build.gradle | head -n 1)"
+          test -n "${app_version}"
+
+          publish=false
+          tag=""
+          if [[ "${REF_TYPE}" == "tag" ]]; then
+            publish=true
+            tag="${REF_NAME}"
+          elif [[ "${EVENT_NAME}" == "workflow_dispatch" && "${INPUT_PUBLISH}" == "true" ]]; then
+            publish=true
+            tag="${INPUT_TAG:-v${app_version}}"
+          fi
+
+          if [[ "${publish}" == "true" ]]; then
+            [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+              echo "Invalid release tag: ${tag}" >&2
+              exit 2
+            }
+            if [[ "${tag}" != "v${app_version}" && "${tag}" != "v${app_version}-"* ]]; then
+              echo "Release tag ${tag} does not match app version ${app_version}" >&2
+              exit 3
+            fi
+          fi
+
+          echo "app_version=${app_version}" >> "${GITHUB_OUTPUT}"
+          echo "publish=${publish}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved app_version=${app_version}, publish=${publish}, tag=${tag:-none}"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -84,7 +135,11 @@ jobs:
           gradle --no-daemon clean assembleRelease
 
       - name: Collect and sign APK
+        id: sign_apk
         shell: bash
+        env:
+          PUBLISH_RELEASE: ${{ steps.release_meta.outputs.publish }}
+          APP_VERSION: ${{ steps.release_meta.outputs.app_version }}
         run: |
           set -euo pipefail
           mkdir -p release
@@ -111,10 +166,14 @@ jobs:
               --key-pass "pass:${ANDROID_KEY_PASSWORD}" \
               --v1-signing-enabled true \
               --v2-signing-enabled true \
-              --out release/app-release-signed.apk \
+              --out "release/oracle-compass-v${APP_VERSION}.apk" \
               "${aligned_apk}"
-            signed_apk="release/app-release-signed.apk"
+            signed_apk="release/oracle-compass-v${APP_VERSION}.apk"
           else
+            if [[ "${PUBLISH_RELEASE}" == "true" ]]; then
+              echo "Production Android signing secrets are required to publish a Release." >&2
+              exit 2
+            fi
             echo "Release signing secrets are incomplete; generating a temporary CI signing key."
             keystore="${RUNNER_TEMP}/ci-release.keystore"
             aligned_apk="${RUNNER_TEMP}/app-release-ci-aligned.apk"
@@ -138,13 +197,22 @@ jobs:
               --key-pass "pass:android" \
               --v1-signing-enabled true \
               --v2-signing-enabled true \
-              --out release/app-release-ci-signed.apk \
+              --out "release/oracle-compass-v${APP_VERSION}-ci.apk" \
               "${aligned_apk}"
-            signed_apk="release/app-release-ci-signed.apk"
+            signed_apk="release/oracle-compass-v${APP_VERSION}-ci.apk"
           fi
 
           "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}/apksigner" verify --verbose "${signed_apk}"
-          (cd release && sha256sum *.apk *.zip *.jpg > SHA256SUMS.txt)
+          echo "signed_apk=${signed_apk}" >> "${GITHUB_OUTPUT}"
+          (
+            cd release
+            sha256sum \
+              "$(basename "${signed_apk}")" \
+              oracle-compass-bootanimation-v*.zip \
+              oracle-compass-bootanimation-preview.jpg \
+              oracle-compass-first-frame.jpg \
+              > SHA256SUMS.txt
+          )
           ls -lh release
 
       - name: Upload release artifact
@@ -155,7 +223,17 @@ jobs:
           retention-days: 30
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        if: steps.release_meta.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2.6.2
         with:
-          files: release/*
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Oracle Compass ${{ steps.release_meta.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            ${{ steps.sign_apk.outputs.signed_apk }}
+            release/oracle-compass-bootanimation-v*.zip
+            release/oracle-compass-bootanimation-preview.jpg
+            release/oracle-compass-first-frame.jpg
+            release/SHA256SUMS.txt
