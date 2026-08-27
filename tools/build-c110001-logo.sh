@@ -24,13 +24,17 @@ verified="$work/verified"
 mkdir -p "$unpacked" "$verified"
 
 "$mtklogo" unpack --config "$profile" --profile c110001 \
-  --slots 0 --output "$unpacked" "$stock_logo" >/dev/null
+  --slots 0,38 --output "$unpacked" "$stock_logo" >/dev/null
 
-slot="$unpacked/logo_000_rgbabe.png"
-test -s "$slot" || { echo "slot 0 did not decode as 800x800 rgbabe" >&2; exit 4; }
-
-ffmpeg -hide_banner -loglevel error -y -i "$first_frame" \
-  -vf "scale=800:800:flags=lanczos,format=rgba" "$slot"
+for slot_number in 000 038; do
+  slot="$unpacked/logo_${slot_number}_rgbabe.png"
+  test -s "$slot" || {
+    echo "slot $((10#$slot_number)) did not decode as 800x800 rgbabe" >&2
+    exit 4
+  }
+  ffmpeg -hide_banner -loglevel error -y -i "$first_frame" \
+    -vf "scale=800:800:flags=lanczos,format=rgba" "$slot"
+done
 
 mapfile -t inputs < <(find "$unpacked" -maxdepth 1 -type f \
   \( -name 'logo_*.png' -o -name 'logo_*_raw.z' \) | sort)
@@ -50,13 +54,25 @@ cp "$work/repacked.bin" "$output_logo"
 truncate -s "$stock_size" "$output_logo"
 
 "$mtklogo" unpack --config "$profile" --profile c110001 \
-  --slots 0 --output "$verified" "$output_logo" >/dev/null
-test -s "$verified/logo_000_rgbabe.png" || {
-  echo "round-trip slot 0 decode failed" >&2
-  exit 7
-}
+  --slots 0,38 --output "$verified" "$output_logo" >/dev/null
+for slot_number in 000 038; do
+  before="$unpacked/logo_${slot_number}_rgbabe.png"
+  after="$verified/logo_${slot_number}_rgbabe.png"
+  test -s "$before" && test -s "$after" || {
+    echo "round-trip target slot missing: $((10#$slot_number))" >&2
+    exit 7
+  }
+  before_hash=$(ffmpeg -hide_banner -loglevel error -i "$before" \
+    -f framemd5 - | awk -F ', ' 'END { print $NF }')
+  after_hash=$(ffmpeg -hide_banner -loglevel error -i "$after" \
+    -f framemd5 - | awk -F ', ' 'END { print $NF }')
+  test -n "$before_hash" && test "$before_hash" = "$after_hash" || {
+    echo "round-trip target slot changed: $((10#$slot_number))" >&2
+    exit 7
+  }
+done
 
-for n in $(seq 1 38); do
+for n in $(seq 1 37); do
   i=$(printf '%03d' "$n")
   before="$unpacked/logo_${i}_raw.z"
   after="$verified/logo_${i}_raw.z"
