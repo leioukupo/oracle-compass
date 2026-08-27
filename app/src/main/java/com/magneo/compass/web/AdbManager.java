@@ -19,6 +19,7 @@ public class AdbManager {
     private static final int DEFAULT_PORT = 5555;
     private static final int FAILURE_THRESHOLD = 2;
     private static final int STALE_SOCKET_THRESHOLD = 2;
+    private static final int MAX_ADB_CONNECTIONS = 6;
     private static final long RECOVERY_COOLDOWN_MS = 180000L;
     private static final long CHECK_FRESH_MS = 90000L;
     private static final Object LOCK = new Object();
@@ -168,9 +169,9 @@ public class AdbManager {
             }
 
             TcpSocketStats sockets = tcpSocketStats(checkedPort);
-            boolean stale = sockets.closeWait >= 3
+            boolean stale = sockets.closeWait >= 2
                     || sockets.stuck >= STALE_SOCKET_THRESHOLD
-                    || sockets.established + sockets.closeWait >= 16;
+                    || sockets.established + sockets.closeWait >= MAX_ADB_CONNECTIONS;
             boolean healthy = !stale;
             int failures;
             synchronized (HEALTH_LOCK) {
@@ -212,6 +213,10 @@ public class AdbManager {
             return msg;
         }
         return startPort(port, "watchdog: " + reason);
+    }
+
+    public static long lastRecoveryAt() {
+        return lastRecoveryAt;
     }
 
     private static String startPort(int port, String reason) throws Exception {

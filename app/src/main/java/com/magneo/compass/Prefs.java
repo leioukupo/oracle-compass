@@ -104,12 +104,16 @@ public class Prefs {
     public static final String K_MCP_SLOW_HINT_PHRASES = "mcpSlowHintPhrases";
     public static final String K_DEBUG_MODE = "debugMode";
     public static final String K_DEBUG_MAX_KB = "debugMaxKb";
+    public static final String K_ROOT_GRANT_NOTIFICATIONS = "rootGrantNotifications";
+    public static final String K_SYSTEM_LOCKSCREEN_ENABLED = "systemLockscreenEnabled";
     public static final String DEFAULT_LOC_WIFI_URL = "";
     public static final String DEFAULT_LOC_IP_URL = "http://ip-api.com/json/?fields=status,lat,lon,query,city,regionName,country,isp";
     public static final String DEFAULT_SYS_PROMPT_VOICE = "你是真理罗盘助手，回答简洁，中文回复。";
     public static final String DEFAULT_SYS_PROMPT_VISION = "你是圆屏设备“真理罗盘”的视觉感知模块。看图后用中文简述你看到的环境（物体/人/光线/场景），若与上一帧相比有明显变化，指出变化；若没有变化就说“无明显变化”。一句话即可。";
     public static final String DEFAULT_REASONING_EFFORT = "auto";
     public static final boolean DEFAULT_VAD_ENABLED = true;
+    public static final boolean DEFAULT_ROOT_GRANT_NOTIFICATIONS = false;
+    public static final boolean DEFAULT_SYSTEM_LOCKSCREEN_ENABLED = false;
     public static final String VISION_FRAME_SOURCE_HAL = "hal";
     public static final String VISION_FRAME_SOURCE_RTSP = "rtsp";
     public static final String DEFAULT_VISION_FRAME_SOURCE = VISION_FRAME_SOURCE_HAL;
@@ -179,6 +183,14 @@ public class Prefs {
         }
     }
     public static boolean vadEnabled(Context c) { return getB(c, K_VAD_ENABLED, DEFAULT_VAD_ENABLED); }
+
+    public static boolean rootGrantNotifications(Context c) {
+        return getB(c, K_ROOT_GRANT_NOTIFICATIONS, DEFAULT_ROOT_GRANT_NOTIFICATIONS);
+    }
+
+    public static boolean systemLockscreenEnabled(Context c) {
+        return getB(c, K_SYSTEM_LOCKSCREEN_ENABLED, DEFAULT_SYSTEM_LOCKSCREEN_ENABLED);
+    }
 
     public static boolean mcpEnabled(Context c) {
         return getB(c, K_MCP_ENABLED, false);

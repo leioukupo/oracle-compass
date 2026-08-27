@@ -22,6 +22,8 @@ import com.magneo.compass.voice.LocalTts;
 import com.magneo.compass.voice.VadService;
 import com.magneo.compass.voice.VoiceController;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -38,6 +40,11 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     private VoiceController voice;
     private WifiLocator locator;
     private KeyguardManager.KeyguardLock keyguardLock;
+    private boolean startupRevealActive;
+    private boolean bootHandoffReadyWritten;
+    private int bootHandoffReadyAttempts;
+    private final Runnable settleKeyguardWindow = this::settleSeamlessKeyguardWindow;
+    private final Runnable bootHandoffReadySignal = this::signalBootHandoffReady;
     private Call oracleCall;
     private long oracleUiUpdateMs = 0;
     private final Handler uiTicker = new Handler();
@@ -54,10 +61,12 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         QuitFix.apply(this);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        Prefs.restoreBackupIfPresent(this);
         configureSeamlessKeyguard();
         hideSystemUi();
 
-        Prefs.restoreBackupIfPresent(this);
+        RootGrantNotificationManager.applySaved(this);
+        SystemLockscreenManager.applySavedAsync(this);
         if (Prefs.get(this, Prefs.K_PROVIDER, "").isEmpty()) {
             ProviderConfig.apply(this, ProviderConfig.openaiCompatible());
         }
@@ -90,17 +99,29 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         view = new CompassHostView(this, hub, this);
         if (!startupRevealShown && savedInstanceState == null) {
             startupRevealShown = true;
+            startupRevealActive = true;
             FrameLayout root = new FrameLayout(this);
             root.addView(view, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             StartupRevealView reveal = new StartupRevealView(this);
+            reveal.setOnFirstDraw(() -> getWindow().getDecorView()
+                    .postDelayed(bootHandoffReadySignal, 80));
             root.addView(reveal, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             setContentView(root);
-            reveal.start(() -> root.removeView(reveal));
+            reveal.start(() -> {
+                root.removeView(reveal);
+                startupRevealActive = false;
+                settleSeamlessKeyguardWindow();
+            });
         } else {
             setContentView(view);
         }
+        // This MTK build does not draw app windows while bootanimation is on top, so an
+        // onDraw-only readiness callback deadlocks with the module waiting for the marker.
+        // Reaching this point means the complete HOME hierarchy is installed on the UI
+        // thread; release bootanimation shortly afterwards, then run the reveal on focus.
+        getWindow().getDecorView().postDelayed(bootHandoffReadySignal, 180);
         // GPS 硬件不可用时用系统网络/WiFi 定位兜底（每 30s 更新一次，onResume 启动）
         locator = new WifiLocator(this);
 
@@ -136,12 +157,21 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     }
 
     private void configureSeamlessKeyguard() {
-        KeyguardManager keyguard = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
-        if (keyguard != null && keyguard.isKeyguardSecure()) {
+        if (Prefs.systemLockscreenEnabled(this)) {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                    | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
+            if (keyguardLock != null) {
+                try { keyguardLock.reenableKeyguard(); } catch (Throwable ignored) {}
+                keyguardLock = null;
+            }
             return;
         }
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                 | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
+        KeyguardManager keyguard = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+        if (keyguard != null && keyguard.isKeyguardSecure()) {
+            return;
+        }
         try {
             keyguardLock = keyguard.newKeyguardLock("OracleCompassHome");
             keyguardLock.disableKeyguard();
@@ -151,11 +181,54 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     }
 
     private void dismissSeamlessKeyguard() {
+        if (Prefs.systemLockscreenEnabled(this)) return;
         if (keyguardLock == null) return;
         try {
             keyguardLock.disableKeyguard();
         } catch (Throwable ignored) {
             // A vendor keyguard may reject the deprecated API after boot.
+        }
+    }
+
+    private void settleSeamlessKeyguardWindow() {
+        if (isFinishing()) return;
+        // FLAG_DISMISS_KEYGUARD is only needed for the boot handoff. Keeping it forever makes
+        // this MTK SystemUI emit keyguard-done hundreds of times per second.
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
+    }
+
+    private void signalBootHandoffReady() {
+        if (bootHandoffReadyWritten || isFinishing()) return;
+        View decor = getWindow().getDecorView();
+        KeyguardManager keyguard = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+        boolean secure = keyguard != null && keyguard.isKeyguardSecure();
+        boolean locked = keyguard != null && keyguard.isKeyguardLocked();
+        boolean systemLockscreenEnabled = Prefs.systemLockscreenEnabled(this);
+        // The bootanimation window owns focus until this marker releases it. The installed
+        // HOME hierarchy is the readiness signal; waiting for focus, draw, or boot-complete
+        // here would create a circular handoff on this Android 5.1 MTK build.
+        if (!systemLockscreenEnabled && secure) {
+            dismissSeamlessKeyguard();
+            if (++bootHandoffReadyAttempts < 400) {
+                decor.postDelayed(bootHandoffReadySignal, 50);
+            } else {
+                logAuto("boot handoff marker timed out: secure=" + secure
+                        + " locked=" + locked);
+            }
+            return;
+        }
+        File marker = new File(getFilesDir(), "boot-handoff-ready");
+        try (FileOutputStream output = new FileOutputStream(marker, false)) {
+            output.write('1');
+            output.flush();
+            bootHandoffReadyWritten = true;
+            logAuto("boot handoff main frame ready: locked=" + locked);
+        } catch (Exception e) {
+            if (++bootHandoffReadyAttempts < 400) {
+                decor.postDelayed(bootHandoffReadySignal, 100);
+            } else {
+                logAuto("boot handoff marker write failed: " + e);
+            }
         }
     }
 
@@ -172,8 +245,12 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         uiTicker.post(uiTick);
         if (voice != null) voice = VoiceController.get(this, this::setMainVoiceStatus);
         syncVoiceServiceFromPrefs();
+        configureSeamlessKeyguard();
         dismissSeamlessKeyguard();
         hideSystemUi();
+        View decor = getWindow().getDecorView();
+        decor.removeCallbacks(settleKeyguardWindow);
+        if (!startupRevealActive) decor.postDelayed(settleKeyguardWindow, 500);
     }
 
     @Override
@@ -190,6 +267,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
 
     @Override
     protected void onDestroy() {
+        getWindow().getDecorView().removeCallbacks(bootHandoffReadySignal);
         uiTicker.removeCallbacks(uiTick);
         if (locator != null) locator.stop();
         cancelOracleAi();
@@ -203,6 +281,17 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         if (a == null) return;
         a.runOnUiThread(new Runnable() {
             @Override public void run() { a.applyLocationPrefs(); }
+        });
+    }
+
+    public static void applySystemLockscreenPrefToActive() {
+        final MainActivity activity = activeMain;
+        if (activity == null) return;
+        activity.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                activity.configureSeamlessKeyguard();
+                activity.hideSystemUi();
+            }
         });
     }
 

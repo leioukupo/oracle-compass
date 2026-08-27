@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "device": "C110001",
+  "androidApi": 22,
+  "capturedAtUtc": "2026-08-27T20:21:49Z",
+  "logo": {
+    "file": "logo-original.bin.gz",
+    "rawBytes": 8388608,
+    "rawSha256": "fb4bae839ce9c269730217a9658dc925da04f56e3024764ef57af5343fadf7a1",
+    "gzipBytes": 1252538,
+    "gzipSha256": "35345e84d42f654065f007ed4b9344689777981690cb17940038ba89fffedcb5"
+  },
+  "bootanimation": {
+    "file": "bootanimation-original.zip",
+    "bytes": 3059585,
+    "sha256": "bedeb24b80f14a2f80527f5f55b85fe95a3e6c04f5c079aeff7e4f632a034f21",
+    "source": "Magisk mirror of stock \/system\/media\/bootanimation.zip"
+  }
+}

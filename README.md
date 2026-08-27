@@ -65,9 +65,11 @@ Action 会使用 `zipalign` 和 `apksigner` 签名，并显式启用 v1 签名�
 
 ## 金色机械开机动画
 
-Release 中的 `oracle-compass-bootanimation-v*.zip` 是为 C110001 / Android 5.1 制作的 Magisk 模块。它以 systemless 方式覆盖 `/system/media/bootanimation.zip`，覆盖该 ROM 的 `curlockscreen=1` 厂商属性，并在开机完成时直接拉起真理罗盘 HOME。为避免系统 HOME 选择器打断衔接，模块只禁用 KISS 和原厂 Launcher3 的 HOME Activity，不卸载对应应用；卸载模块时会自动恢复这些 Activity 和滑动锁。
+Release 中的 `oracle-compass-bootanimation-v*.zip` 是为 C110001 / Android 5.1 制作的 Magisk 模块。它以 systemless 方式覆盖 `/system/media/bootanimation.zip`，覆盖该 ROM 的 `curlockscreen=1` 厂商属性，并在开机动画仍覆盖屏幕时预加载真理罗盘 HOME。为避免系统 HOME 选择器打断衔接，模块只禁用 KISS 和原厂 Launcher3 的 HOME Activity，不卸载对应应用；卸载模块时会自动恢复这些 Activity 和滑动锁。
 
-动画固定为 `800x800 / 12fps`：前段 70 帧完成机械眼展开，末段 36 帧以 3 秒周期持续扫描和呼吸，直到系统完成 HOME 交接。由 JDK 21 可复现生成：
+动画固定为 `800x800 / 12fps`：前段 64 帧依次点亮核心、建立三层圆环并展开莲座花冠；大、中、小三层各 12 片花瓣并依次错开 `10°`，形成连续交错的莲座，外层加宽长瓣紧贴花冠边界，所有花瓣都从护心圆下方展开。花瓣从静止平滑加速，开场末帧的位置和角速度都与循环首帧衔接。花冠外侧增加一圈由真实三爻组成的八卦，以独立反向速度旋转。末段 36 帧让八卦、大中小花瓣和等距机械刻度持续差速转动；花瓣按 `30°`、八卦按 `45°` 对称周期闭合，因此首尾无跳帧且交错关系持续变化。root 启动脚本会保持开机动画，直到主页面首帧绘制完成且非安全锁屏已解除，再释放动画；随后莲花用约 950ms 收束淡出。画面只使用黑金色，启动脚本不注入按键或滑动事件。由 JDK 21 可复现生成：
+
+启动模块不再通过 root 注入按键或滑动事件；非安全锁屏由系统设置和 App 窗口标志处理，避免低端设备启动阶段因并发 `input` 调用卡住。启动阶段会主动开启 Wi-Fi，App 随后扫描系统已保存且当前可见的网络，并连接信号最强的一项；离线时每 5 秒重试，联网后降为每 30 秒健康检查。
 
 ```bash
 javac -d build/bootanimation-tool tools/BootAnimationGenerator.java
@@ -76,16 +78,17 @@ java -Djava.awt.headless=true -cp build/bootanimation-tool BootAnimationGenerato
 
 安装前应确认设备为 API 22 且已安装 Magisk。模块内也会执行同样的兼容性检查。
 
-专用设备如需让开机动画直接衔接真理罗盘，可在确认系统未设置 PIN、图案或密码后，使用 root 关闭仅上滑的锁屏（当前设备已应用）：
+专用设备如需让开机动画直接衔接真理罗盘，在 Web 控制台 `FRP / ADB` 中关闭“启用系统锁屏”。实现会写入 Android 5.1 的 `LockSettingsService`，并保留 MTK 属性兼容层；如果检测到 PIN、图案或密码，会拒绝关闭。命令行诊断可直接调用 Binder：
 
 ```bash
-su -c 'settings put secure lockscreen.disabled 1'
+su -c "service call lock_settings 1 s16 lockscreen.disabled i32 1 i32 0"
+su -c "service call lock_settings 4 s16 lockscreen.disabled i32 0 i32 0"
 ```
 
 需要恢复上滑锁屏时执行：
 
 ```bash
-su -c 'settings put secure lockscreen.disabled 0'
+su -c "service call lock_settings 1 s16 lockscreen.disabled i32 0 i32 0"
 su -c 'pm enable fr.neamar.kiss/.MainActivity'
 su -c 'pm enable com.android.launcher3/.Launcher'
 ```
@@ -93,6 +96,8 @@ su -c 'pm enable com.android.launcher3/.Launcher'
 如果只是停用而不是卸载 Magisk 模块，需要手动执行上面的三条恢复命令。真理罗盘作为唯一 HOME 时会在开机广播后主动回到主屏；如果系统存在安全凭据，应用不会尝试绕过安全锁屏。
 
 模块每次启动会覆盖写入 `/data/local/oracle-compass-boot.log`，记录衔接页启动、无密码滑动锁解除和最终前台窗口，便于排查厂商锁屏再次抢焦点的问题。
+
+Web 控制台 `记录 / 备份 -> 启动资源` 提供受限的 MTK 启动资源维护：从真实 `logo` 分区和 Magisk mirror 创建原厂备份、下载校验文件、上传完整 `logo.bin`、按预期 SHA 刷写或恢复。刷写要求电量超过 50% 或正在充电，并会整分区回读校验；接口不提供任意 Root 命令。设备原厂资源的仓库布局和恢复说明见 [device-backups/C110001/README.md](device-backups/C110001/README.md)。
 
 ## 文档
 

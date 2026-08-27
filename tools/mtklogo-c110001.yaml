@@ -1,0 +1,6 @@
+version: "1.1"
+profiles:
+  - name: c110001
+    color_model: rgbabe
+    formats:
+      - { w: 800, h: 800, t: "C110001 round display" }

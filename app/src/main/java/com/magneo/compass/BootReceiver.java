@@ -14,6 +14,13 @@ public class BootReceiver extends BroadcastReceiver {
         String action = intent == null ? "" : intent.getAction();
         if (!Intent.ACTION_BOOT_COMPLETED.equals(action)
                 && !"android.intent.action.QUICKBOOT_POWERON".equals(action)) return;
+        RootGrantNotificationManager.applySaved(context);
+        SystemLockscreenManager.applySavedAsync(context);
+        try {
+            SavedWifiAutoConnector.ensureConnected(context);
+        } catch (Throwable t) {
+            Log.w(TAG, "Unable to restore saved WiFi after boot", t);
+        }
         try {
             Intent home = new Intent(context, MainActivity.class);
             home.setAction(Intent.ACTION_MAIN);

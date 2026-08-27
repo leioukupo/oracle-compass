@@ -52,6 +52,9 @@ jobs:
           javac -d build/bootanimation-tool tools/BootAnimationGenerator.java
           java -Djava.awt.headless=true -cp build/bootanimation-tool \
             BootAnimationGenerator release "${app_version}"
+          module="$(find release -maxdepth 1 -type f -name 'oracle-compass-bootanimation-v*.zip' -print -quit)"
+          test -s "${module}"
+          cp "${module}" app/src/main/assets/oracle-compass-bootanimation.zip
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3

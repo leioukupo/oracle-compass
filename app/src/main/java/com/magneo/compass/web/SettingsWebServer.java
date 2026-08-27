@@ -139,7 +139,9 @@ public class SettingsWebServer {
             String method = req.method;
             String path = req.path;
             String body = "";
-            if (method.equals("POST") && req.contentLength > 0 && !path.equals("/appmgr/upload")) {
+            boolean rawUpload = path.equals("/appmgr/upload")
+                    || path.equals("/boot-assets/upload-logo");
+            if (method.equals("POST") && req.contentLength > 0 && !rawUpload) {
                 body = readBodyString(in, req.contentLength, 512 * 1024);
             }
 
@@ -237,9 +239,47 @@ public class SettingsWebServer {
                 if (!authed) serveJson(out, appMgrAuthError());
                 else serveJson(out, AppManager.install(app));
             }
+            else if (path.equals("/appmgr/install-boot-module")) {
+                if (!authed) serveJson(out, appMgrAuthError());
+                else serveJson(out, AppManager.installBootModule(app));
+            }
+            else if (path.equals("/device/reboot")) {
+                if (!authed) serveJson(out, appMgrAuthError());
+                else serveJson(out, AppManager.reboot(app, body));
+            }
             else if (path.equals("/appmgr/uninstall")) {
                 if (!authed) serveJson(out, appMgrAuthError());
                 else serveJson(out, AppManager.uninstall(app, body));
+            }
+            else if (path.equals("/boot-assets/status")) {
+                if (!requireAuth(out, authed)) return;
+                serveJson(out, BootAssetsManager.status(app));
+            }
+            else if (path.equals("/boot-assets/backup")) {
+                if (!requireAuth(out, authed)) return;
+                serveJson(out, BootAssetsManager.backup(app));
+            }
+            else if (path.equals("/boot-assets/boot-log")) {
+                if (!requireAuth(out, authed)) return;
+                serveJson(out, BootAssetsManager.bootLog());
+            }
+            else if (path.equals("/boot-assets/download")) {
+                if (!requireAuth(out, authed)) return;
+                serveBootAssetDownload(out, req.target);
+                return;
+            }
+            else if (path.equals("/boot-assets/upload-logo")) {
+                if (!requireAuth(out, authed)) return;
+                s.setSoTimeout(0);
+                serveJson(out, BootAssetsManager.uploadLogo(app, in, req.contentLength));
+            }
+            else if (path.equals("/boot-assets/flash-logo")) {
+                if (!requireAuth(out, authed)) return;
+                serveJson(out, BootAssetsManager.flashLogo(app, body));
+            }
+            else if (path.equals("/boot-assets/restore-logo")) {
+                if (!requireAuth(out, authed)) return;
+                serveJson(out, BootAssetsManager.restoreLogo(app, body));
             }
             else if (path.equals("/save")) {
                 if (!requireAuth(out, authed)) return;
@@ -564,7 +604,12 @@ public class SettingsWebServer {
                 .append("<div class='inline'><button type='button' onclick='fsSave()'>保存连接</button><button type='button' class='secondary' onclick='fsTest()'>测试连接</button><button type='button' class='secondary' onclick='fsNew()'>新建</button><span class='state' id='fsMsg'></span></div>")
                 .append("</div></div></section>")
                 .append("<section class='panel' id='tab-remote'><div class='sectionTitle'><h2>FRP / ADB</h2><small>远程访问与安装通道</small></div><div class='cols'><div class='box'><h3>frpc.toml</h3><textarea name='frpcConfig' style='min-height:260px'></textarea><p class='hint'>保存后点启动 frpc。APK 安装优先走应用管理上传，不走 adb install 传文件。</p><div class='inline'><button type='button' onclick='frpcStart()'>启动 frpc</button><button type='button' class='secondary' onclick='frpcStop()'>停止 frpc</button><span class='state' id='frpcMsg'></span></div><p class='hint'>状态：<span id='frpcState'>未知</span><span id='frpcStateDetail'></span></p><pre id='frpcLog'></pre></div>")
-                .append("<div class='box'><h3>ADB TCP</h3><div class='row'><label>ADB 端口</label><input type='text' id='adbPort' value='5555'></div><label class='checkrow'><input type='checkbox' id='adbAuto'>开机自启 ADB TCP</label><div class='inline'><button type='button' onclick='adbSave()'>保存自启</button><button type='button' onclick='adbStart()'>启动/重启 ADB TCP</button><button type='button' class='secondary' onclick='adbStop()'>关闭 ADB TCP</button><span class='state' id='adbMsg'></span></div><p class='hint'>设备侧：<span id='adbState'>未知</span><span id='adbDetail'></span></p><pre id='adbLog'></pre></div></div></section>")
+                .append("<div class='box'><h3>ADB TCP</h3><div class='row'><label>ADB 端口</label><input type='text' id='adbPort' value='5555'></div><label class='checkrow'><input type='checkbox' id='adbAuto'>开机自启 ADB TCP</label>")
+                .append(rowCheckbox("Root 授权提示", Prefs.K_ROOT_GRANT_NOTIFICATIONS, "关闭后隐藏 Magisk 的“应用已授予超级权限”提示（全局）"))
+                .append("<p class='hint' id='rootGrantActual'>Magisk 数据库状态：读取中</p>")
+                .append(rowCheckbox("启用系统锁屏", Prefs.K_SYSTEM_LOCKSCREEN_ENABLED, "默认关闭；开启后下一次亮屏恢复原厂滑动锁"))
+                .append("<p class='hint' id='lockscreenActual'>LockSettingsService：读取中</p>")
+                .append("<div class='inline'><button type='button' onclick='adbSave()'>保存自启</button><button type='button' onclick='adbStart()'>启动/重启 ADB TCP</button><button type='button' class='secondary' onclick='adbStop()'>关闭 ADB TCP</button><button type='button' class='danger' onclick='deviceReboot()'>重启设备</button><span class='state' id='adbMsg'></span></div><p class='hint'>设备侧：<span id='adbState'>未知</span><span id='adbDetail'></span></p><pre id='adbLog'></pre></div></div></section>")
                 .append("<section class='panel' id='tab-apps'><div class='sectionTitle'><h2>应用管理</h2><small>上传 APK 后设备本地安装</small></div><div class='cols'><div class='box'><h3>安装 APK</h3><div class='row'><label>APK 文件</label><input type='file' id='appApk' accept='.apk,application/vnd.android.package-archive'></div><div class='row'><label>APK 下载地址</label><input type='text' id='appFetchUrl' placeholder='https://.../app.apk 或 ftp://...'></div><div class='inline'><button type='button' onclick='appUpload()'>上传 APK</button><button type='button' class='secondary' onclick='appFetch()'>从 URL 拉取</button><button type='button' id='appInstallBtn' onclick='appInstall()' disabled>安装上传的 APK</button></div><p class='state' id='appUploadMsg'></p><p class='hint' id='appUploadInfo'></p><pre id='appTaskLog'></pre></div>")
                 .append("<div class='box'><h3>已安装应用</h3><div class='row'><label>搜索应用</label><input type='text' id='appSearch' oninput='renderApps()'></div><div class='inline'><button type='button' class='secondary' onclick='loadApps()'>刷新应用</button><span class='hint' id='appCount'></span></div><div id='appList' class='list'></div></div></div></section>")
                 .append("<section class='panel' id='tab-debug'><div class='sectionTitle'><h2>链路调试</h2><small>按时间记录 ASR / LLM / MCP / TTS</small></div><div class='cols'><div class='box'><h3>调试模式</h3>")
@@ -577,7 +622,8 @@ public class SettingsWebServer {
                 .append(rowInput("大小上限(KB)", "convMaxKb", "text", "1024"))
                 .append(rowInput("清理间隔(分钟)", "convCleanMin", "text", "60"))
                 .append("<div class='row'><label>过滤角色</label><select id='convFilter' onchange='loadConv()'><option value='all'>全部</option><option value='user'>用户</option><option value='assistant'>AI</option><option value='heard'>听见</option><option value='error'>错误</option></select></div><div class='inline'><button type='button' class='danger' onclick='clearConv()'>清空记录</button><span class='state' id='convMsg'></span></div><div id='conv' class='log'></div></div>")
-                .append("<div class='box'><h3>配置备份</h3><div class='inline'><button type='button' onclick='backupExport()'>导出当前配置</button><button type='button' class='secondary' onclick='backupRestore()'>从下面内容恢复</button><span class='state' id='backupMsg'></span></div><textarea id='backupContent' placeholder='导出后会显示 JSON；也可以粘贴旧 prefs.json 后恢复。' style='min-height:320px'></textarea></div></div></section>")
+                .append("<div class='box'><h3>配置备份</h3><div class='inline'><button type='button' onclick='backupExport()'>导出当前配置</button><button type='button' class='secondary' onclick='backupRestore()'>从下面内容恢复</button><span class='state' id='backupMsg'></span></div><textarea id='backupContent' placeholder='导出后会显示 JSON；也可以粘贴旧 prefs.json 后恢复。' style='min-height:260px'></textarea></div>")
+                .append("<div class='box'><h3>启动资源</h3><p class='hint'>只允许备份、下载、上传和校验 MTK logo 分区；不会开放任意 Root 命令。刷写前必须有原厂备份、电量达标并输入确认短语。</p><div id='bootAssetState' class='log'>尚未读取</div><div class='inline'><button type='button' onclick='bootAssetBackup()'>创建原厂备份</button><button type='button' class='secondary' onclick='bootAssetDownload(\"logo\")'>下载 logo 备份</button><button type='button' class='secondary' onclick='bootAssetDownload(\"bootanimation\")'>下载原厂动画</button><button type='button' class='secondary' onclick='bootAssetDownload(\"manifest\")'>下载清单</button><button type='button' class='secondary' onclick='bootLogLoad()'>启动日志</button></div><pre id='bootLog' style='display:none'></pre><div class='row'><label>新 logo.bin</label><input type='file' id='bootLogoFile' accept='.bin,application/octet-stream'></div><div class='inline'><button type='button' class='secondary' onclick='bootLogoUpload()'>上传并校验</button><button type='button' class='danger' onclick='bootLogoFlash()'>刷写新首屏</button><button type='button' class='secondary' onclick='bootLogoRestore()'>恢复原厂首屏</button><span class='state' id='bootAssetMsg'></span></div></div></div></section>")
                 .append("</form></div></div>")
                 .append("<div class='savebar hidden' id='savebar'><div class='inner'><div><b id='dirtyState'>未修改</b><div class='hint'>保存前自动导出备份；Key 留空不会覆盖旧值。</div></div><div><button type='button' onclick='save()'>保存设置</button><span class='state' id='msg'></span></div></div></div>")
                 .append("<script>")
@@ -602,11 +648,11 @@ public class SettingsWebServer {
                 .append("function renderHwDiag(h){var box=q('#hwDiag');if(!box)return;h=h||{};var rows=[['传感器',h.sensors||'--'],['姿态',h.pose||'--'],['磁场',h.magnetic||'--'],['GPS请求',h.gpsRequest||'--'],['GPS驱动',h.gpsDriver||'--'],['GPS动作',h.gpsAction||'--'],['卫星',h.gps||'--'],['弱项',h.untrusted||'--'],['校准',h.magCalibration||'--']];var out='';for(var i=0;i<rows.length;i++)out+='<div class=\"item\"><div class=\"main\"><b>'+esc(rows[i][0])+'</b><small>'+esc(rows[i][1])+'</small></div></div>';box.innerHTML=out}")
                 .append("function gpsReset(){if(!confirm('清理 GPS 辅助数据并重新搜星？建议在室外空旷处使用。'))return;msg('gpsResetMsg','正在触发...');api('POST','/gps/reset','',function(d){msg('gpsResetMsg',d&&d.ok?(d.msg||'已触发'):(d&&d.err?d.err:'失败'));setTimeout(systemStatus,800)},'application/x-www-form-urlencoded')}")
                 .append("function systemStatus(){api('GET','/system_status',null,renderSystem)}function renderSystem(d){if(!d)return;q('#sysTime').textContent=d.time||'--:--';q('#sysDate').textContent=d.date||'';meter('Cpu',d.cpu);meter('AppCpu',d.appCpu);meter('Ram',d.memPct);meter('Gpu',d.gpu,d.gpuText);meter('Bat',d.battery,d.batteryText);renderHwDiag(d.hardware);var bat=d.batteryText||pct(d.battery),gt=d.gpuText||pct(d.gpu),core=(d.cpuOnline&&d.cpuPossible)?(' · 核 '+d.cpuOnline+'/'+d.cpuPossible):'',appCore=(Number(d.appCpuCore)>=0?(' · 单核 '+pct(d.appCpuCore)):''),renderer=(d.mainRenderer==='canvas'?'Canvas':'OpenGL'),fps=d.mainFpsMode==='power'?'省电':(d.mainFpsMode==='smooth'?'流畅':'自适应');q('#sysCore').textContent='总 '+pct(d.cpu)+' · App '+pct(d.appCpu)+appCore+core+' · RAM '+pct(d.memPct)+' · Mali '+gt+' · 电 '+bat+' · '+renderer+'/'+fps;q('#sysGps').textContent=d.gps||'';q('#sysUpdated').textContent='更新 '+(d.time||'');var note='CPU/RAM/温度来自设备实时采样；App 为在线核心总口径，单核用于看主线程压力。';if(d.streamActive)note='屏幕预览正在运行，会明显增加 CPU 和温度。';q('#sysLoadNote').textContent=note;var temps=d.temps||[],ring=q('#sysTempRing');if(!ring)return;ring.innerHTML='';for(var i=0;i<temps.length;i++){var el=document.createElement('div');el.className='tempdot';el.innerHTML='<span>'+esc(temps[i].name||'温度')+'</span><b>'+Number(temps[i].c||0).toFixed(0)+'°</b>';ring.appendChild(el)}if(!temps.length){var e=document.createElement('div');e.className='tempdot';e.innerHTML='<span>温度</span><b>--</b>';ring.appendChild(e)}}")
-                .append("function initConsole(){loadStatus();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();fsList();loadConv();loadDebugLog();setInterval(function(){frpcRefresh();camRefresh();adbStatus();appState()},3000);setInterval(systemStatus,2000);setInterval(loadConv,4000)}")
+                .append("function initConsole(){loadStatus();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();bootAssetStatus();fsList();loadConv();loadDebugLog();setInterval(function(){frpcRefresh();camRefresh();adbStatus();appState()},3000);setInterval(systemStatus,2000);setInterval(loadConv,4000)}")
                 .append("function wireTabs(){var bs=qa('.tab');for(var i=0;i<bs.length;i++)bs[i].onclick=function(){var id=this.getAttribute('data-tab');var b=qa('.tab'),p=qa('.panel');for(var j=0;j<b.length;j++)b[j].classList.remove('active');for(var k=0;k<p.length;k++)p[k].classList.remove('active');this.classList.add('active');q('#tab-'+id).classList.add('active')}}")
                 .append("function wireDirty(){var f=q('#f');if(!f)return;var es=f.querySelectorAll('input,textarea,select');for(var i=0;i<es.length;i++){es[i].addEventListener('input',markDirty);es[i].addEventListener('change',markDirty)}}")
                 .append("function markDirty(){dirty=true;q('#dirtyState').textContent='有未保存修改';q('#dirtyState').style.color='var(--gold)'}function clean(){dirty=false;q('#dirtyState').textContent='已保存';q('#dirtyState').style.color='var(--ok)'}")
-                .append("function loadStatus(){api('GET','/status',null,function(d){if(!d||!d.authed){authState();return}for(var k in d){var e=q('[name=\"'+k+'\"]');if(!e)continue;var mcpTok=k.indexOf('mcpServer')===0&&k.indexOf('Token')>=0;if(e.type==='checkbox')e.checked=(d[k]===true||d[k]==='true');else if(k!=='apiKey'&&k!=='voiceApiKey'&&!mcpTok)e.value=d[k]}q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';msg('apiKeyState',d.apiKeySet?'当前 '+d.apiKeyMask:'当前未设置');msg('voiceKeyState',d.voiceApiKeySet?'当前 '+d.voiceApiKeyMask:'当前未设置');for(var i=1;i<=3;i++){var p='mcpServer'+i,s=q('[name='+p+'Token]');if(s)s.value='';msg(p+'TokenState',d[p+'TokenSet']?'当前 '+d[p+'TokenMask']:'当前未设置')}syncRanges();clean()})}")
+                .append("function loadStatus(){api('GET','/status',null,function(d){if(!d||!d.authed){authState();return}for(var k in d){var e=q('[name=\"'+k+'\"]');if(!e)continue;var mcpTok=k.indexOf('mcpServer')===0&&k.indexOf('Token')>=0;if(e.type==='checkbox')e.checked=(d[k]===true||d[k]==='true');else if(k!=='apiKey'&&k!=='voiceApiKey'&&!mcpTok)e.value=d[k]}q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';msg('apiKeyState',d.apiKeySet?'当前 '+d.apiKeyMask:'当前未设置');msg('voiceKeyState',d.voiceApiKeySet?'当前 '+d.voiceApiKeyMask:'当前未设置');var rg=d.rootGrantStatus||{},ls=d.systemLockscreenStatus||{};msg('rootGrantActual','Magisk 数据库：'+(rg.detail||'状态未知'));msg('lockscreenActual','LockSettingsService：'+(ls.detail||'状态未知')+(ls.secureCredential?' · 检测到安全凭据':''));for(var i=1;i<=3;i++){var p='mcpServer'+i,s=q('[name='+p+'Token]');if(s)s.value='';msg(p+'TokenState',d[p+'TokenSet']?'当前 '+d[p+'TokenMask']:'当前未设置')}syncRanges();clean()})}")
                 .append("function providerChanged(){var p=q('#provider').value;if(p==='deepseek'){q('[name=baseUrl]').value='https://api.deepseek.com/v1';q('[name=textModel]').value='deepseek-chat';if(!q('[name=visionModel]').value)q('[name=visionModel]').value='deepseek-chat';q('[name=textBaseUrl]').value='';q('[name=visionBaseUrl]').value=''}else{if(q('[name=baseUrl]').value==='https://api.deepseek.com/v1')q('[name=baseUrl]').value='';if(!q('[name=textModel]').value||q('[name=textModel]').value==='deepseek-chat')q('[name=textModel]').value='gpt-4.1-mini'}}")
                 .append("function oracleShakeLabel(v){v=Math.max(0,Math.min(100,Number(v||70)));var n=v<18?'轻摇':(v<38?'稍轻':(v<62?'正常':(v<82?'较重':'用力')));return Math.round(v)+' / 100 · '+n}function syncRanges(){var e=q('[name=oracleShakeForce]'),t=q('#oracleShakeForceText');if(e&&t)t.textContent=oracleShakeLabel(e.value)}")
                 .append("function save(){var fd=new FormData(q('#f')),b=new URLSearchParams(fd),c=q('#f').querySelectorAll('input[type=checkbox]');for(var i=0;i<c.length;i++)b.set(c[i].name,c[i].checked?'true':'false');textApi('POST','/save',b.toString(),function(t){msg('msg',t);if(t.indexOf('已保存')>=0){q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';for(var j=1;j<=3;j++){var te=q('[name=mcpServer'+j+'Token]');if(te)te.value=''}q('[name=clearApiKey]').checked=false;q('[name=clearVoiceApiKey]').checked=false;clean();loadStatus()}},'application/x-www-form-urlencoded')}")
@@ -617,6 +663,7 @@ public class SettingsWebServer {
                 .append("function frpcStart(){textApi('GET','/frpc/start',null,function(t){msg('frpcMsg',t);frpcRefresh()})}function frpcStop(){textApi('GET','/frpc/stop',null,function(t){msg('frpcMsg',t);frpcRefresh()})}")
                 .append("function adbStatus(){api('GET','/adb/status',null,function(d){if(!d)return;if(document.activeElement!==q('#adbPort'))q('#adbPort').value=d.port||5555;q('#adbAuto').checked=!!d.autoStart;var ap=d.activePort||d.servicePort||d.persistPort||'--',h=d.health||'checking',t=h==='healthy'?'服务正常':(h==='degraded'?'连接积压':(h==='down'?'未监听':'检测中'));msg('adbState',t);msg('adbDetail',' · 端口 '+ap+' · adbd='+(d.daemonState||'--')+' · 连续失败 '+(d.consecutiveFailures||0)+' · CLOSE_WAIT '+(d.closeWaitSockets||0)+' · '+(d.lastCheckDetail||'')+' · 主机状态以 adb devices 为准');var l=q('#adbLog');if(l)l.textContent=d.log||''})}")
                 .append("function adbBody(){return enc({port:q('#adbPort').value,autoStart:q('#adbAuto').checked?'true':'false'})}function adbSave(){api('POST','/adb/save',adbBody(),function(d){msg('adbMsg',d&&d.ok?'已保存':(d&&d.err?d.err:'失败'));adbStatus()},'application/x-www-form-urlencoded')}function adbStart(){if(!confirm('启动 ADB TCP 会重启 adbd，继续？'))return;api('POST','/adb/start',adbBody(),function(d){msg('adbMsg',d&&d.ok?(d.msg||'已启动'):(d&&d.err?d.err:'失败'));adbStatus()},'application/x-www-form-urlencoded')}function adbStop(){if(!confirm('关闭 ADB TCP 会断开远程 ADB，继续？'))return;api('POST','/adb/stop','',function(d){msg('adbMsg',d&&d.ok?(d.msg||'已关闭'):(d&&d.err?d.err:'失败'));setTimeout(adbStatus,1500)},'application/x-www-form-urlencoded')}")
+                .append("function deviceReboot(){var c=prompt('设备会立即重启。输入 REBOOT DEVICE 确认：');if(c!=='REBOOT DEVICE')return;api('POST','/device/reboot',enc({confirm:c}),function(d){msg('adbMsg',d&&d.ok?'重启命令已提交':(d&&d.err?d.err:'重启失败'))},'application/x-www-form-urlencoded')}")
                 .append("function camRefresh(){api('GET','/cam/status',null,function(d){if(!d)return;msg('camState',d.status==='running'?('运行中 · '+(d.detail||'')):d.status);q('#camBtn').textContent=d.status==='running'?'停止推流':'启动推流';q('#camUrls').innerHTML=(d.rtsp?'<div>RTSP: '+esc(d.rtsp)+'</div>':'')+(d.rtmpUrl?'<div>RTMP: '+esc(d.rtmpUrl)+'</div>':'')+(d.webrtc?'<div>WebRTC: '+esc(d.webrtc)+'</div>':'')+(d.realFps?'<div>实际帧率: '+esc(d.realFps)+' fps</div>':'')})}")
                 .append("function camToggle(){api('GET','/cam/status',null,function(d){if(d&&d.status==='running')textApi('GET','/cam/stop',null,function(t){msg('camMsg',t);setTimeout(camRefresh,500)});else textApi('GET','/cam/start',null,function(t){msg('camMsg',t);setTimeout(camRefresh,1500)})})}")
                 .append("function currentMode(){var e=q('[name=streamMode]'),m=e?e.value:'h264';return m==='h264fast'||m==='mjpeg'?m:'h264'}")
@@ -643,6 +690,9 @@ public class SettingsWebServer {
                 .append("function convHtml(d){convCache=d;var arr=d.entries||[],f=q('#convFilter').value,h='';for(var i=Math.max(0,arr.length-250);i<arr.length;i++){var e=arr[i];if(f!=='all'&&e.role!==f)continue;var who=e.role==='user'?'用户':(e.role==='assistant'?'AI':(e.role==='heard'?'听见':(e.role==='error'?'错误':'系统')));h+='<div><span class=\"mini\">'+esc(e.ts)+'</span> <b>'+who+':</b> '+esc(e.text)+'</div>'}if(!h)h='<div class=\"hint\">暂无匹配记录</div>';h+='<div class=\"mini\">共 '+arr.length+' 条 · 文件 '+d.sizeKb+' KB / 上限 '+d.maxKb+' KB</div>';return h}function loadConv(){api('GET','/conversations',null,function(d){if(!d||!d.entries)return;var v=q('#conv');v.innerHTML=convHtml(d);v.scrollTop=v.scrollHeight})}function clearConv(){if(!confirm('清空对话记录？'))return;textApi('POST','/clear_conv','',function(){msg('convMsg','已清空');loadConv()})}")
                 .append("function debugHtml(d){var arr=d.entries||[],h='';for(var i=Math.max(0,arr.length-400);i<arr.length;i++){var e=arr[i];h+='<div style=\"border-bottom:1px solid rgba(181,139,48,.14);padding:5px 0\"><span class=\"mini\">'+esc(e.ts)+'</span> <b>'+esc(e.stage||'debug')+':</b><pre style=\"margin:4px 0 0;border:0;background:transparent;padding:0;color:#9ed17d;max-height:none\">'+esc(e.text||'')+'</pre></div>'}if(!h)h='<div class=\"hint\">暂无调试日志。打开调试模式并保存后，再复现一次天气查询。</div>';h+='<div class=\"mini\">共 '+arr.length+' 条 · 文件 '+(d.sizeKb||0)+' KB / 上限 '+(d.maxKb||0)+' KB · '+(d.enabled?'调试已开启':'调试已关闭')+'</div>';return h}function loadDebugLog(){api('GET','/debug_log',null,function(d){if(!d||!d.ok)return;var v=q('#debugLog');if(!v)return;v.innerHTML=debugHtml(d);v.scrollTop=v.scrollHeight;msg('debugMsg',d.enabled?'调试已开启':'调试已关闭')})}function clearDebugLog(){if(!confirm('清空链路调试日志？'))return;textApi('POST','/clear_debug','',function(){msg('debugMsg','已清空');loadDebugLog()})}")
                 .append("function backupExport(){api('GET','/backup/export',null,function(d){if(d&&d.ok){q('#backupContent').value=d.content||'';msg('backupMsg','已导出 '+(d.bytes||0)+' bytes · '+(d.path||''))}else msg('backupMsg',d&&d.err?d.err:'导出失败')})}function backupRestore(){var c=q('#backupContent').value;if(!c.trim()){msg('backupMsg','请先粘贴备份 JSON');return}if(!confirm('从此 JSON 恢复配置？当前配置会被覆盖。'))return;api('POST','/backup/restore',enc({content:c}),function(d){msg('backupMsg',d&&d.ok?'已恢复，正在重载':(d&&d.err?d.err:'恢复失败'));if(d&&d.ok)setTimeout(loadStatus,800)},'application/x-www-form-urlencoded')}")
+                .append("var bootAssets=null;function bootFileText(x){return x&&x.exists?(fmtBytes(x.bytes)+' · '+(x.sha256||'').slice(0,16)+'...'):'未创建'}function renderBootAssets(d){bootAssets=d||{};var b=d&&d.battery||{},lines=['分区：'+(d&&d.partition?d.partition:'未识别')+' · '+fmtBytes(d&&d.partitionBytes||0),'电量：'+(b.level==null?'--':b.level+'%')+(b.charging?' · 充电中':''),'logo 原厂：'+bootFileText(d&&d.logoRaw),'原厂动画：'+bootFileText(d&&d.bootanimation),'待刷 logo：'+bootFileText(d&&d.uploadedLogo),'状态：'+(d&&d.probe||d&&d.err||'未知')];q('#bootAssetState').textContent=lines.join('\\n')}function bootAssetStatus(){api('GET','/boot-assets/status',null,function(d){renderBootAssets(d)})}function bootAssetBackup(){if(!confirm('从真实分区和 Magisk mirror 创建原厂启动资源备份？'))return;msg('bootAssetMsg','正在读取并校验原厂资源...');api('POST','/boot-assets/backup','',function(d){msg('bootAssetMsg',d&&d.ok?(d.msg||'备份完成'):(d&&d.err?d.err:'备份失败'));bootAssetStatus()},'application/x-www-form-urlencoded')}function bootAssetDownload(kind){var x=new XMLHttpRequest();x.open('GET','/boot-assets/download?kind='+encodeURIComponent(kind),true);hdr(x);x.responseType='blob';x.onload=function(){if(x.status!==200){msg('bootAssetMsg','下载失败 '+x.status);return}var names={logo:'logo-original.bin.gz',bootanimation:'bootanimation-original.zip',manifest:'manifest.json',sums:'SHA256SUMS'},a=document.createElement('a');a.href=URL.createObjectURL(x.response);a.download=names[kind]||'boot-asset.bin';a.click();setTimeout(function(){URL.revokeObjectURL(a.href)},1000)};x.onerror=function(){msg('bootAssetMsg','下载中断')};x.send()}")
+                .append("function bootLogLoad(){api('GET','/boot-assets/boot-log',null,function(d){var e=q('#bootLog');e.style.display='block';e.textContent=d&&d.ok?(d.log||'日志为空'):(d&&d.err?d.err:'读取失败')})}")
+                .append("function bootLogoUpload(){var f=q('#bootLogoFile').files&&q('#bootLogoFile').files[0];if(!f){msg('bootAssetMsg','请选择完整 logo.bin');return}var x=new XMLHttpRequest();x.open('POST','/boot-assets/upload-logo',true);hdr(x);x.setRequestHeader('Content-Type','application/octet-stream');x.upload.onprogress=function(e){if(e.lengthComputable)msg('bootAssetMsg','上传 '+Math.round(e.loaded*100/e.total)+'%')};x.onload=function(){var d;try{d=JSON.parse(x.responseText)}catch(e){d={ok:false,err:x.responseText}}msg('bootAssetMsg',d&&d.ok?('上传完成 · '+d.sha256):(d&&d.err?d.err:'上传失败'));bootAssetStatus()};x.onerror=function(){msg('bootAssetMsg','上传中断')};x.send(f)}function bootLogoFlash(){var f=bootAssets&&bootAssets.uploadedLogo;if(!f||!f.exists){msg('bootAssetMsg','请先上传新 logo.bin');return}var c=prompt('高风险操作。输入 FLASH LOGO 确认刷写真实 logo 分区：');if(c!=='FLASH LOGO')return;msg('bootAssetMsg','正在刷写并整分区回读校验...');api('POST','/boot-assets/flash-logo',enc({confirm:c,expectedSha:f.sha256}),function(d){msg('bootAssetMsg',d&&d.ok?(d.msg+' · '+d.sha256):(d&&d.err?d.err:'刷写失败'));bootAssetStatus()},'application/x-www-form-urlencoded')}function bootLogoRestore(){var f=bootAssets&&bootAssets.logoRaw;if(!f||!f.exists){msg('bootAssetMsg','没有原厂备份');return}var c=prompt('输入 RESTORE STOCK LOGO 确认恢复原厂首屏：');if(c!=='RESTORE STOCK LOGO')return;msg('bootAssetMsg','正在恢复并回读校验...');api('POST','/boot-assets/restore-logo',enc({confirm:c,expectedSha:f.sha256}),function(d){msg('bootAssetMsg',d&&d.ok?(d.msg+' · '+d.sha256):(d&&d.err?d.err:'恢复失败'));bootAssetStatus()},'application/x-www-form-urlencoded')}")
                 .append("boot();")
                 .append("</script></body></html>");
         byte[] b = h.toString().getBytes("UTF-8");
@@ -1381,6 +1431,12 @@ public class SettingsWebServer {
             o.put("streamBitrate", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_BITRATE, 1500)));
             o.put("mainRenderer", Prefs.mainRenderer(app));
             o.put("mainFpsMode", Prefs.mainFpsMode(app));
+            o.put(Prefs.K_ROOT_GRANT_NOTIFICATIONS, Prefs.rootGrantNotifications(app));
+            o.put(Prefs.K_SYSTEM_LOCKSCREEN_ENABLED, Prefs.systemLockscreenEnabled(app));
+            o.put("rootGrantStatus",
+                    com.magneo.compass.RootGrantNotificationManager.status(app).toJson());
+            o.put("systemLockscreenStatus",
+                    com.magneo.compass.SystemLockscreenManager.status(app).toJson());
             o.put("locSource", Prefs.locSource(app));
             o.put("locSourceLabel", Prefs.locSourceLabel(app));
             o.put("locWifiUrl", Prefs.locWifiUrl(app));
@@ -1480,9 +1536,20 @@ public class SettingsWebServer {
                     try { Prefs.putI(app, k, Math.max(1, Math.min(2, Integer.parseInt(v)))); } catch (Exception ignored) {}
                 } else if (k.equals("streamBitrate")) {
                     try { Prefs.putI(app, k, Math.max(300, Math.min(8000, Integer.parseInt(v)))); } catch (Exception ignored) {}
+                } else if (k.equals(Prefs.K_SYSTEM_LOCKSCREEN_ENABLED)) {
+                    boolean on = "true".equalsIgnoreCase(v) || "1".equals(v);
+                    com.magneo.compass.SystemLockscreenManager.Snapshot state =
+                            com.magneo.compass.SystemLockscreenManager.setEnabledBlocking(
+                                    app, on, true);
+                    if (!state.ok) throw new IOException(state.detail);
                 } else if (isBoolKey(k)) {
                     boolean on = "true".equalsIgnoreCase(v) || "1".equals(v);
                     Prefs.putB(app, k, on);
+                    if (k.equals(Prefs.K_ROOT_GRANT_NOTIFICATIONS)) {
+                        com.magneo.compass.RootGrantNotificationManager.Snapshot state =
+                                com.magneo.compass.RootGrantNotificationManager.applyBlocking(on);
+                        if (!state.ok) throw new IOException(state.detail);
+                    }
                     if (k.equals(Prefs.K_VAD_ENABLED)) {
                         android.content.Intent i = new android.content.Intent(app,
                                 com.magneo.compass.voice.VadService.class);
@@ -1940,7 +2007,9 @@ public class SettingsWebServer {
                 || k.equals("browserRoundFit") || k.equals("camAutoStart")
                 || k.equals(Prefs.K_MCP_ENABLED)
                 || k.equals(Prefs.K_MCP_SLOW_HINT_ENABLED)
-                || k.equals(Prefs.K_DEBUG_MODE);
+                || k.equals(Prefs.K_DEBUG_MODE)
+                || k.equals(Prefs.K_ROOT_GRANT_NOTIFICATIONS)
+                || k.equals(Prefs.K_SYSTEM_LOCKSCREEN_ENABLED);
     }
 
     private static void syncRuntimeGpsSource() {
@@ -2443,7 +2512,8 @@ public class SettingsWebServer {
         byte[] b = "ok".getBytes("UTF-8");
         writeHead(out, "text/plain; charset=utf-8", b.length);
         out.write(b);
-        if (code != null && !code.isEmpty()) runRoot("input keyevent " + code);
+        int key = parseBoundedInt(code, -1, 0, 300);
+        if (key >= 0) runRoot("input keyevent " + key);
     }
 
     /** 远程触摸：tap=点击 long=长按 move=拖动（px/py 为上一坐标） */
@@ -2452,13 +2522,25 @@ public class SettingsWebServer {
         byte[] b = "ok".getBytes("UTF-8");
         writeHead(out, "text/plain; charset=utf-8", b.length);
         out.write(b);
-        if (act == null || x == null || y == null) return;
-        if (act.equals("tap")) runRoot("input tap " + x + " " + y);
-        else if (act.equals("long")) runRoot("input swipe " + x + " " + y + " " + x + " " + y + " 800");
+        int ix = parseBoundedInt(x, -1, 0, 800);
+        int iy = parseBoundedInt(y, -1, 0, 800);
+        if (act == null || ix < 0 || iy < 0) return;
+        if (act.equals("tap")) runRoot("input tap " + ix + " " + iy);
+        else if (act.equals("long")) runRoot("input swipe " + ix + " " + iy + " " + ix + " " + iy + " 800");
         else if (act.equals("move")) {
             String px = qParam(qs, "px"), py = qParam(qs, "py");
-            if (px == null) px = x; if (py == null) py = y;
-            runRoot("input swipe " + px + " " + py + " " + x + " " + y + " 50");
+            int ipx = parseBoundedInt(px, ix, 0, 800);
+            int ipy = parseBoundedInt(py, iy, 0, 800);
+            runRoot("input swipe " + ipx + " " + ipy + " " + ix + " " + iy + " 50");
+        }
+    }
+
+    private static int parseBoundedInt(String value, int fallback, int min, int max) {
+        try {
+            int parsed = Integer.parseInt(value == null ? "" : value.trim());
+            return parsed < min || parsed > max ? fallback : parsed;
+        } catch (Exception ignored) {
+            return fallback;
         }
     }
 
@@ -2762,6 +2844,27 @@ public class SettingsWebServer {
     private static void writeHead(OutputStream out, String type, long len) throws IOException {
         out.write(("HTTP/1.1 200 OK\r\nContent-Type: " + type + "\r\nContent-Length: " + len
                 + "\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").getBytes("ISO-8859-1"));
+    }
+
+    private static void serveBootAssetDownload(OutputStream out, String target) throws IOException {
+        String kind = qParam(target, "kind");
+        File file = BootAssetsManager.downloadFile(app, kind);
+        if (file == null) {
+            serve404(out);
+            return;
+        }
+        String type = "manifest".equals(kind) || "sums".equals(kind)
+                ? "text/plain; charset=utf-8" : "application/octet-stream";
+        String name = file.getName().replace("\"", "");
+        out.write(("HTTP/1.1 200 OK\r\nContent-Type: " + type + "\r\nContent-Length: "
+                + file.length() + "\r\nContent-Disposition: attachment; filename=\"" + name
+                + "\"\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")
+                .getBytes("ISO-8859-1"));
+        byte[] buffer = new byte[64 * 1024];
+        try (FileInputStream input = new FileInputStream(file)) {
+            int read;
+            while ((read = input.read(buffer)) >= 0) if (read > 0) out.write(buffer, 0, read);
+        }
     }
 
     private static void serve404(OutputStream out) throws IOException {

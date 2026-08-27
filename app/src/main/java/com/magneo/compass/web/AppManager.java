@@ -248,6 +248,39 @@ public class AppManager {
         }
     }
 
+    public static JSONObject installBootModule(Context ctx) {
+        try {
+            File apk = latestApk(ctx);
+            if (!apk.exists() || apk.length() == 0) return err("还没有上传 APK");
+            String rootApk = rootReadablePath(apk);
+            String stage = "/data/local/tmp/oracle-compass-bootanimation.zip";
+            String busybox = "/sbin/.magisk/busybox/busybox";
+            String asset = "assets/oracle-compass-bootanimation.zip";
+            String cmd = "test -x " + q(busybox) + " || { echo busybox missing; exit 2; }; "
+                    + q(busybox) + " unzip -p " + q(rootApk) + " " + q(asset)
+                    + " > " + q(stage) + "; R=$?; "
+                    + "if [ $R -ne 0 ] || [ ! -s " + q(stage)
+                    + " ]; then echo boot module asset missing; exit 3; fi; "
+                    + "chmod 600 " + q(stage) + "; "
+                    + "magisk --install-module " + q(stage) + " 2>&1";
+            return startTask(ctx, "boot-module", "oracle_compass_bootanimation", cmd);
+        } catch (Exception e) {
+            return err(e.getMessage());
+        }
+    }
+
+    public static JSONObject reboot(Context ctx, String body) {
+        try {
+            Map<String, String> fields = form(body);
+            if (!"REBOOT DEVICE".equals(fields.get("confirm"))) {
+                return err("确认短语必须是 REBOOT DEVICE");
+            }
+            return startTask(ctx, "reboot", "device", "sync; sleep 2; reboot");
+        } catch (Exception e) {
+            return err(e.getMessage());
+        }
+    }
+
     public static JSONObject uninstall(Context ctx, String body) {
         try {
             Map<String, String> f = form(body);
