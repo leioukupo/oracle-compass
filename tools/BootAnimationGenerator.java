@@ -62,7 +62,7 @@ public final class BootAnimationGenerator {
                     "usage: BootAnimationGenerator <output-dir> [version]");
         }
         Path output = Path.of(args[0]).toAbsolutePath().normalize();
-        String version = args.length == 2 ? args[1].trim() : "0.2.5";
+        String version = args.length == 2 ? args[1].trim() : "0.2.6";
         Files.createDirectories(output);
         verifyGeometry();
 
