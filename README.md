@@ -101,6 +101,7 @@ Web 控制台 `记录 / 备份 -> 启动资源` 提供受限的 MTK 启动资源
 
 ## 文档
 
+- [系统重装恢复手册](docs/system-reinstall-recovery.md)
 - [旧 README 原文](docs/original-readme.md)
 - [设备说明](设备说明.md)
 - [TTS/ASR 部署](docs/tts-asr-deploy.md)

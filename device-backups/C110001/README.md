@@ -12,6 +12,8 @@ Expected files under `stock/`:
 
 Use the authenticated Web console to restore the logo. It validates the original raw size and SHA-256, requires sufficient battery power, writes the complete partition, and verifies a complete readback. Do not write these files to a different hardware revision.
 
+For the complete sequence after a factory reset or stock-ROM reinstall, including App configuration, Magisk, HOME, FRP/ADB, boot/shutdown animation, and optional physical logo restoration, see [the system reinstall recovery guide](../../docs/system-reinstall-recovery.md).
+
 ## Rebuilding the boot/shutdown logo slots
 
 This hardware stores the same factory image in slots 0 and 38 as `800x800` `rgbabe` buffers. Slot 0 is the earliest power-on frame; slot 38 is reused by the later MTK boot stage and shutdown path. Use `mtklogo` v0.1.2 at commit `e97f51944be9f6dbafff5b1d619341e1fa97dc4c`; the repository profile and builder replace only slots 0 and 38 and byte-compare all other 37 compressed slots after a round-trip unpack:
