@@ -66,6 +66,7 @@ public class Prefs {
     public static final String K_WEB_ADMIN_HASH = "webAdminHash";
     public static final String K_ADB_TCP_AUTO = "adbTcpAuto";
     public static final String K_ADB_TCP_PORT = "adbTcpPort";
+    public static final String K_ADB_TUNNEL_SYNC_BOOT = "adbTunnelSyncBoot";
     public static final String K_CAM_ID = "camId";
     public static final String K_CAM_WIDTH = "camWidth";
     public static final String K_CAM_HEIGHT = "camHeight";

@@ -33,7 +33,8 @@ for slot_number in 000 038; do
     exit 4
   }
   ffmpeg -hide_banner -loglevel error -y -i "$first_frame" \
-    -vf "scale=800:800:flags=lanczos,format=rgba" "$slot"
+    -vf "scale=800:800:flags=lanczos,colorchannelmixer=rr=0:rb=1:gg=1:br=1:bb=0,format=rgba" \
+    "$slot"
 done
 
 mapfile -t inputs < <(find "$unpacked" -maxdepth 1 -type f \

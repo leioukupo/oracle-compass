@@ -2,7 +2,7 @@
   "schema": 1,
   "device": "C110001",
   "androidApi": 22,
-  "capturedAtUtc": "2026-08-27T20:21:49Z",
+  "capturedAtUtc": "2026-08-28T00:09:22Z",
   "logo": {
     "file": "logo-original.bin.gz",
     "rawBytes": 8388608,
@@ -15,5 +15,11 @@
     "bytes": 3059585,
     "sha256": "bedeb24b80f14a2f80527f5f55b85fe95a3e6c04f5c079aeff7e4f632a034f21",
     "source": "Magisk mirror of stock \/system\/media\/bootanimation.zip"
+  },
+  "shutanimation": {
+    "file": "shutanimation-original.zip",
+    "bytes": 44157,
+    "sha256": "d68df3fd86ec165b483766d17c6e1a2825872cda84aae5794cc769b955f6bb03",
+    "source": "Magisk mirror of stock \/system\/media\/shutanimation.zip"
   }
 }

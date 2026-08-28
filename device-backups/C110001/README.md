@@ -6,6 +6,7 @@ Expected files under `stock/`:
 
 - `logo-original.bin.gz`: complete original `logo` partition, gzip compressed.
 - `bootanimation-original.zip`: stock `/system/media/bootanimation.zip` read from the Magisk mirror.
+- `shutanimation-original.zip`: stock `/system/media/shutanimation.zip` read from the Magisk mirror.
 - `manifest.json`: sizes and SHA-256 values without serial numbers, addresses, credentials, or application settings.
 - `SHA256SUMS`: hashes for the committed recovery files.
 
@@ -14,6 +15,8 @@ Use the authenticated Web console to restore the logo. It validates the original
 ## Rebuilding the boot/shutdown logo slots
 
 This hardware stores the same factory image in slots 0 and 38 as `800x800` `rgbabe` buffers. Slot 0 is the earliest power-on frame; slot 38 is reused by the later MTK boot stage and shutdown path. Use `mtklogo` v0.1.2 at commit `e97f51944be9f6dbafff5b1d619341e1fa97dc4c`; the repository profile and builder replace only slots 0 and 38 and byte-compare all other 37 compressed slots after a round-trip unpack:
+
+The bootloader swaps the red and blue channels when presenting these custom buffers. The builder therefore pre-swaps R/B for the two replacement slots; Android's JPEG bootanimation remains in normal sRGB order.
 
 ```bash
 gzip -dc stock/logo-original.bin.gz > /tmp/logo-original.bin

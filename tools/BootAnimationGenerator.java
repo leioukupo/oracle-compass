@@ -84,13 +84,14 @@ public final class BootAnimationGenerator {
         verifyLoopSeam(drawFrame(PART0_FRAMES - 1), drawLoopFrame(0));
         verifyEncodedMotion(frames, loopFrames);
         byte[] bootZip = buildBootZip(frames, loopFrames);
+        byte[] shutdownZip = buildShutdownZip(frames.get(0));
         verifyBootZip(bootZip);
         if (bootZip.length > MAX_BOOT_ZIP_BYTES) {
             throw new IOException("bootanimation.zip is too large: " + bootZip.length);
         }
 
         Path module = output.resolve("oracle-compass-bootanimation-v" + version + ".zip");
-        writeModule(module, version, bootZip);
+        writeModule(module, version, bootZip, shutdownZip);
         Path preview = output.resolve("oracle-compass-bootanimation-preview.jpg");
         Files.write(preview, frames.get(PART0_FRAMES - 1));
         Path firstFrame = output.resolve("oracle-compass-first-frame.jpg");
@@ -435,7 +436,18 @@ public final class BootAnimationGenerator {
         return bytes.toByteArray();
     }
 
-    private static void writeModule(Path output, String version, byte[] bootZip) throws IOException {
+    private static byte[] buildShutdownZip(byte[] frame) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
+            putStored(zip, "desc.txt", (SIZE + " " + SIZE + " " + FPS
+                    + "\np 0 0 part1\n").getBytes(StandardCharsets.US_ASCII));
+            putStored(zip, "part1/001.jpg", frame);
+        }
+        return bytes.toByteArray();
+    }
+
+    private static void writeModule(Path output, String version, byte[] bootZip,
+                                    byte[] shutdownZip) throws IOException {
         String moduleProp = "id=oracle_compass_bootanimation\n"
                 + "name=Oracle Compass Golden Lotus Compass\n"
                 + "version=" + version + "\n"
@@ -446,6 +458,7 @@ public final class BootAnimationGenerator {
                 + "[ \"$API\" = \"22\" ] || abort \"Android 5.1 / API 22 required\"\n"
                 + "[ -f /system/media/bootanimation.zip ] || abort \"Original bootanimation.zip not found\"\n"
                 + "set_perm \"$MODPATH/system/media/bootanimation.zip\" 0 0 0644\n"
+                + "set_perm \"$MODPATH/system/media/shutanimation.zip\" 0 0 0644\n"
                 + "set_perm \"$MODPATH/post-fs-data.sh\" 0 0 0755\n"
                 + "set_perm \"$MODPATH/service.sh\" 0 0 0755\n"
                 + "set_perm \"$MODPATH/uninstall.sh\" 0 0 0755\n";
@@ -580,6 +593,7 @@ public final class BootAnimationGenerator {
             putDeflated(zip, "service.sh", service.getBytes(StandardCharsets.US_ASCII));
             putDeflated(zip, "uninstall.sh", uninstall.getBytes(StandardCharsets.US_ASCII));
             putDeflated(zip, "system/media/bootanimation.zip", bootZip);
+            putDeflated(zip, "system/media/shutanimation.zip", shutdownZip);
         }
     }
 

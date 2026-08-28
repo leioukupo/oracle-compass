@@ -1,6 +1,7 @@
 package com.magneo.compass.web;
 
 import android.content.Context;
+import android.os.SystemClock;
 
 import com.magneo.compass.Prefs;
 
@@ -9,6 +10,10 @@ import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.InputStreamReader;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.URLDecoder;
 import java.util.HashMap;
 import java.util.Locale;
@@ -17,13 +22,13 @@ import java.util.Map;
 /** Root-backed ADB-over-TCP control so the device does not depend on an external ADBWireless app. */
 public class AdbManager {
     private static final int DEFAULT_PORT = 5555;
-    private static final int FAILURE_THRESHOLD = 2;
-    private static final int STALE_SOCKET_THRESHOLD = 2;
-    private static final int MAX_ADB_CONNECTIONS = 6;
+    private static final int FAILURE_THRESHOLD = 3;
+    private static final int CLOSE_WAIT_THRESHOLD = 2;
     private static final long RECOVERY_COOLDOWN_MS = 180000L;
     private static final long CHECK_FRESH_MS = 90000L;
     private static final Object LOCK = new Object();
     private static final Object HEALTH_LOCK = new Object();
+    private static final Object TUNNEL_SYNC_LOCK = new Object();
     private static String lastLog = "";
     private static volatile boolean tuningApplied;
     private static volatile boolean lastCheckKnown;
@@ -35,6 +40,9 @@ public class AdbManager {
     private static volatile long lastCheckAt;
     private static volatile long lastRecoveryAt;
     private static volatile long lastRestartAt;
+    private static volatile boolean lastProtocolHealthy;
+    private static volatile String lastProtocolDetail = "not probed";
+    private static volatile long lastProtocolAt;
     private static volatile String lastCheckDetail = "waiting for watchdog";
 
     private AdbManager() {}
@@ -78,6 +86,12 @@ public class AdbManager {
             o.put("closeWaitSockets", lastCloseWaitCount);
             o.put("stuckSockets", lastStuckSocketCount);
             o.put("lastRecoveryAt", lastRecoveryAt > 0 ? lastRecoveryAt : JSONObject.NULL);
+            o.put("tunnelSynchronized", bootIdentity().equals(
+                    Prefs.get(ctx, Prefs.K_ADB_TUNNEL_SYNC_BOOT, "")));
+            o.put("systemBootComplete", isSystemBootComplete());
+            o.put("protocolHealthy", lastProtocolHealthy);
+            o.put("protocolDetail", lastProtocolDetail);
+            o.put("protocolCheckedAt", lastProtocolAt > 0 ? lastProtocolAt : JSONObject.NULL);
             o.put("log", lastLog);
         } catch (Exception e) {
             putErr(o, e.getMessage());
@@ -169,9 +183,28 @@ public class AdbManager {
             }
 
             TcpSocketStats sockets = tcpSocketStats(checkedPort);
-            boolean stale = sockets.closeWait >= 2
-                    || sockets.stuck >= STALE_SOCKET_THRESHOLD
-                    || sockets.established + sockets.closeWait >= MAX_ADB_CONNECTIONS;
+            if (sockets.established > 0) {
+                // This Android 5.1 adbd accepts the real host transport but does not answer a
+                // second CNXN probe concurrently. Probing here creates CLOSE_WAIT entries and
+                // can kill a perfectly healthy remote session.
+                lastProtocolHealthy = true;
+                lastProtocolDetail = "active transport";
+                lastProtocolAt = System.currentTimeMillis();
+            } else if (lastProtocolAt == 0L) {
+                // A successful once-per-boot synchronization may have happened in a previous
+                // app process. Trust that persisted result instead of opening another half-auth
+                // transport against this old adbd implementation.
+                lastProtocolHealthy = bootIdentity().equals(
+                        Prefs.get(ctx, Prefs.K_ADB_TUNNEL_SYNC_BOOT, ""));
+                lastProtocolDetail = lastProtocolHealthy
+                        ? "startup synchronized" : "startup sync pending";
+                lastProtocolAt = System.currentTimeMillis();
+            }
+            // ESTABLISHED sockets and a non-zero receive queue are normal while FRP carries
+            // a high-latency ADB stream. Only CLOSE_WAIT or a failed protocol handshake is
+            // actionable; the old queue heuristic caused a restart loop and offline clients.
+            boolean stale = sockets.established == 0
+                    && (sockets.closeWait >= CLOSE_WAIT_THRESHOLD || !lastProtocolHealthy);
             boolean healthy = !stale;
             int failures;
             synchronized (HEALTH_LOCK) {
@@ -190,7 +223,8 @@ public class AdbManager {
                 return "adb tcp device side healthy port=" + checkedPort;
             }
             String reason = "stale sockets closeWait=" + sockets.closeWait
-                    + " stuck=" + sockets.stuck + " established=" + sockets.established;
+                    + " stuck=" + sockets.stuck + " established=" + sockets.established
+                    + " protocol=" + lastProtocolDetail;
             if (failures < FAILURE_THRESHOLD) {
                 append("watchdog warning " + failures + "/" + FAILURE_THRESHOLD + ": " + reason);
                 return "adb tcp degraded, confirming: " + reason;
@@ -199,6 +233,32 @@ public class AdbManager {
         } catch (Exception e) {
             append("auto start failed: " + e.getMessage());
             return "adb tcp auto failed: " + e.getMessage();
+        }
+    }
+
+    public static boolean isSystemBootComplete() {
+        return "1".equals(prop("sys.boot_completed"))
+                && "1".equals(prop("dev.bootcomplete"));
+    }
+
+    public static boolean isTunnelSynchronized(Context ctx) {
+        return bootIdentity().equals(Prefs.get(ctx, Prefs.K_ADB_TUNNEL_SYNC_BOOT, ""));
+    }
+
+    /** Refreshes adbd once per physical boot before exposing it through the FRP tunnel. */
+    public static String ensureTunnelSynchronized(Context ctx) throws Exception {
+        if (!Prefs.getB(ctx, Prefs.K_ADB_TCP_AUTO, false)) {
+            return "adb tcp auto disabled";
+        }
+        synchronized (TUNNEL_SYNC_LOCK) {
+            String boot = bootIdentity();
+            if (isTunnelSynchronized(ctx)) {
+                return "startup tunnel already synchronized";
+            }
+            String result = startPort(port(ctx), "startup tunnel synchronization");
+            Prefs.put(ctx, Prefs.K_ADB_TUNNEL_SYNC_BOOT, boot);
+            append("startup tunnel synchronized boot=" + boot);
+            return result;
         }
     }
 
@@ -223,13 +283,17 @@ public class AdbManager {
         applyTcpHardening();
         String out = runRoot("setprop service.adb.tcp.port " + port + "; "
                 + "setprop persist.service.adb.tcp.port " + port + "; "
-                + "stop adbd; sleep 1; start adbd; sleep 2; "
+                + "stop adbd; I=0; while [ \"$(getprop init.svc.adbd)\" != stopped ] "
+                + "&& [ $I -lt 3 ]; do sleep 1; I=$((I+1)); done; "
+                + "start adbd; I=0; while [ \"$(getprop init.svc.adbd)\" != running ] "
+                + "&& [ $I -lt 5 ]; do sleep 1; I=$((I+1)); done; sleep 1; "
                 + "echo service=$(getprop service.adb.tcp.port); "
                 + "echo persist=$(getprop persist.service.adb.tcp.port)");
         String daemonState = prop("init.svc.adbd");
         boolean listening = isListening(port);
+        ProtocolProbe protocol = listening ? probeProtocol(port) : ProtocolProbe.failed("not listening");
         TcpSocketStats sockets = tcpSocketStats(port);
-        boolean healthy = "running".equals(daemonState) && listening;
+        boolean healthy = "running".equals(daemonState) && listening && protocol.ok;
         long now = System.currentTimeMillis();
         synchronized (HEALTH_LOCK) {
             lastRestartAt = now;
@@ -240,12 +304,17 @@ public class AdbManager {
             lastCheckAt = now;
             lastCloseWaitCount = sockets.closeWait;
             lastStuckSocketCount = sockets.stuck;
+            lastProtocolHealthy = protocol.ok;
+            lastProtocolDetail = protocol.detail;
+            lastProtocolAt = now;
             consecutiveFailures = healthy ? 0 : 1;
             lastCheckDetail = "daemon=" + daemonState + " listening=" + listening
                     + " closeWait=" + sockets.closeWait
-                    + " stuck=" + sockets.stuck + " established=" + sockets.established;
+                    + " stuck=" + sockets.stuck + " established=" + sockets.established
+                    + " protocol=" + protocol.detail;
         }
-        if (!healthy) throw new IllegalStateException("adbd restart did not restore listener");
+        if (!healthy) throw new IllegalStateException(
+                "adbd restart did not restore protocol: " + protocol.detail);
         String msg = "ADB TCP 已恢复 port=" + port;
         append(msg + " reason=" + reason + "\n" + out);
         return msg;
@@ -305,6 +374,70 @@ public class AdbManager {
         } catch (Exception e) {
             return "";
         }
+    }
+
+    private static String bootIdentity() {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new FileInputStream("/proc/sys/kernel/random/boot_id"), "US-ASCII"))) {
+            String value = reader.readLine();
+            if (value != null && !value.trim().isEmpty()) return value.trim();
+        } catch (Exception ignored) {}
+        long bootEpochMinute = (System.currentTimeMillis() - SystemClock.elapsedRealtime()) / 60000L;
+        return "boot-" + bootEpochMinute;
+    }
+
+    private static ProtocolProbe probeProtocol(int port) {
+        Socket socket = new Socket();
+        try {
+            socket.connect(new InetSocketAddress("127.0.0.1", port), 1800);
+            socket.setSoTimeout(2500);
+            byte[] payload = new byte[]{'h', 'o', 's', 't', ':', ':', 0};
+            int command = 0x4e584e43; // CNXN
+            int checksum = 0;
+            for (byte value : payload) checksum += value & 0xff;
+            byte[] header = new byte[24];
+            putLe32(header, 0, command);
+            putLe32(header, 4, 0x01000000);
+            putLe32(header, 8, 4096);
+            putLe32(header, 12, payload.length);
+            putLe32(header, 16, checksum);
+            putLe32(header, 20, command ^ 0xffffffff);
+            OutputStream output = socket.getOutputStream();
+            output.write(header);
+            output.write(payload);
+            output.flush();
+            byte[] response = new byte[24];
+            InputStream input = socket.getInputStream();
+            int read = 0;
+            while (read < response.length) {
+                int count = input.read(response, read, response.length - read);
+                if (count < 0) break;
+                read += count;
+            }
+            if (read != response.length) return ProtocolProbe.failed("short response=" + read);
+            int reply = le32(response, 0);
+            if (reply == 0x48545541) return ProtocolProbe.ok("AUTH");
+            if (reply == 0x4e584e43) return ProtocolProbe.ok("CNXN");
+            return ProtocolProbe.failed(String.format(Locale.US, "reply=%08x", reply));
+        } catch (Exception e) {
+            return ProtocolProbe.failed(e.getClass().getSimpleName());
+        } finally {
+            try { socket.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    private static void putLe32(byte[] target, int offset, int value) {
+        target[offset] = (byte) value;
+        target[offset + 1] = (byte) (value >>> 8);
+        target[offset + 2] = (byte) (value >>> 16);
+        target[offset + 3] = (byte) (value >>> 24);
+    }
+
+    private static int le32(byte[] value, int offset) {
+        return (value[offset] & 0xff)
+                | ((value[offset + 1] & 0xff) << 8)
+                | ((value[offset + 2] & 0xff) << 16)
+                | ((value[offset + 3] & 0xff) << 24);
     }
 
     private static String runRoot(String cmd) throws Exception {
@@ -412,5 +545,16 @@ public class AdbManager {
         int established;
         int closeWait;
         int stuck;
+    }
+
+    private static final class ProtocolProbe {
+        final boolean ok;
+        final String detail;
+        ProtocolProbe(boolean ok, String detail) {
+            this.ok = ok;
+            this.detail = detail;
+        }
+        static ProtocolProbe ok(String detail) { return new ProtocolProbe(true, detail); }
+        static ProtocolProbe failed(String detail) { return new ProtocolProbe(false, detail); }
     }
 }

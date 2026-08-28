@@ -31,6 +31,7 @@ public final class BootAssetsManager {
     private static final String LOGO_RAW = "logo-original.bin";
     private static final String LOGO_GZIP = "logo-original.bin.gz";
     private static final String BOOTANIM = "bootanimation-original.zip";
+    private static final String SHUTANIM = "shutanimation-original.zip";
     private static final String MANIFEST = "manifest.json";
     private static final String SUMS = "SHA256SUMS";
     private static final String UPLOAD = "logo-custom.bin";
@@ -46,10 +47,13 @@ public final class BootAssetsManager {
                 root.put("partition", probe.partition);
                 root.put("partitionBytes", probe.bytes);
                 root.put("mirrorBootanimation", probe.mirrorBootanimation);
+                root.put("mirrorShutanimation", probe.mirrorShutanimation);
                 root.put("probe", probe.detail);
                 putFile(root, "logoRaw", file(context, LOGO_RAW));
                 putFile(root, "logoGzip", file(context, LOGO_GZIP));
                 putFile(root, "bootanimation", file(context, BOOTANIM));
+                putFile(root, "shutanimation", file(context, SHUTANIM));
+                putFile(root, "activeShutanimation", new File("/system/media/shutanimation.zip"));
                 putFile(root, "manifest", file(context, MANIFEST));
                 putFile(root, "uploadedLogo", file(context, UPLOAD));
                 root.put("battery", battery(context));
@@ -84,36 +88,100 @@ public final class BootAssetsManager {
                 if (probe.mirrorBootanimation.isEmpty()) {
                     return err("未找到 Magisk mirror 中的原厂 bootanimation，已拒绝把当前覆盖文件当作原厂备份");
                 }
+                if (probe.mirrorShutanimation.isEmpty()) {
+                    return err("未找到 Magisk mirror 中的原厂 shutanimation，拒绝覆盖现有备份");
+                }
                 File dir = dir(context);
-                String command = busyboxPrefix()
-                        + "P=" + q(probe.partition) + "; D=" + q(dir.getAbsolutePath()) + "; "
-                        + "mkdir -p \"$D\"; rm -f \"$D/" + LOGO_RAW + ".part\" "
-                        + "\"$D/" + LOGO_GZIP + ".part\" \"$D/" + BOOTANIM + ".part\"; "
-                        + "$BB dd if=\"$P\" of=\"$D/" + LOGO_RAW + ".part\" bs=1048576 2>&1 || exit 21; "
+                File existingRaw = file(context, LOGO_RAW);
+                boolean captureLogo = !existingRaw.isFile() || existingRaw.length() != probe.bytes;
+                String logoBackup = captureLogo
+                        ? "$BB dd if=\"$P\" of=\"$D/" + LOGO_RAW + ".part\" bs=1048576 2>&1 || exit 21; "
                         + "[ -s \"$D/" + LOGO_RAW + ".part\" ] || exit 22; "
                         + "$BB gzip -c \"$D/" + LOGO_RAW + ".part\" > \"$D/" + LOGO_GZIP + ".part\" || exit 23; "
-                        + "$BB cp " + q(probe.mirrorBootanimation) + " \"$D/" + BOOTANIM + ".part\" || exit 24; "
-                        + "[ -s \"$D/" + BOOTANIM + ".part\" ] || exit 25; "
                         + "$BB mv \"$D/" + LOGO_RAW + ".part\" \"$D/" + LOGO_RAW + "\"; "
                         + "$BB mv \"$D/" + LOGO_GZIP + ".part\" \"$D/" + LOGO_GZIP + "\"; "
+                        : "";
+                String command = busyboxPrefix()
+                        + "P=" + q(probe.partition) + "; D=" + q(dir.getAbsolutePath()) + "; "
+                        + "mkdir -p \"$D\"; rm -f \"$D/" + BOOTANIM + ".part\"; "
+                        + "rm -f \"$D/" + SHUTANIM + ".part\"; "
+                        + logoBackup
+                        + "$BB cp " + q(probe.mirrorBootanimation) + " \"$D/" + BOOTANIM + ".part\" || exit 24; "
+                        + "[ -s \"$D/" + BOOTANIM + ".part\" ] || exit 25; "
+                        + "$BB cp " + q(probe.mirrorShutanimation) + " \"$D/" + SHUTANIM + ".part\" || exit 26; "
+                        + "[ -s \"$D/" + SHUTANIM + ".part\" ] || exit 27; "
                         + "$BB mv \"$D/" + BOOTANIM + ".part\" \"$D/" + BOOTANIM + "\"; "
-                        + "chmod 644 \"$D/" + LOGO_RAW + "\" \"$D/" + LOGO_GZIP + "\" \"$D/" + BOOTANIM + "\"";
+                        + "$BB mv \"$D/" + SHUTANIM + ".part\" \"$D/" + SHUTANIM + "\"; "
+                        + "chmod 644 \"$D/" + LOGO_RAW + "\" \"$D/" + LOGO_GZIP + "\" "
+                        + "\"$D/" + BOOTANIM + "\" \"$D/" + SHUTANIM + "\"";
                 CommandResult result = root(command);
                 if (!result.ok) return err("备份失败: " + compact(result.output));
                 File raw = file(context, LOGO_RAW);
                 File gzip = file(context, LOGO_GZIP);
                 File animation = file(context, BOOTANIM);
+                File shutdown = file(context, SHUTANIM);
                 if (raw.length() != probe.bytes) {
                     return err("logo 备份容量不一致: " + raw.length() + " / " + probe.bytes);
                 }
-                writeManifest(context, probe, raw, gzip, animation);
+                writeManifest(context, probe, raw, gzip, animation, shutdown);
                 root.put("ok", true);
-                root.put("msg", "原厂 logo 与 bootanimation 已备份并校验");
+                root.put("msg", "原厂 logo、开机动画与关机动画已备份并校验");
                 root.put("status", status(context));
             } catch (Exception e) {
                 putErr(root, e.getMessage());
             }
             return root;
+        }
+    }
+
+    /** Restores the immutable stock backup file without writing the physical logo partition. */
+    public static JSONObject uploadOriginalLogo(Context context, InputStream input, long length,
+                                                String expectedSha) {
+        synchronized (LOCK) {
+            File part = file(context, LOGO_RAW + ".part");
+            try {
+                String expected = normalizeSha(expectedSha);
+                if (expected.isEmpty()) return err("缺少原厂 logo 的预期 SHA-256");
+                Probe probe = probe();
+                if (!probe.ok || length != probe.bytes) {
+                    return err("原厂备份容量与 logo 分区不一致: " + length + " / " + probe.bytes);
+                }
+                if (part.exists()) part.delete();
+                long copied = copyExact(input, part, length);
+                if (copied != length) {
+                    part.delete();
+                    return err("原厂备份上传中断: " + copied + " / " + length);
+                }
+                String actual = sha256(part);
+                if (!expected.equals(actual)) {
+                    part.delete();
+                    return err("原厂备份 SHA-256 不一致");
+                }
+                File raw = file(context, LOGO_RAW);
+                if (raw.exists()) raw.delete();
+                if (!part.renameTo(raw)) return err("无法保存原厂 logo 备份");
+                raw.setReadable(true, false);
+                File gzip = file(context, LOGO_GZIP);
+                File gzipPart = file(context, LOGO_GZIP + ".part");
+                CommandResult result = root(busyboxPrefix()
+                        + "$BB gzip -c " + q(raw.getAbsolutePath()) + " > "
+                        + q(gzipPart.getAbsolutePath()) + " && $BB mv "
+                        + q(gzipPart.getAbsolutePath()) + " " + q(gzip.getAbsolutePath())
+                        + " && chmod 644 " + q(gzip.getAbsolutePath()));
+                if (!result.ok) return err("原厂备份压缩失败: " + compact(result.output));
+                File boot = file(context, BOOTANIM);
+                File shutdown = file(context, SHUTANIM);
+                if (boot.isFile() && shutdown.isFile()) {
+                    writeManifest(context, probe, raw, gzip, boot, shutdown);
+                }
+                JSONObject root = new JSONObject();
+                root.put("ok", true).put("bytes", raw.length()).put("sha256", actual)
+                        .put("msg", "设备端原厂 logo 备份已恢复，未写入物理分区");
+                return root;
+            } catch (Exception e) {
+                part.delete();
+                return err(e.getMessage());
+            }
         }
     }
 
@@ -129,19 +197,7 @@ public final class BootAssetsManager {
                     return err("上传容量与原分区不一致: " + length + " / " + original.length());
                 }
                 if (part.exists()) part.delete();
-                long copied = 0;
-                byte[] buffer = new byte[64 * 1024];
-                try (FileOutputStream output = new FileOutputStream(part)) {
-                    while (copied < length) {
-                        int read = input.read(buffer, 0,
-                                (int) Math.min(buffer.length, length - copied));
-                        if (read < 0) break;
-                        if (read == 0) continue;
-                        output.write(buffer, 0, read);
-                        copied += read;
-                    }
-                    output.flush();
-                }
+                long copied = copyExact(input, part, length);
                 if (copied != length) {
                     part.delete();
                     return err("上传中断: " + copied + " / " + length);
@@ -245,6 +301,7 @@ public final class BootAssetsManager {
     public static File downloadFile(Context context, String kind) {
         if ("logo".equals(kind)) return readable(file(context, LOGO_GZIP));
         if ("bootanimation".equals(kind)) return readable(file(context, BOOTANIM));
+        if ("shutanimation".equals(kind)) return readable(file(context, SHUTANIM));
         if ("manifest".equals(kind)) return readable(file(context, MANIFEST));
         if ("sums".equals(kind)) return readable(file(context, SUMS));
         return null;
@@ -271,7 +328,7 @@ public final class BootAssetsManager {
     }
 
     private static void writeManifest(Context context, Probe probe, File raw, File gzip,
-                                      File animation) throws Exception {
+                                      File animation, File shutdown) throws Exception {
         JSONObject manifest = new JSONObject();
         manifest.put("schema", 1);
         manifest.put("device", DEVICE_DIR);
@@ -292,6 +349,12 @@ public final class BootAssetsManager {
         boot.put("sha256", sha256(animation));
         boot.put("source", "Magisk mirror of stock /system/media/bootanimation.zip");
         manifest.put("bootanimation", boot);
+        JSONObject shut = new JSONObject();
+        shut.put("file", SHUTANIM);
+        shut.put("bytes", shutdown.length());
+        shut.put("sha256", sha256(shutdown));
+        shut.put("source", "Magisk mirror of stock /system/media/shutanimation.zip");
+        manifest.put("shutanimation", shut);
         try (OutputStreamWriter writer = new OutputStreamWriter(
                 new FileOutputStream(file(context, MANIFEST)), "UTF-8")) {
             writer.write(manifest.toString(2));
@@ -299,6 +362,7 @@ public final class BootAssetsManager {
         }
         String sums = sha256(gzip) + "  " + LOGO_GZIP + "\n"
                 + sha256(animation) + "  " + BOOTANIM + "\n"
+                + sha256(shutdown) + "  " + SHUTANIM + "\n"
                 + sha256(file(context, MANIFEST)) + "  " + MANIFEST + "\n";
         try (OutputStreamWriter writer = new OutputStreamWriter(
                 new FileOutputStream(file(context, SUMS)), "UTF-8")) {
@@ -316,13 +380,18 @@ public final class BootAssetsManager {
                 + "M=''; for X in /sbin/.magisk/mirror/system/media/bootanimation.zip "
                 + "/sbin/.magisk/mirror/system_root/system/media/bootanimation.zip; do "
                 + "[ -f \"$X\" ] && { M=\"$X\"; break; }; done; "
-                + "echo ORACLE_PARTITION=$P; echo ORACLE_BYTES=$B; echo ORACLE_MIRROR=$M";
+                + "S=''; for X in /sbin/.magisk/mirror/system/media/shutanimation.zip "
+                + "/sbin/.magisk/mirror/system_root/system/media/shutanimation.zip; do "
+                + "[ -f \"$X\" ] && { S=\"$X\"; break; }; done; "
+                + "echo ORACLE_PARTITION=$P; echo ORACLE_BYTES=$B; "
+                + "echo ORACLE_MIRROR=$M; echo ORACLE_SHUT_MIRROR=$S";
         CommandResult result = root(command);
         String partition = label(result.output, "ORACLE_PARTITION");
         String mirror = label(result.output, "ORACLE_MIRROR");
+        String shutMirror = label(result.output, "ORACLE_SHUT_MIRROR");
         long bytes = parseLong(label(result.output, "ORACLE_BYTES"), -1);
         boolean ok = result.ok && !partition.isEmpty() && bytes > 0 && bytes <= MAX_LOGO_BYTES;
-        return new Probe(ok, partition, bytes, mirror,
+        return new Probe(ok, partition, bytes, mirror, shutMirror,
                 ok ? "logo 分区已识别" : compact(result.output));
     }
 
@@ -399,6 +468,22 @@ public final class BootAssetsManager {
         return out.toString();
     }
 
+    private static long copyExact(InputStream input, File target, long length) throws Exception {
+        long copied = 0;
+        byte[] buffer = new byte[64 * 1024];
+        try (FileOutputStream output = new FileOutputStream(target)) {
+            while (copied < length) {
+                int read = input.read(buffer, 0, (int) Math.min(buffer.length, length - copied));
+                if (read < 0) break;
+                if (read == 0) continue;
+                output.write(buffer, 0, read);
+                copied += read;
+            }
+            output.flush();
+        }
+        return copied;
+    }
+
     private static String normalizeSha(String value) {
         String s = value == null ? "" : value.trim().toLowerCase(Locale.US);
         return s.matches("[0-9a-f]{64}") ? s : "";
@@ -462,12 +547,15 @@ public final class BootAssetsManager {
         final String partition;
         final long bytes;
         final String mirrorBootanimation;
+        final String mirrorShutanimation;
         final String detail;
-        Probe(boolean ok, String partition, long bytes, String mirrorBootanimation, String detail) {
+        Probe(boolean ok, String partition, long bytes, String mirrorBootanimation,
+              String mirrorShutanimation, String detail) {
             this.ok = ok;
             this.partition = partition == null ? "" : partition;
             this.bytes = bytes;
             this.mirrorBootanimation = mirrorBootanimation == null ? "" : mirrorBootanimation;
+            this.mirrorShutanimation = mirrorShutanimation == null ? "" : mirrorShutanimation;
             this.detail = detail == null ? "" : detail;
         }
     }
