@@ -1200,6 +1200,9 @@ public class SettingsWebServer {
             o.put("webrtc", com.magneo.compass.cam.WebRtcStreamer.get().state());
             o.put("webrtcError", com.magneo.compass.cam.WebRtcStreamer.get().error());
             o.put("realFps", com.magneo.compass.cam.CameraStreamService.realFps());
+            o.put("visionPreviewDirect", com.magneo.compass.cam.CameraStreamService.isVisionPreviewDirect());
+            o.put("cameraEncoding", com.magneo.compass.cam.CameraStreamService.isEncodingActive());
+            o.put("cameraExternalConsumers", com.magneo.compass.cam.CameraStreamService.externalConsumerCount());
             o.put("fpsInfo", com.magneo.compass.cam.CameraStreamService.fpsInfo());
             o.put("camDiag", com.magneo.compass.cam.CameraStreamService.camDiag());
             byte[] b = o.toString().getBytes("UTF-8");

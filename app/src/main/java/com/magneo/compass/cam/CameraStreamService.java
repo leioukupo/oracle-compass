@@ -3,6 +3,7 @@ package com.magneo.compass.cam;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.SurfaceTexture;
 import android.hardware.Camera;
 import android.os.IBinder;
 import android.util.Log;
@@ -10,6 +11,9 @@ import android.util.Log;
 import com.magneo.compass.Prefs;
 
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /** 摄像头网络流服务：前/后摄采集 -> H.264 硬编 -> RTSP / RTMP / fMP4(网页) / WebRTC 输出。 */
 public class CameraStreamService extends Service {
@@ -23,6 +27,7 @@ public class CameraStreamService extends Service {
     private static volatile boolean visionSnapshotEnabled = false;
     private static volatile FrameSnapshot latestVisionSnapshot;
     private static volatile long latestVisionSeq = 0;
+    private static volatile SurfaceTexture pendingVisionPreviewTexture;
 
     private H264Encoder encoder;
     private RtpServer rtp;
@@ -30,6 +35,26 @@ public class CameraStreamService extends Service {
     private Camera camera;
     private int w, h;
     private volatile boolean running = false;
+    private final java.util.concurrent.ExecutorService cameraControl =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "cam-control");
+                t.setDaemon(true);
+                return t;
+            });
+    private ScheduledExecutorService streamDemandMonitor;
+    private volatile SurfaceTexture activePreviewTexture;
+    private volatile SurfaceTexture fallbackPreviewTexture;
+    private volatile boolean fallbackConsumerRunning;
+    private volatile boolean visionPreviewDirect;
+    private volatile boolean encodingActive;
+    private volatile int configuredFps;
+    private volatile int configuredBitrate;
+    private volatile CameraSourceFormat configuredSourceFormat = CameraSourceFormat.NV21;
+    private volatile String configuredRtmpUrl = "";
+    private volatile byte[] visionNv21Scratch;
+    private final int[] encFrames = {0};
+    private final int[] encBytes = {0};
+    private final int[] encKeys = {0};
 
     /** NV21 帧监听器（供灵眼等界面直接抓帧用，不走 RTSP 回环）。 */
     public interface FrameListener {
@@ -58,6 +83,18 @@ public class CameraStreamService extends Service {
     public static String realFps() { return realFps; }
     public static String fpsInfo() { return fpsInfo; }
     public static String camDiag() { return camDiag; }
+    public static boolean isVisionPreviewDirect() {
+        CameraStreamService s = inst;
+        return s != null && s.visionPreviewDirect;
+    }
+    public static boolean isEncodingActive() {
+        CameraStreamService s = inst;
+        return s != null && s.encodingActive;
+    }
+    public static int externalConsumerCount() {
+        CameraStreamService s = inst;
+        return s == null ? 0 : s.externalConsumerCountInternal();
+    }
     public static boolean isRunning() { return "running".equals(status); }
     public static boolean isStarting() { return "starting".equals(status); }
     public static boolean isActive() { return isRunning() || isStarting(); }
@@ -71,9 +108,28 @@ public class CameraStreamService extends Service {
     }
 
     public static void setFrameListener(FrameListener l) {
+        pendingListener = l;
         CameraStreamService s = inst;
         if (s != null) s.frameListener = l;
-        else pendingListener = l;
+    }
+
+    /**
+     * 让灵眼的 TextureView 直接承接 Camera1 预览。服务尚未启动时会缓存，启动后自动绑定。
+     * 传入 null 表示回退到服务内部的离屏预览目标。
+     */
+    public static void setVisionPreviewSurface(SurfaceTexture texture) {
+        pendingVisionPreviewTexture = texture;
+        CameraStreamService s = inst;
+        if (s != null) s.schedulePreviewTarget(texture);
+    }
+
+    /** 仅清除调用方自己注册的 Surface，避免旧 Activity 销毁时抢走新页面的预览。 */
+    public static void clearVisionPreviewSurface(SurfaceTexture texture) {
+        if (texture == null || pendingVisionPreviewTexture == texture) {
+            pendingVisionPreviewTexture = null;
+            CameraStreamService s = inst;
+            if (s != null) s.schedulePreviewTarget(null);
+        }
     }
 
     public static void setVisionSnapshotEnabled(boolean enabled) {
@@ -92,10 +148,12 @@ public class CameraStreamService extends Service {
     }
 
     @Override public int onStartCommand(Intent i, int flags, int startId) {
-        stopAll();
-        status = "starting";
-        statusDetail = "";
-        new Thread(this::startAll, "cam-start").start();
+        cameraControl.execute(() -> {
+            stopAll();
+            status = "starting";
+            statusDetail = "";
+            startAll();
+        });
         return START_STICKY;
     }
 
@@ -119,6 +177,7 @@ public class CameraStreamService extends Service {
             int bitrate = Prefs.getI(this, Prefs.K_CAM_BITRATE, 5000) * 1000;
             int rtspPort = Prefs.getI(this, Prefs.K_RTSP_PORT, 8554);
             String rtmpUrl = Prefs.get(this, Prefs.K_RTMP_URL, "");
+            configuredRtmpUrl = rtmpUrl == null ? "" : rtmpUrl.trim();
 
             rtp = new RtpServer(rtspPort);
             rtp.start();
@@ -138,6 +197,8 @@ public class CameraStreamService extends Service {
 
             com.magneo.compass.FlashlightController.releaseHardwareKeepingRequest();
             camera = Camera.open(camId);
+            // 灵眼旧的 Bitmap 路径始终旋转 90 度；直出预览保持相同的纵向显示方向。
+            try { camera.setDisplayOrientation(90); } catch (Throwable ignored) {}
             Camera.Parameters p = camera.getParameters();
             java.util.List<Camera.Size> allSizes = p.getSupportedPreviewSizes();
             Camera.Size size = chooseSize(allSizes, wantW, wantH);
@@ -160,26 +221,13 @@ public class CameraStreamService extends Service {
                     : CameraSourceFormat.YV12;
             // 曝光保持自动（AE），不手动干预
 
-            final int[] encFrames = {0};
-            final int[] encBytes = {0};
-            final int[] encKeys = {0};
-            encoder = new H264Encoder(w, h, fps, bitrate, new H264Encoder.Listener() {
-                @Override public void onSpsPps(byte[] sps, byte[] pps) {
-                    if (rtp != null) rtp.setSpsPps(sps, pps);
-                    if (rtmp != null) rtmp.setSpsPps(sps, pps);
-                    CameraHttpStreamer.get().setSpsPps(w, h, sps, pps);
-                }
-                @Override public void onFrame(byte[] nal, long ptsUs, boolean keyframe) {
-                    encFrames[0]++;
-                    encBytes[0] += nal.length;
-                    if (keyframe) encKeys[0]++;
-                    if (rtp != null) rtp.feed(nal, ptsUs);
-                    if (rtmp != null) rtmp.feed(nal, ptsUs, keyframe);
-                    CameraHttpStreamer.get().feed(nal, ptsUs, keyframe);
-                }
-            });
-            encoder.setSourceFormat(camSrcFmt);
             int setFps = negotiateFps(p, fps);
+            configuredFps = setFps;
+            configuredBitrate = bitrate;
+            configuredSourceFormat = camSrcFmt;
+            encFrames[0] = 0;
+            encBytes[0] = 0;
+            encKeys[0] = 0;
             String fpsDiag = "fps=" + setFps + " camFmt=" + p.getPreviewFormat();
             boolean ok = false;
             try {
@@ -243,23 +291,27 @@ public class CameraStreamService extends Service {
                         statusDetail = "cam=" + camIdFinal[0] + " " + w + "x" + h + "@" + setFpsFinal[0]
                                 + "fps 实际" + f + "fps 亮度" + avgLum
                                 + " 编码" + encFrames[0] + "帧/" + (encBytes[0] / 1024) + "KB 关键帧" + encKeys[0]
-                                + " " + fpsInfo;
+                                + " " + pipelineStatus() + " " + fpsInfo;
                     }
                 }
                 long pts = System.nanoTime() / 1000;
                 if (visionSnapshotEnabled) {
-                    latestVisionSnapshot = new FrameSnapshot(data.clone(), w, h, pts, ++latestVisionSeq);
+                    latestVisionSnapshot = new FrameSnapshot(copyAsNv21(data, camSrcFmt).clone(), w, h,
+                            pts, ++latestVisionSeq);
                 }
                 try {
-                    if (encoder != null) encoder.feedRaw(data, pts);
+                    H264Encoder enc = encoder;
+                    if (encodingActive && enc != null) enc.feedRaw(data, pts);
                     WebRtcStreamer wr2 = WebRtcStreamer.get();
-                    if (wr2 != null) wr2.feedFrameRaw(data, w, h, camSrcFmt);
+                    if (encodingActive && wr2 != null && wr2.needsFrames()) {
+                        wr2.feedFrameRaw(data, w, h, camSrcFmt);
+                    }
                 } catch (Exception e) {
                     Log.w(TAG, "frame failed", e);
                 }
                 try {
                     FrameListener fl = frameListener;
-                    if (fl != null) fl.onFrame(data, w, h);
+                    if (fl != null) fl.onFrame(copyAsNv21(data, camSrcFmt), w, h);
                 } catch (Exception ignored) {}
                 cam.addCallbackBuffer(data);
             });
@@ -267,23 +319,21 @@ public class CameraStreamService extends Service {
             camera.addCallbackBuffer(new byte[frameSize]);
             camera.addCallbackBuffer(new byte[frameSize]);
             camera.addCallbackBuffer(new byte[frameSize]);
-            // MTK 后摄纯回调模式传感器输出暗：GL 线程消费 SurfaceTexture，让 HAL 进入正常预览模式
-            try {
-                final android.graphics.SurfaceTexture st = new android.graphics.SurfaceTexture(0);
-                camera.setPreviewTexture(st);
-                new Thread(() -> consumeSurface(st), "surf-consumer").start();
-            } catch (Throwable stErr) {
-                camDiag = "surfaceTex失败: " + stErr.getMessage();
-            }
+            bindPreviewTarget(pendingVisionPreviewTexture, false);
             camera.startPreview();
             running = true;
+            if (activePreviewTexture == fallbackPreviewTexture) startFallbackConsumer(fallbackPreviewTexture);
+            startStreamDemandMonitor();
+            updateEncodingDemand();
             status = "running";
             StringBuilder rng = new StringBuilder();
             java.util.List<int[]> ranges = p.getSupportedPreviewFpsRange();
             if (ranges != null) for (int[] r : ranges) rng.append("[").append(r[0] / 1000).append("-").append(r[1] / 1000).append("]");
-            statusDetail = "cam=" + camId + " " + w + "x" + h + "@" + setFps + "fps " + fpsDiag + " 实际" + realFps + " range=" + rng;
+            statusDetail = "cam=" + camId + " " + w + "x" + h + "@" + setFps + "fps " + fpsDiag
+                    + " 实际" + realFps + " " + pipelineStatus() + " range=" + rng;
         } catch (Throwable t) {
             Log.w(TAG, "startAll failed", t);
+            stopAll();
             status = "error";
             statusDetail = t.getMessage() == null ? t.toString() : t.getMessage();
         }
@@ -306,8 +356,159 @@ public class CameraStreamService extends Service {
         return want;
     }
 
+    private void schedulePreviewTarget(final SurfaceTexture target) {
+        cameraControl.execute(() -> {
+            if (camera == null) return;
+            bindPreviewTarget(target, true);
+            updateEncodingDemand();
+        });
+    }
+
+    /** Camera1 只能绑定一个预览目标；切换时短暂停预览，回调和编码器保持不变。 */
+    private void bindPreviewTarget(SurfaceTexture requested, boolean restartPreview) {
+        if (camera == null) return;
+        SurfaceTexture next = requested == null ? ensureFallbackPreviewTexture() : requested;
+        if (activePreviewTexture == next) {
+            visionPreviewDirect = requested != null;
+            return;
+        }
+        boolean restart = restartPreview && running;
+        if (restart) {
+            try { camera.stopPreview(); } catch (Throwable ignored) {}
+        }
+        SurfaceTexture old = activePreviewTexture;
+        if (old == fallbackPreviewTexture) {
+            fallbackConsumerRunning = false;
+            fallbackPreviewTexture = null;
+        }
+        try {
+            camera.setPreviewTexture(next);
+            activePreviewTexture = next;
+            visionPreviewDirect = requested != null;
+            if (restart) camera.startPreview();
+            if (running && next == fallbackPreviewTexture) startFallbackConsumer(next);
+        } catch (Throwable t) {
+            Log.w(TAG, "set preview target failed", t);
+            visionPreviewDirect = false;
+            if (requested != null) bindPreviewTarget(null, restartPreview);
+        }
+    }
+
+    private SurfaceTexture ensureFallbackPreviewTexture() {
+        SurfaceTexture texture = fallbackPreviewTexture;
+        if (texture == null) {
+            texture = new SurfaceTexture(0);
+            fallbackPreviewTexture = texture;
+        }
+        return texture;
+    }
+
+    private void startFallbackConsumer(final SurfaceTexture texture) {
+        if (texture == null || fallbackConsumerRunning) return;
+        fallbackConsumerRunning = true;
+        Thread t = new Thread(() -> consumeSurface(texture), "surf-consumer");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private byte[] copyAsNv21(byte[] raw, CameraSourceFormat format) {
+        if (format == CameraSourceFormat.NV21) return raw;
+        int bytes = w * h * 3 / 2;
+        byte[] out = visionNv21Scratch;
+        if (out == null || out.length != bytes) {
+            out = new byte[bytes];
+            visionNv21Scratch = out;
+        }
+        if (format == CameraSourceFormat.YV12) H264Encoder.yv12ToNv21(raw, out, w, h);
+        else H264Encoder.nv12ToNv21(raw, out, w, h);
+        return out;
+    }
+
+    private void startStreamDemandMonitor() {
+        stopStreamDemandMonitor();
+        streamDemandMonitor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "cam-demand");
+            t.setDaemon(true);
+            return t;
+        });
+        streamDemandMonitor.scheduleWithFixedDelay(
+                () -> cameraControl.execute(this::updateEncodingDemand), 250, 250, TimeUnit.MILLISECONDS);
+    }
+
+    private void stopStreamDemandMonitor() {
+        if (streamDemandMonitor != null) {
+            streamDemandMonitor.shutdownNow();
+            streamDemandMonitor = null;
+        }
+    }
+
+    private int externalConsumerCountInternal() {
+        int count = configuredRtmpUrl.isEmpty() ? 0 : 1;
+        RtpServer rtsp = rtp;
+        if (rtsp != null) count += rtsp.playingClientCount();
+        count += CameraHttpStreamer.get().clientCount();
+        if (WebRtcStreamer.get().needsFrames()) count++;
+        return count;
+    }
+
+    private void updateEncodingDemand() {
+        if (!running) return;
+        boolean needEncoding = !visionPreviewDirect || externalConsumerCountInternal() > 0;
+        if (needEncoding == encodingActive) return;
+        if (needEncoding) enableEncoding();
+        else disableEncoding();
+        statusDetail = pipelineStatus() + " " + statusDetail;
+    }
+
+    private void enableEncoding() {
+        if (encoder != null || w <= 0 || h <= 0 || configuredFps <= 0) return;
+        try {
+            H264Encoder enc = new H264Encoder(w, h, configuredFps, configuredBitrate,
+                    new H264Encoder.Listener() {
+                        @Override public void onSpsPps(byte[] sps, byte[] pps) {
+                            if (rtp != null) rtp.setSpsPps(sps, pps);
+                            if (rtmp != null) rtmp.setSpsPps(sps, pps);
+                            CameraHttpStreamer.get().setSpsPps(w, h, sps, pps);
+                        }
+
+                        @Override public void onFrame(byte[] nal, long ptsUs, boolean keyframe) {
+                            encFrames[0]++;
+                            encBytes[0] += nal.length;
+                            if (keyframe) encKeys[0]++;
+                            if (rtp != null) rtp.feed(nal, ptsUs);
+                            if (rtmp != null) rtmp.feed(nal, ptsUs, keyframe);
+                            CameraHttpStreamer.get().feed(nal, ptsUs, keyframe);
+                        }
+                    });
+            enc.setSourceFormat(configuredSourceFormat);
+            encoder = enc;
+            encodingActive = true;
+            enc.requestKeyframe();
+        } catch (Throwable t) {
+            encodingActive = false;
+            Log.w(TAG, "encoder start failed", t);
+            statusDetail = "编码启动失败: " + t.getMessage();
+        }
+    }
+
+    private void disableEncoding() {
+        encodingActive = false;
+        H264Encoder enc = encoder;
+        encoder = null;
+        if (enc != null) {
+            try { enc.release(); } catch (Throwable ignored) {}
+        }
+        try { CameraHttpStreamer.get().resetCodecConfig(); } catch (Throwable ignored) {}
+    }
+
+    private String pipelineStatus() {
+        return "本地预览=" + (visionPreviewDirect ? "直出" : "离屏")
+                + " 编码=" + (encodingActive ? "运行" : "暂停")
+                + " 外部观看=" + externalConsumerCountInternal();
+    }
+
     /** GL 线程消费 SurfaceTexture 帧，激活传感器正常预览输出。 */
-    private void consumeSurface(android.graphics.SurfaceTexture st) {
+    private void consumeSurface(SurfaceTexture st) {
         javax.microedition.khronos.egl.EGL10 egl =
                 (javax.microedition.khronos.egl.EGL10) javax.microedition.khronos.egl.EGLContext.getEGL();
         javax.microedition.khronos.egl.EGLDisplay dpy = null;
@@ -328,13 +529,14 @@ public class CameraStreamService extends Service {
             android.opengl.GLES20.glGenTextures(1, tex, 0);
             android.opengl.GLES20.glBindTexture(android.opengl.GLES11Ext.GL_TEXTURE_EXTERNAL_OES, tex[0]);
             st.attachToGLContext(tex[0]);
-            while (running) {
+            while (running && fallbackConsumerRunning && st == activePreviewTexture) {
                 st.updateTexImage();
                 Thread.sleep(16);
             }
         } catch (Throwable t) {
             Log.w(TAG, "surf consumer exit", t);
         } finally {
+            if (st == activePreviewTexture) fallbackConsumerRunning = false;
             try { st.release(); } catch (Exception ignored) {}
             try { egl.eglMakeCurrent(dpy, javax.microedition.khronos.egl.EGL10.EGL_NO_SURFACE,
                     javax.microedition.khronos.egl.EGL10.EGL_NO_SURFACE, javax.microedition.khronos.egl.EGL10.EGL_NO_CONTEXT); } catch (Exception ignored) {}
@@ -355,8 +557,11 @@ public class CameraStreamService extends Service {
         return best;
     }
 
-    private synchronized void stopAll() {
+    private void stopAll() {
+        stopStreamDemandMonitor();
         running = false;
+        fallbackConsumerRunning = false;
+        visionPreviewDirect = false;
         status = "stopped";
         realFps = "-";
         if (camera != null) {
@@ -365,18 +570,22 @@ public class CameraStreamService extends Service {
             try { camera.release(); } catch (Exception ignored) {}
             camera = null;
         }
-        if (encoder != null) { try { encoder.release(); } catch (Exception ignored) {} encoder = null; }
+        disableEncoding();
         if (rtp != null) { try { rtp.stop(); } catch (Exception ignored) {} rtp = null; }
         if (rtmp != null) { try { rtmp.stop(); } catch (Exception ignored) {} rtmp = null; }
         try { WebRtcStreamer.get().teardown(); } catch (Exception ignored) {}
         try { CameraHttpStreamer.get().clear(); } catch (Exception ignored) {}
         latestVisionSnapshot = null;
         latestVisionSeq = 0;
-        visionSnapshotEnabled = false;
+        activePreviewTexture = null;
+        fallbackPreviewTexture = null;
+        visionNv21Scratch = null;
+        configuredRtmpUrl = "";
     }
 
     @Override public void onDestroy() {
-        stopAll();
+        cameraControl.execute(this::stopAll);
+        cameraControl.shutdown();
         inst = null;
         super.onDestroy();
     }

@@ -199,27 +199,36 @@ public class LlmClient {
         public final String imageBase64; // 可选
         public final String toolCallId;
         public final JSONArray toolCalls;
+        /** DeepSeek 思考模式的上下文，仅在后续带工具的 DeepSeek 请求中回传。 */
+        public final String reasoningContent;
         public Msg(String role, String text) { this(role, text, null); }
         public Msg(String role, String text, String imageBase64) {
-            this(role, text, imageBase64, null, null);
+            this(role, text, imageBase64, null, null, null);
         }
         private Msg(String role, String text, String imageBase64,
-                    String toolCallId, JSONArray toolCalls) {
+                    String toolCallId, JSONArray toolCalls, String reasoningContent) {
             this.role = role;
             this.text = text;
             this.imageBase64 = imageBase64;
             this.toolCallId = toolCallId;
             this.toolCalls = toolCalls;
+            this.reasoningContent = reasoningContent;
         }
         public static Msg toolResult(String toolCallId, String text) {
-            return new Msg("tool", text, null, toolCallId, null);
+            return new Msg("tool", text, null, toolCallId, null, null);
         }
         public static Msg assistantToolCalls(JSONArray toolCalls) {
-            return new Msg("assistant", "", null, null, toolCalls);
+            return assistantToolCalls("", null, toolCalls);
+        }
+        public static Msg assistantToolCalls(String text, String reasoningContent, JSONArray toolCalls) {
+            return new Msg("assistant", text, null, null, toolCalls, reasoningContent);
+        }
+        public static Msg assistantResponse(String text, String reasoningContent) {
+            return new Msg("assistant", text, null, null, null, reasoningContent);
         }
     }
 
-    private JSONObject msgToJson(Msg m, boolean useVisionModel) {
+    private JSONObject msgToJson(Msg m, boolean useVisionModel, boolean includeReasoningContent) {
         try {
             JSONObject o = new JSONObject();
             o.put("role", m.role);
@@ -227,7 +236,7 @@ public class LlmClient {
                 o.put("tool_call_id", m.toolCallId == null ? "" : m.toolCallId);
                 o.put("content", m.text == null ? "" : m.text);
             } else if (m.toolCalls != null) {
-                o.put("content", JSONObject.NULL);
+                o.put("content", m.text == null || m.text.isEmpty() ? JSONObject.NULL : m.text);
                 o.put("tool_calls", m.toolCalls);
             } else if (m.imageBase64 != null && useVisionModel) {
                 JSONArray arr = new JSONArray();
@@ -242,12 +251,17 @@ public class LlmClient {
             } else {
                 o.put("content", m.text);
             }
+            if (includeReasoningContent && "assistant".equals(m.role)
+                    && m.reasoningContent != null && !m.reasoningContent.isEmpty()) {
+                o.put("reasoning_content", m.reasoningContent);
+            }
             return o;
         } catch (Exception e) { return null; }
     }
 
     public interface StreamCallback {
         void onDelta(String s);
+        default void onReasoningContent(String content) {}
         default void onToolCalls(List<ToolCall> calls) {}
         void onDone(String full);
         void onError(String msg);
@@ -332,19 +346,25 @@ public class LlmClient {
     public Call chat(java.util.List<Msg> msgs, boolean useVisionModel,
                      ChatOptions opts, JSONArray tools, StreamCallback cb) {
         try {
-            JSONArray arr = new JSONArray();
-            for (Msg m : msgs) arr.put(msgToJson(m, useVisionModel));
-            JSONObject body = new JSONObject()
-                    .put("model", useVisionModel ? visionModel : textModel)
-                    .put("stream", true)
-                    .put("messages", arr);
             String chatBaseUrl = useVisionModel ? visionBaseUrl : textBaseUrl;
             if (chatBaseUrl == null || chatBaseUrl.isEmpty()) {
                 cb.onError("未配置大模型 Base URL");
                 return null;
             }
+            boolean deepSeekWithTools = isDeepSeekLike(chatBaseUrl)
+                    && tools != null && tools.length() > 0;
+            JSONArray arr = new JSONArray();
+            for (Msg m : msgs) arr.put(msgToJson(m, useVisionModel, deepSeekWithTools));
+            JSONObject body = new JSONObject()
+                    .put("model", useVisionModel ? visionModel : textModel)
+                    .put("stream", true)
+                    .put("messages", arr);
             if (opts != null) {
-                if (opts.temperature != null) body.put("temperature", opts.temperature.floatValue());
+                // DeepSeek 思考模式不支持 temperature；省略它以免设置页产生误导。
+                boolean deepSeekThinking = isDeepSeekLike(chatBaseUrl) && !"none".equals(reasoningEffort);
+                if (opts.temperature != null && !deepSeekThinking) {
+                    body.put("temperature", opts.temperature.floatValue());
+                }
                 if (opts.maxTokens != null && opts.maxTokens.intValue() > 0) {
                     body.put("max_tokens", opts.maxTokens.intValue());
                 }
@@ -391,6 +411,7 @@ public class LlmClient {
                         }
                         BufferedReader r = new BufferedReader(new InputStreamReader(resp.body().byteStream(), "UTF-8"));
                         StringBuilder full = new StringBuilder();
+                        StringBuilder reasoning = new StringBuilder();
                         ArrayList<ToolCallAcc> toolAcc = new ArrayList<>();
                         String line;
                         while ((line = r.readLine()) != null) {
@@ -407,12 +428,18 @@ public class LlmClient {
                                 if (delta == null) continue;
                                 JSONArray calls = delta.optJSONArray("tool_calls");
                                 if (calls != null) mergeToolCalls(toolAcc, calls);
+                                String thought = delta.has("reasoning_content") && !delta.isNull("reasoning_content")
+                                        ? delta.optString("reasoning_content", "") : "";
+                                if (thought != null && !thought.isEmpty()) reasoning.append(thought);
                                 String d = delta.has("content") && !delta.isNull("content")
                                         ? delta.optString("content", "") : "";
                                 if (d != null && !d.isEmpty()) { full.append(d); cb.onDelta(d); }
                             } catch (Exception ignored) {}
                         }
                         List<ToolCall> calls = buildToolCalls(toolAcc);
+                        if (reasoning.length() > 0 && isDeepSeekLike(chatBaseUrl)) {
+                            cb.onReasoningContent(reasoning.toString());
+                        }
                         if (!calls.isEmpty()) {
                             DebugLog.append(ctx, "llm.tool_calls", toolCallsToDebug(calls));
                             cb.onToolCalls(calls);

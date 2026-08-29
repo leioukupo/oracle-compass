@@ -303,6 +303,15 @@ public class RtpServer {
 
     public boolean isRunning() { return server != null && !server.isClosed(); }
 
+    /** 已完成 PLAY 的 RTSP 客户端数；仅这些客户端需要编码帧。 */
+    public int playingClientCount() {
+        synchronized (clientsLock) {
+            int count = 0;
+            for (Client c : clients) if (c.playing) count++;
+            return count;
+        }
+    }
+
     public void stop() {
         try { if (server != null) server.close(); } catch (Exception ignored) {}
         server = null;

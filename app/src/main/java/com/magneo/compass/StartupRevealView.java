@@ -200,11 +200,20 @@ public final class StartupRevealView extends View {
                            float amount, int alpha,
                            float largeRotation, float mediumRotation,
                            float smallRotation) {
-        drawPetalLayer(canvas, cx, cy, scale, amount, alpha, largeRotation, 12,
+        drawBootLotus(canvas, paint, petal, cx, cy, scale, amount, alpha,
+                largeRotation, mediumRotation, smallRotation);
+    }
+
+    /** Shared boot-lotus geometry for transition surfaces such as the Vision HUD. */
+    public static void drawBootLotus(Canvas canvas, Paint paint, Path petal,
+                                     float cx, float cy, float scale, float amount, int alpha,
+                                     float largeRotation, float mediumRotation,
+                                     float smallRotation) {
+        drawPetalLayer(canvas, paint, petal, cx, cy, scale, amount, alpha, largeRotation, 12,
                 72f, 227f, 64f, Ui.COLOR_GOLD_DARK, 0.24f, 0.86f);
-        drawPetalLayer(canvas, cx, cy, scale, amount, alpha, 10f + mediumRotation, 12,
+        drawPetalLayer(canvas, paint, petal, cx, cy, scale, amount, alpha, 10f + mediumRotation, 12,
                 72f, 188f, 48f, Color.rgb(178, 143, 50), 0.30f, 0.92f);
-        drawPetalLayer(canvas, cx, cy, scale, amount, alpha, 20f + smallRotation, 12,
+        drawPetalLayer(canvas, paint, petal, cx, cy, scale, amount, alpha, 20f + smallRotation, 12,
                 72f, 160f, 34f, Ui.COLOR_GOLD, 0.38f, 0.98f);
     }
 
@@ -233,8 +242,8 @@ public final class StartupRevealView extends View {
         }
     }
 
-    private void drawPetalLayer(Canvas canvas, float cx, float cy, float scale,
-                                float amount, int alpha, float rotation,
+    private static void drawPetalLayer(Canvas canvas, Paint paint, Path petal,
+                                float cx, float cy, float scale, float amount, int alpha, float rotation,
                                 int count,
                                 float rootPx, float tipPx, float widthPx,
                                 int color, float fillAlpha, float strokeAlpha) {
@@ -277,6 +286,12 @@ public final class StartupRevealView extends View {
     }
 
     private void drawCoreMedallion(Canvas canvas, float cx, float cy, float scale, int alpha) {
+        drawBootCoreMedallion(canvas, paint, cx, cy, scale, alpha);
+    }
+
+    /** Shared gold-and-ink Taiji core used with {@link #drawBootLotus}. */
+    public static void drawBootCoreMedallion(Canvas canvas, Paint paint,
+                                             float cx, float cy, float scale, int alpha) {
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(Color.argb(alpha, 7, 6, 4));
         canvas.drawCircle(cx, cy, 112f * scale, paint);
@@ -287,7 +302,7 @@ public final class StartupRevealView extends View {
         paint.setStrokeWidth(1.4f * scale);
         paint.setColor(withAlpha(Ui.COLOR_GOLD, alpha * 6 / 10));
         canvas.drawCircle(cx, cy, 104f * scale, paint);
-        drawTaiji(canvas, cx, cy, 90f * scale, alpha);
+        drawTaiji(canvas, paint, cx, cy, 90f * scale, alpha, 1.5f * scale);
     }
 
     private void radialLine(Canvas canvas, float cx, float cy, double angle,
@@ -298,7 +313,8 @@ public final class StartupRevealView extends View {
                 cy + (float) Math.sin(angle) * outer, paint);
     }
 
-    private void drawTaiji(Canvas canvas, float cx, float cy, float radius, int alpha) {
+    private static void drawTaiji(Canvas canvas, Paint paint, float cx, float cy, float radius,
+                                  int alpha, float strokeWidth) {
         int save = canvas.save();
         Path clip = new Path();
         clip.addCircle(cx, cy, radius, Path.Direction.CW);
@@ -319,7 +335,7 @@ public final class StartupRevealView extends View {
         canvas.restoreToCount(save);
 
         paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(Ui.dpF(getContext(), 1.5f));
+        paint.setStrokeWidth(strokeWidth);
         paint.setColor(withAlpha(Ui.COLOR_GOLD_DARK, alpha));
         canvas.drawCircle(cx, cy, radius, paint);
     }

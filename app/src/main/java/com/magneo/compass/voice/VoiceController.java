@@ -1127,9 +1127,10 @@ public class VoiceController {
             addRecentDialogHistory(msgs, looksLikeFollowup(text) ? 2 : 1);
             msgs.add(new LlmClient.Msg("user", text));
             trace.llmStartAt = System.currentTimeMillis();
-            String reply = Prefs.mcpEnabled(ctx)
+            ChatRun response = Prefs.mcpEnabled(ctx)
                     ? chatWithMcpAndQueueTts(llm, msgs, turnId, trace)
                     : chatAndQueueTts(llm, msgs, turnId, false, trace);
+            String reply = response.error == null ? response.full : "!" + response.error;
             if (turnId != turnSerial.get()) return;
             if (reply.startsWith("!")) {
                 ConversationLog.append(ctx, "error", "LLM 失败：" + reply.substring(1));
@@ -1144,7 +1145,7 @@ public class VoiceController {
                 return;
             }
             ConversationLog.append(ctx, "assistant", reply);
-            remember(text, reply);
+            remember(text, reply, response.reasoningContent);
             rememberSpoken(reply);
             lastAssistantAt = System.currentTimeMillis();
             setStatus(continuousRunning.get() ? "常驻聆听中..." : "");
@@ -1635,14 +1636,13 @@ public class VoiceController {
         return reply.toString();
     }
 
-    private String chatAndQueueTts(LlmClient llm, List<LlmClient.Msg> msgs, int turnId,
-                                   boolean vision, VoiceTrace trace) {
-        ChatRun run = chatOnceAndQueueTts(llm, msgs, turnId, vision, trace, null);
-        return run.error == null ? run.full : "!" + run.error;
+    private ChatRun chatAndQueueTts(LlmClient llm, List<LlmClient.Msg> msgs, int turnId,
+                                    boolean vision, VoiceTrace trace) {
+        return chatOnceAndQueueTts(llm, msgs, turnId, vision, trace, null);
     }
 
-    private String chatWithMcpAndQueueTts(LlmClient llm, List<LlmClient.Msg> msgs,
-                                          int turnId, VoiceTrace trace) {
+    private ChatRun chatWithMcpAndQueueTts(LlmClient llm, List<LlmClient.Msg> msgs,
+                                           int turnId, VoiceTrace trace) {
         JSONArray tools = McpManager.openAiTools(ctx);
         if (tools.length() == 0) {
             ConversationLog.append(ctx, "system", "MCP enabled but no tools available");
@@ -1655,19 +1655,28 @@ public class VoiceController {
         for (int round = 0; round <= rounds; round++) {
             ChatRun run = chatOnceAndQueueTts(llm, chain, turnId, false, trace,
                     round < rounds ? tools : null);
-            if (run.error != null) return "!" + run.error;
+            if (run.error != null) return run;
             if (run.full != null && !run.full.trim().isEmpty()) finalReply.append(run.full);
-            if (turnId != turnSerial.get()) return finalReply.toString();
-            if (run.toolCalls == null || run.toolCalls.isEmpty()) return finalReply.toString();
+            if (turnId != turnSerial.get()) {
+                run.full = finalReply.toString();
+                return run;
+            }
+            if (run.toolCalls == null || run.toolCalls.isEmpty()) {
+                run.full = finalReply.toString();
+                return run;
+            }
             if (round >= rounds) break;
 
             JSONArray assistantCalls = new JSONArray();
             for (LlmClient.ToolCall c : run.toolCalls) assistantCalls.put(c.toAssistantJson());
-            chain.add(LlmClient.Msg.assistantToolCalls(assistantCalls));
+            chain.add(LlmClient.Msg.assistantToolCalls(run.full, run.reasoningContent, assistantCalls));
             ConversationLog.append(ctx, "system", "MCP tool_calls round=" + (round + 1)
                     + " count=" + run.toolCalls.size());
             for (LlmClient.ToolCall c : run.toolCalls) {
-                if (turnId != turnSerial.get()) return finalReply.toString();
+                if (turnId != turnSerial.get()) {
+                    run.full = finalReply.toString();
+                    return run;
+                }
                 String result = callMcpToolForVoice(turnId, c);
                 chain.add(LlmClient.Msg.toolResult(c.id, result));
             }
@@ -1676,8 +1685,11 @@ public class VoiceController {
         ArrayList<LlmClient.Msg> fallback = new ArrayList<>(chain);
         fallback.add(new LlmClient.Msg("system", "工具调用轮次已经达到上限，请直接基于已有工具结果给用户一个简短回答。"));
         ChatRun run = chatOnceAndQueueTts(llm, fallback, turnId, false, trace, null);
-        if (run.error != null) return "!" + run.error;
-        return finalReply.append(run.full).toString();
+        if (run.error == null && run.full != null && !run.full.trim().isEmpty()) {
+            finalReply.append(run.full);
+            run.full = finalReply.toString();
+        }
+        return run;
     }
 
     private ChatRun chatOnceAndQueueTts(LlmClient llm, List<LlmClient.Msg> msgs, int turnId,
@@ -1731,6 +1743,12 @@ public class VoiceController {
             @Override public void onToolCalls(List<LlmClient.ToolCall> calls) {
                 synchronized (doneLock) {
                     if (calls != null) run.toolCalls.addAll(calls);
+                }
+            }
+
+            @Override public void onReasoningContent(String content) {
+                synchronized (doneLock) {
+                    run.reasoningContent = content == null ? "" : content;
                 }
             }
 
@@ -1829,6 +1847,7 @@ public class VoiceController {
 
     private static class ChatRun {
         String full = "";
+        String reasoningContent = "";
         String error;
         final ArrayList<LlmClient.ToolCall> toolCalls = new ArrayList<>();
     }
@@ -2245,10 +2264,10 @@ public class VoiceController {
         }
     }
 
-    private void remember(String user, String assistant) {
+    private void remember(String user, String assistant, String reasoningContent) {
         synchronized (dialogHistory) {
             dialogHistory.add(new LlmClient.Msg("user", user));
-            dialogHistory.add(new LlmClient.Msg("assistant", assistant));
+            dialogHistory.add(LlmClient.Msg.assistantResponse(assistant, reasoningContent));
             while (dialogHistory.size() > 8) dialogHistory.remove(0);
         }
     }

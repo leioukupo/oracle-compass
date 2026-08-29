@@ -20,6 +20,7 @@ import java.net.Socket;
 public class H264SurfaceStreamer {
     private static final String TAG = "H264SurfaceStreamer";
     private static final String FILE = "/sdcard/truthscreen.mp4";
+    private static final String RUN_MARKER = "/sdcard/.truthscreen-running";
     private static final int W = 720, H = 720;
     private static final long DUR_US = 33333; // 30fps
 
@@ -30,20 +31,15 @@ public class H264SurfaceStreamer {
     public static boolean isActive() { return active; }
 
     /** 清理历史遗留的 screenrecord 编码链。
-     *  应用崩溃/断连后，magiskd 派生的 su 包装 sh 会带着 "while true" 循环继续存活，
-     *  每 180 秒重新拉起一个 screenrecord 编码器；多次崩溃可积累十几个编码器把 4 核 CPU 打满。
-     *  这里按进程树精确杀掉 screenrecord 及其祖先（到 magiskd/init 为止），不影响其他 su 会话。 */
+     *  旧实现会沿父进程树清理 su 包装层，在部分 MTK/Magisk 组合上可能误伤 Root 会话。
+     *  现在由单独标记让循环自行退出，只终止实际编码器，不接触 su 或 magiskd。 */
     public static void cleanupStale() {
         try {
             Process p = Runtime.getRuntime().exec(new String[]{"su", "-c",
-                    "for i in 1 2 3; do "
-                    + "ps | grep \"[s]creenrecord\" | while read u p pp rest; do "
-                    + "cur=$p; while :; do st=$(cat /proc/$cur/stat 2>/dev/null) || break; "
-                    + "set -- $st; par=$4; kill -9 $cur 2>/dev/null; "
-                    + "pc=$(cat /proc/$par/comm 2>/dev/null); "
-                    + "[ \"$pc\" = \"magiskd\" ] && break; [ \"$par\" -le 2 ] && break; cur=$par; done; done; "
-                    + "sleep 1; done; "
-                    + "killall -9 screenrecord 2>/dev/null"});
+                    "rm -f " + RUN_MARKER + "; "
+                    + "killall -9 screenrecord 2>/dev/null; "
+                    // Give an old marker-controlled wrapper time to observe the stop request.
+                    + "sleep 1"});
             p.waitFor();
         } catch (Exception ignored) {}
     }
@@ -115,7 +111,8 @@ public class H264SurfaceStreamer {
     private static Process startScreenrecord(Context ctx) throws Exception {
         int kbps = clamp(Prefs.getI(ctx, Prefs.K_STREAM_BITRATE, 8000), 300, 8000);
         return Runtime.getRuntime().exec(new String[]{"su", "-c",
-                "rm -f " + FILE + "; while true; do screenrecord --size " + W + "x" + H
+                "rm -f " + FILE + "; : > " + RUN_MARKER + "; "
+                + "while [ -f " + RUN_MARKER + " ]; do screenrecord --size " + W + "x" + H
                 + " --bit-rate " + (kbps * 1000) + " --time-limit 180 " + FILE + "; done"});
     }
 

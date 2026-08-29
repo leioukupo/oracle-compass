@@ -68,6 +68,11 @@ public class WebRtcStreamer {
     public String answer() { return answerOut; }
     public void clear() { answerOut = ""; }
 
+    /** Offer 已受理或连接建立后才需要继续把摄像头帧送入 WebRTC。 */
+    public boolean needsFrames() {
+        return "connecting".equals(state) || "connected".equals(state);
+    }
+
     /** 注入一帧 NV21（由采集线程调用）。 */
     public void feedFrame(byte[] nv21, int w, int h) {
         CapturerObserver o = observer;

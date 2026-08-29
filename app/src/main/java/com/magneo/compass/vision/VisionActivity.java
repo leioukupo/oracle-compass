@@ -13,6 +13,7 @@ import android.graphics.RadialGradient;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Shader;
+import android.graphics.SurfaceTexture;
 import android.graphics.SweepGradient;
 import android.graphics.YuvImage;
 import android.os.Bundle;
@@ -24,12 +25,14 @@ import android.text.TextPaint;
 import android.util.Base64;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 
 import com.magneo.compass.ConversationLog;
 import com.magneo.compass.Prefs;
+import com.magneo.compass.StartupRevealView;
 import com.magneo.compass.cam.CameraStreamService;
 import com.magneo.compass.llm.LlmClient;
 import com.magneo.compass.ui.Ui;
@@ -47,7 +50,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class VisionActivity extends com.magneo.compass.BaseActivity {
     private static final String TAG = "VisionActivity";
-    private static final long VISION_FRAME_INTERVAL_MS = 1000L / 12L;
+    /** 直出预览不经过此处；仅为定格和视觉请求保留低频最新帧。 */
+    private static final long VISION_FRAME_INTERVAL_MS = 200L;
 
     private enum UiState {
         WAITING, LISTENING, THINKING, SPEAKING, FROZEN, ERROR
@@ -58,7 +62,8 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
     private final AtomicInteger visionTurn = new AtomicInteger();
     private final List<LlmClient.Msg> history = new ArrayList<>();
 
-    private volatile byte[] lastNv21;
+    private final Object latestFrameLock = new Object();
+    private byte[] latestNv21;
     private volatile int camW;
     private volatile int camH;
     private volatile boolean rendering;
@@ -74,12 +79,18 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
     private volatile UiState uiState = UiState.WAITING;
     private volatile boolean aiConfigured;
 
+    private FrameLayout rootView;
+    private TextureView previewView;
     private FrameView frameView;
     private OverlayView overlayView;
     private Thread renderThread;
     private VoiceController voiceController;
     private boolean startedVoiceForVision;
     private boolean startedCameraForVision;
+    private int previewLayoutCamW;
+    private int previewLayoutCamH;
+    private int previewLayoutParentW;
+    private int previewLayoutParentH;
     private final Runnable uiStatePoll = new Runnable() {
         @Override public void run() {
             if (!resumed) return;
@@ -104,10 +115,17 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
             long now = SystemClock.uptimeMillis();
             if (now - lastAcceptedFrameMs < VISION_FRAME_INTERVAL_MS) return;
             lastAcceptedFrameMs = now;
-            lastNv21 = nv21.clone();
-            camW = w;
-            camH = h;
-            halFrameSeq++;
+            int bytes = w * h * 3 / 2;
+            if (nv21 == null || nv21.length < bytes) return;
+            synchronized (latestFrameLock) {
+                boolean dimensionsChanged = camW != w || camH != h;
+                if (latestNv21 == null || latestNv21.length != bytes) latestNv21 = new byte[bytes];
+                System.arraycopy(nv21, 0, latestNv21, 0, bytes);
+                camW = w;
+                camH = h;
+                halFrameSeq++;
+                if (dimensionsChanged) VisionActivity.this.h.post(VisionActivity.this::layoutDirectPreview);
+            }
         }
     };
 
@@ -115,9 +133,37 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         super.onCreate(savedInstanceState);
 
         FrameLayout root = new FrameLayout(this);
+        rootView = root;
         root.setBackgroundColor(Color.BLACK);
 
+        previewView = new TextureView(this);
+        previewView.setBackgroundColor(Color.BLACK);
+        previewView.setClickable(false);
+        previewView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+            @Override public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
+                if (resumed && useHalVisionFrames) {
+                    CameraStreamService.setVisionPreviewSurface(surface);
+                    VisionActivity.this.h.post(VisionActivity.this::layoutDirectPreview);
+                }
+            }
+
+            @Override public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) {
+                VisionActivity.this.h.post(VisionActivity.this::layoutDirectPreview);
+            }
+
+            @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
+                CameraStreamService.clearVisionPreviewSurface(surface);
+                return true;
+            }
+
+            @Override public void onSurfaceTextureUpdated(SurfaceTexture surface) {}
+        });
+        root.addView(previewView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
         frameView = new FrameView(this);
+        frameView.setVisibility(View.GONE);
+        frameView.setClickable(false);
         root.addView(frameView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -128,7 +174,6 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         root.setOnClickListener(v -> toggleFrozenFrame());
 
         setContentView(root);
-        startRenderThread();
     }
 
     @Override protected void onResume() {
@@ -139,7 +184,7 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         halFrameSeq = 0;
         lastRenderedSeq = -1;
         lastAcceptedFrameMs = 0;
-        lastNv21 = null;
+        synchronized (latestFrameLock) { latestNv21 = null; }
         frozenFrame = null;
         camW = 0;
         camH = 0;
@@ -151,6 +196,21 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         }
         CameraStreamService.setVisionSnapshotEnabled(!useHalVisionFrames);
         CameraStreamService.setFrameListener(useHalVisionFrames ? frameListener : null);
+        if (useHalVisionFrames) {
+            frameView.setVisibility(View.GONE);
+            previewView.setVisibility(View.VISIBLE);
+            resetPreviewLayout();
+            if (previewView.isAvailable()) {
+                CameraStreamService.setVisionPreviewSurface(previewView.getSurfaceTexture());
+                h.post(this::layoutDirectPreview);
+            }
+        } else {
+            CameraStreamService.clearVisionPreviewSurface(previewView.getSurfaceTexture());
+            previewView.setVisibility(View.GONE);
+            resetPreviewLayout();
+            frameView.setVisibility(View.VISIBLE);
+            startRenderThread();
+        }
         aiConfigured = canListenForAi();
         if (aiConfigured) {
             voiceController = VoiceController.get(this, this::onVoiceStatus);
@@ -179,8 +239,14 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         }
         startedVoiceForVision = false;
         frozenFrame = null;
+        stopRenderThread();
+        if (previewView != null) CameraStreamService.clearVisionPreviewSurface(previewView.getSurfaceTexture());
         CameraStreamService.setVisionSnapshotEnabled(false);
         CameraStreamService.setFrameListener(null);
+        if (frameView != null) {
+            frameView.setBitmap(null);
+            frameView.setVisibility(View.GONE);
+        }
         if (startedCameraForVision) {
             CameraStreamService.stop(getApplicationContext());
         }
@@ -188,9 +254,8 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
     }
 
     @Override protected void onDestroy() {
-        rendering = false;
+        stopRenderThread();
         h.removeCallbacksAndMessages(null);
-        if (renderThread != null) renderThread.interrupt();
         if (frameView != null) frameView.setBitmap(null);
         super.onDestroy();
     }
@@ -237,6 +302,51 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         }, "vision-render");
         renderThread.setDaemon(true);
         renderThread.start();
+    }
+
+    private void stopRenderThread() {
+        rendering = false;
+        Thread t = renderThread;
+        renderThread = null;
+        if (t != null) t.interrupt();
+    }
+
+    /** 预览输出已旋转 90 度，按旧 Canvas 路径的 center-crop 规则铺满屏幕。 */
+    private void layoutDirectPreview() {
+        if (!useHalVisionFrames || previewView == null || rootView == null) return;
+        int parentW = rootView.getWidth();
+        int parentH = rootView.getHeight();
+        int sourceW = camH;
+        int sourceH = camW;
+        if (parentW <= 0 || parentH <= 0 || sourceW <= 0 || sourceH <= 0) return;
+        if (previewLayoutCamW == camW && previewLayoutCamH == camH
+                && previewLayoutParentW == parentW && previewLayoutParentH == parentH) return;
+        float scale = Math.max((float) parentW / sourceW, (float) parentH / sourceH);
+        int targetW = Math.round(sourceW * scale);
+        int targetH = Math.round(sourceH * scale);
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) previewView.getLayoutParams();
+        if (lp.width == targetW && lp.height == targetH && lp.gravity == Gravity.CENTER) return;
+        lp.width = targetW;
+        lp.height = targetH;
+        lp.gravity = Gravity.CENTER;
+        previewView.setLayoutParams(lp);
+        previewLayoutCamW = camW;
+        previewLayoutCamH = camH;
+        previewLayoutParentW = parentW;
+        previewLayoutParentH = parentH;
+    }
+
+    private void resetPreviewLayout() {
+        if (previewView == null) return;
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) previewView.getLayoutParams();
+        lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+        lp.height = ViewGroup.LayoutParams.MATCH_PARENT;
+        lp.gravity = Gravity.CENTER;
+        previewView.setLayoutParams(lp);
+        previewLayoutCamW = 0;
+        previewLayoutCamH = 0;
+        previewLayoutParentW = 0;
+        previewLayoutParentH = 0;
     }
 
     private void handleSpeechText(String spokenText) {
@@ -359,11 +469,10 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
 
     private FrameData currentLiveFrameData() {
         if (useHalVisionFrames) {
-            byte[] nv21 = lastNv21;
-            int w = camW;
-            int hh = camH;
-            if (nv21 == null || w <= 0 || hh <= 0) return null;
-            return new FrameData(nv21, w, hh, halFrameSeq);
+            synchronized (latestFrameLock) {
+                if (latestNv21 == null || camW <= 0 || camH <= 0) return null;
+                return new FrameData(latestNv21.clone(), camW, camH, halFrameSeq);
+            }
         }
         CameraStreamService.FrameSnapshot snap = CameraStreamService.latestVisionSnapshot();
         if (snap == null || snap.nv21 == null || snap.w <= 0 || snap.h <= 0) return null;
@@ -485,6 +594,13 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         if (frozenFrame != null) {
             frozenFrame = null;
             lastRenderedSeq = -1;
+            if (useHalVisionFrames) {
+                if (frameView != null) {
+                    frameView.setBitmap(null);
+                    frameView.setVisibility(View.GONE);
+                }
+                if (previewView != null) previewView.setVisibility(View.VISIBLE);
+            }
             showOverlay("实时画面", UiState.LISTENING);
             h.postDelayed(() -> clearOverlayIf("实时画面"), 1400);
             return;
@@ -495,10 +611,32 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
             h.postDelayed(() -> clearOverlayIf("等待画面"), 1400);
             return;
         }
-        frozenFrame = new FrameData(live.nv21.clone(), live.w, live.h, live.seq);
+        final FrameData frozen = live;
+        frozenFrame = frozen;
         lastRenderedSeq = -1;
-        showOverlay("画面已定格", UiState.FROZEN);
-        h.postDelayed(() -> clearOverlayIf("画面已定格"), 1600);
+        if (!useHalVisionFrames) {
+            showOverlay("画面已定格", UiState.FROZEN);
+            h.postDelayed(() -> clearOverlayIf("画面已定格"), 1600);
+            return;
+        }
+        showOverlay("画面定格中", UiState.FROZEN);
+        new Thread(() -> {
+            Bitmap bitmap = frameBitmap(frozen.nv21, frozen.w, frozen.h, renderQuality());
+            runOnUiThread(() -> {
+                if (bitmap == null || frozenFrame != frozen || !resumed) {
+                    if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
+                    return;
+                }
+                if (previewView != null) previewView.setVisibility(View.INVISIBLE);
+                if (frameView != null) {
+                    frameView.setBitmap(bitmap);
+                    frameView.setVisibility(View.VISIBLE);
+                    frameView.invalidate();
+                }
+                showOverlay("画面已定格", UiState.FROZEN);
+                h.postDelayed(() -> clearOverlayIf("画面已定格"), 1600);
+            });
+        }, "vision-freeze").start();
     }
 
     private class FrameView extends View {
@@ -546,6 +684,8 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         private final TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
         private final RectF r = new RectF();
         private final Path blade = new Path();
+        private final Path taijiClip = new Path();
+        private final Path taijiGold = new Path();
         private Shader vignette;
         private Shader scanShader;
 
@@ -637,46 +777,67 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         private void drawAperture(Canvas canvas, float cx, float cy, float iris, float pupil,
                                   long now, int stateColor) {
             float breathe = uiState == UiState.THINKING
-                    ? 0.95f + 0.035f * (float) Math.sin(now / 170.0)
-                    : 1f + 0.012f * (float) Math.sin(now / 520.0);
-            float rr = iris * breathe;
-            for (int i = 0; i < 6; i++) {
-                int save = canvas.save();
-                canvas.rotate(i * 60f + (now / 110f) % 60f, cx, cy);
-                blade.reset();
-                blade.moveTo(cx + pupil * 0.9f, cy);
-                blade.cubicTo(cx + rr * 0.38f, cy - rr * 0.34f,
-                        cx + rr * 0.72f, cy - rr * 0.24f, cx + rr * 0.86f, cy);
-                blade.cubicTo(cx + rr * 0.70f, cy + rr * 0.12f,
-                        cx + rr * 0.45f, cy + rr * 0.18f, cx + pupil * 0.9f, cy);
-                blade.close();
-                p.setStyle(Paint.Style.FILL);
-                p.setColor(withAlpha(Ui.COLOR_BG_DEEP, 44));
-                canvas.drawPath(blade, p);
-                p.setStyle(Paint.Style.STROKE);
-                p.setStrokeWidth(Ui.dpF(VisionActivity.this, 0.8f));
-                p.setColor(withAlpha(i % 2 == 0 ? stateColor : Ui.COLOR_GOLD_DARK, 110));
-                canvas.drawPath(blade, p);
-                canvas.restoreToCount(save);
-            }
-
+                    ? 0.96f + 0.035f * (float) Math.sin(now / 170.0)
+                    : 1f + 0.016f * (float) Math.sin(now / 520.0);
+            float flowerScale = iris * 0.94f * breathe / 247f;
             p.setStyle(Paint.Style.FILL);
-            p.setColor(Color.argb(28, 0, 0, 0));
-            canvas.drawCircle(cx, cy, pupil, p);
+            // Keep the live camera image primary; the instrument is a translucent HUD.
+            p.setColor(Color.argb(52, 7, 6, 4));
+            canvas.drawCircle(cx, cy, iris * 0.96f, p);
+
+            // Same three interlocking layers and rotation rates as the boot transition.
+            float seconds = now / 1000f;
+            StartupRevealView.drawBootLotus(canvas, p, blade, cx, cy, flowerScale, 1f, 155,
+                    seconds * 10f, -seconds * 20f, seconds * 30f);
+
+            drawVisionTaijiCore(canvas, cx, cy, flowerScale * 0.85f, 205);
+        }
+
+        /** Matches the compass Taiji: warm gold on the left, ink black on the right. */
+        private void drawVisionTaijiCore(Canvas canvas, float cx, float cy, float scale, int alpha) {
+            float medallion = 112f * scale;
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(Color.argb(alpha, 7, 6, 4));
+            canvas.drawCircle(cx, cy, medallion, p);
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(Ui.dpF(VisionActivity.this, 1.5f));
-            p.setColor(withAlpha(stateColor, 220));
-            canvas.drawCircle(cx, cy, pupil, p);
-
-            float bracket = pupil * 0.52f;
-            float arm = pupil * 0.20f;
+            p.setColor(withAlpha(Ui.COLOR_GOLD_DARK, alpha));
+            canvas.drawCircle(cx, cy, medallion, p);
             p.setStrokeWidth(Ui.dpF(VisionActivity.this, 1));
-            for (int i = 0; i < 4; i++) {
-                int save = canvas.save();
-                canvas.rotate(i * 90f, cx, cy);
-                canvas.drawLine(cx - arm, cy - bracket, cx + arm, cy - bracket, p);
-                canvas.restoreToCount(save);
-            }
+            p.setColor(withAlpha(Ui.COLOR_GOLD, alpha * 6 / 10));
+            canvas.drawCircle(cx, cy, medallion * 0.93f, p);
+
+            float radius = 90f * scale;
+            int save = canvas.save();
+            taijiClip.reset();
+            taijiClip.addCircle(cx, cy, radius, Path.Direction.CW);
+            canvas.clipPath(taijiClip);
+
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(Color.argb(alpha, 0, 0, 0));
+            canvas.drawCircle(cx, cy, radius, p);
+            p.setColor(withAlpha(Ui.COLOR_GOLD, alpha));
+            // One continuous S path avoids the artificial straight seam from overlapping shapes.
+            taijiGold.reset();
+            taijiGold.moveTo(cx, cy - radius);
+            r.set(cx - radius, cy - radius, cx + radius, cy + radius);
+            taijiGold.arcTo(r, -90f, -180f);
+            r.set(cx - radius / 2f, cy, cx + radius / 2f, cy + radius);
+            taijiGold.arcTo(r, 90f, 180f);
+            r.set(cx - radius / 2f, cy - radius, cx + radius / 2f, cy);
+            taijiGold.arcTo(r, 90f, -180f);
+            taijiGold.close();
+            canvas.drawPath(taijiGold, p);
+            p.setColor(Color.argb(alpha, 0, 0, 0));
+            canvas.drawCircle(cx, cy - radius / 2f, radius * 0.105f, p);
+            p.setColor(withAlpha(Ui.COLOR_GOLD, alpha));
+            canvas.drawCircle(cx, cy + radius / 2f, radius * 0.105f, p);
+            canvas.restoreToCount(save);
+
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(Ui.dpF(VisionActivity.this, 1.35f));
+            p.setColor(withAlpha(Ui.COLOR_GOLD_DARK, alpha));
+            canvas.drawCircle(cx, cy, radius, p);
         }
 
         private void drawStateMotion(Canvas canvas, float cx, float cy, float iris, float pupil,

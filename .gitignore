@@ -53,3 +53,4 @@ artifacts/
 # Deliberately versioned stock device recovery assets.
 !device-backups/**/*.zip
 !device-backups/**/*.gz
+keystore/*

@@ -121,4 +121,16 @@ public class CameraHttpStreamer {
         initData = null;
         clients.clear();
     }
+
+    /** 编码器重启时丢弃旧配置和缓存帧，但保留正在等待新关键帧的客户端。 */
+    public synchronized void resetCodecConfig() {
+        initData = null;
+        curAvcc = null;
+        curPts = -1;
+        curKey = false;
+        for (BlockingQueue<Frame> q : clients) q.clear();
+    }
+
+    /** 正在等待或接收 fMP4 数据的网页客户端数。 */
+    public int clientCount() { return clients.size(); }
 }
