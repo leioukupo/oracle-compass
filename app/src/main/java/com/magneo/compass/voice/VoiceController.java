@@ -364,6 +364,97 @@ public class VoiceController {
     }
 
     /**
+     * Starts an externally produced streamed response.  Deltas are split with the same
+     * latency-first policy as normal voice chat, so cloud synthesis can overlap generation.
+     */
+    public StreamingSpeechSession beginStreamingSpeech(String label) {
+        int turnId = turnSerial.incrementAndGet();
+        cancelActiveCalls();
+        stopTtsPlayback();
+        String streamLabel = label == null || label.trim().isEmpty() ? "external" : label.trim();
+        ConversationLog.append(ctx, "system", "TTS stream begin label=" + streamLabel
+                + " turn=" + turnId);
+        return new StreamingSpeechSession(turnId, streamLabel);
+    }
+
+    /** A cancellable external stream which serializes deltas into the shared TTS queue. */
+    public final class StreamingSpeechSession {
+        private final int turnId;
+        private final String label;
+        private final StringBuilder pending = new StringBuilder();
+        private boolean firstSegment = true;
+        private boolean finished;
+        private boolean cancelled;
+        private long pendingStartedAt;
+        private int queuedSegments;
+
+        private StreamingSpeechSession(int turnId, String label) {
+            this.turnId = turnId;
+            this.label = label;
+        }
+
+        /** Appends a model delta and queues every newly speakable segment. */
+        public void append(String delta) {
+            if (delta == null || delta.isEmpty()) return;
+            queuePending(delta, false);
+        }
+
+        /** Flushes the final unfinished text into bounded TTS segments. */
+        public void finish() {
+            queuePending(null, true);
+        }
+
+        /** Stops only this stream if it is still the active speech turn. */
+        public void cancel() {
+            boolean shouldStop;
+            synchronized (this) {
+                if (cancelled) return;
+                cancelled = true;
+                finished = true;
+                pending.setLength(0);
+                shouldStop = turnSerial.compareAndSet(turnId, turnId + 1);
+            }
+            if (shouldStop) {
+                cancelActiveCalls();
+                stopTtsPlayback();
+                ConversationLog.append(ctx, "system", "TTS stream cancelled label=" + label
+                        + " turn=" + turnId + " queued=" + queuedSegments);
+            }
+        }
+
+        private void queuePending(String delta, boolean flush) {
+            List<String> segments;
+            int firstIndex;
+            synchronized (this) {
+                if (cancelled || finished || turnId != turnSerial.get()) return;
+                if (delta != null && !delta.isEmpty()) {
+                    if (pending.length() == 0) pendingStartedAt = System.currentTimeMillis();
+                    pending.append(delta);
+                }
+                if (pending.length() == 0 && !flush) return;
+                segments = drainSpeakableSegments(pending, flush, firstSegment, pendingStartedAt);
+                if (!segments.isEmpty()) firstSegment = false;
+                pendingStartedAt = pending.length() == 0 ? 0L : System.currentTimeMillis();
+                if (flush) finished = true;
+                firstIndex = queuedSegments;
+                queuedSegments += segments.size();
+            }
+            for (int i = 0; i < segments.size(); i++) {
+                String segment = segments.get(i);
+                int index = firstIndex + i + 1;
+                ConversationLog.append(ctx, "system", "TTS stream enqueue label=" + label
+                        + " turn=" + turnId + " segment=" + index
+                        + " chars=" + segment.length());
+                enqueueTts(turnId, segment);
+            }
+            if (flush) {
+                ConversationLog.append(ctx, "system", "TTS stream finish label=" + label
+                        + " turn=" + turnId + " segments=" + (firstIndex + segments.size()));
+            }
+        }
+    }
+
+    /**
      * Speaks externally supplied text, optionally giving UI a brief lead before playback.
      * The callback runs only once, after audio has been prepared and immediately before the lead.
      */
@@ -2057,7 +2148,8 @@ public class VoiceController {
             }
         }
         if (firstSegment) {
-            if (firstEnd > 0) return firstEnd;
+            if (firstEnd > 0 && firstEnd <= 50) return firstEnd;
+            if (firstEnd > 50) return safeTtsCut(sb, 16, 12, 22);
             if (!finishing) {
                 if (len >= 16) return safeTtsCut(sb, 16, 12, 22);
                 if (len >= 12 && pendingStartedAt > 0
@@ -2065,6 +2157,7 @@ public class VoiceController {
                     return safeTtsCut(sb, len, 12, 22);
                 }
             }
+            if (finishing && len > 22) return safeTtsCut(sb, 16, 12, 22);
             return finishing ? len : -1;
         }
 
@@ -2074,7 +2167,8 @@ public class VoiceController {
         final int min = 24;
         final int target = 40;
         final int max = 50;
-        if (firstEnd >= min) return firstEnd;
+        if (firstEnd >= min && firstEnd <= max) return firstEnd;
+        if (firstEnd > max) return safeTtsCut(sb, target, min, max);
         if (firstEnd > 0 && !finishing) {
             int scanEnd = Math.min(len, max);
             for (int i = firstEnd; i < scanEnd; i++) {

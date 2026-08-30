@@ -26,6 +26,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import okhttp3.Call;
 
@@ -45,7 +46,10 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     private int bootHandoffReadyAttempts;
     private final Runnable settleKeyguardWindow = this::settleSeamlessKeyguardWindow;
     private final Runnable bootHandoffReadySignal = this::signalBootHandoffReady;
+    private final Object oracleLock = new Object();
+    private final AtomicInteger oracleGeneration = new AtomicInteger();
     private Call oracleCall;
+    private VoiceController.StreamingSpeechSession oracleSpeechSession;
     private long oracleUiUpdateMs = 0;
     private final Handler uiTicker = new Handler();
     private final Runnable uiTick = new Runnable() {
@@ -454,15 +458,23 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     }
 
     private void cancelOracleAi() {
-        if (oracleCall != null) {
-            oracleCall.cancel();
+        oracleGeneration.incrementAndGet();
+        Call call;
+        VoiceController.StreamingSpeechSession speech;
+        synchronized (oracleLock) {
+            call = oracleCall;
             oracleCall = null;
+            speech = oracleSpeechSession;
+            oracleSpeechSession = null;
         }
+        if (call != null) call.cancel();
+        if (speech != null) speech.cancel();
     }
 
     private void requestOracleAi(final OracleReading reading) {
         if (reading == null || view == null) return;
         cancelOracleAi();
+        final int generation = oracleGeneration.incrementAndGet();
         LlmClient llm = new LlmClient(this);
         if (llm.apiKey == null || llm.apiKey.trim().isEmpty()
                 || llm.textBaseUrl == null || llm.textBaseUrl.trim().isEmpty()
@@ -476,51 +488,114 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
                 "你是周易占筮解读助手。基于给定卦象，用中文克制解读，分象意、提醒、行动建议三点，总计不超过180字。不要宣称预测必然发生。"));
         msgs.add(new LlmClient.Msg("user", reading.prompt()));
         final StringBuilder full = new StringBuilder();
+        final Object resultLock = new Object();
+        final boolean[] hadDelta = {false};
         oracleUiUpdateMs = 0;
         oracleCall = llm.chat(msgs, false, LlmClient.ChatOptions.oracle(), new LlmClient.StreamCallback() {
             @Override public void onDelta(String s) {
-                if (s == null || s.isEmpty()) return;
-                full.append(s);
+                if (!isCurrentOracle(generation) || s == null || s.isEmpty()) return;
+                String visibleText;
+                synchronized (resultLock) {
+                    hadDelta[0] = true;
+                    full.append(s);
+                    visibleText = full.toString();
+                }
+                appendOracleSpeech(generation, s);
                 long now = System.currentTimeMillis();
                 if (now - oracleUiUpdateMs < 320) return;
                 oracleUiUpdateMs = now;
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
-                        if (view != null && view.isOracleDetailActive()) {
-                            view.setOracleAiResult(reading.id, full.toString(), "AI 解读中");
+                        if (isCurrentOracle(generation) && view != null && view.isOracleDetailActive()) {
+                            view.setOracleAiResult(reading.id, visibleText, "AI 解读并播报中");
                         }
                     }
                 });
             }
 
             @Override public void onDone(final String done) {
+                if (!isCurrentOracle(generation)) return;
+                final String text;
+                final boolean receivedDelta;
+                synchronized (resultLock) {
+                    receivedDelta = hadDelta[0];
+                    text = (done == null || done.trim().isEmpty() ? full.toString() : done).trim();
+                }
+                if (!text.isEmpty()) {
+                    if (!receivedDelta) appendOracleSpeech(generation, text);
+                    finishOracleSpeech(generation);
+                    ConversationLog.append(MainActivity.this, "assistant",
+                            "占卜：" + compactForLog(text, 220));
+                }
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
-                        if (view != null && view.isOracleDetailActive()) {
-                            String text = done == null || done.trim().isEmpty() ? full.toString() : done;
-                            text = text.trim();
+                        if (isCurrentOracle(generation) && view != null && view.isOracleDetailActive()) {
                             view.setOracleAiResult(reading.id, text, text.isEmpty() ? "AI 无返回" : "AI 已解读并播报");
-                            if (!text.isEmpty() && voice != null) {
-                                ConversationLog.append(MainActivity.this, "assistant",
-                                        "占卜：" + compactForLog(text, 220));
-                                voice.speakText("占卜解读。" + text);
-                            }
                         }
                     }
                 });
             }
 
             @Override public void onError(final String msg) {
+                if (!isCurrentOracle(generation)) return;
+                final String partial;
+                final boolean receivedDelta;
+                synchronized (resultLock) {
+                    partial = full.toString().trim();
+                    receivedDelta = hadDelta[0] && !partial.isEmpty();
+                }
+                if (receivedDelta) finishOracleSpeech(generation);
+                else cancelOracleSpeech(generation);
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
-                        if (view != null && view.isOracleDetailActive()) {
+                        if (isCurrentOracle(generation) && view != null && view.isOracleDetailActive()) {
                             String err = msg == null || msg.trim().isEmpty() ? "未知错误" : msg.trim();
-                            view.setOracleAiResult(reading.id, "", "AI 失败：" + err);
+                            view.setOracleAiResult(reading.id, receivedDelta ? partial : "",
+                                    receivedDelta ? "AI 中断，已播报已生成部分" : "AI 失败：" + err);
                         }
                     }
                 });
             }
         });
+    }
+
+    private boolean isCurrentOracle(int generation) {
+        return oracleGeneration.get() == generation;
+    }
+
+    private void appendOracleSpeech(int generation, String delta) {
+        if (delta == null || delta.isEmpty() || !isCurrentOracle(generation) || voice == null) return;
+        VoiceController.StreamingSpeechSession session;
+        boolean addPrefix = false;
+        synchronized (oracleLock) {
+            if (!isCurrentOracle(generation)) return;
+            session = oracleSpeechSession;
+            if (session == null) {
+                session = voice.beginStreamingSpeech("oracle");
+                oracleSpeechSession = session;
+                addPrefix = true;
+            }
+        }
+        session.append(addPrefix ? "占卜解读。" + delta : delta);
+    }
+
+    private void finishOracleSpeech(int generation) {
+        VoiceController.StreamingSpeechSession session;
+        synchronized (oracleLock) {
+            if (!isCurrentOracle(generation)) return;
+            session = oracleSpeechSession;
+        }
+        if (session != null) session.finish();
+    }
+
+    private void cancelOracleSpeech(int generation) {
+        VoiceController.StreamingSpeechSession session;
+        synchronized (oracleLock) {
+            if (!isCurrentOracle(generation)) return;
+            session = oracleSpeechSession;
+            oracleSpeechSession = null;
+        }
+        if (session != null) session.cancel();
     }
 
     private static String compactForLog(String s, int max) {
