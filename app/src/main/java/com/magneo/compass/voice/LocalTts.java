@@ -21,6 +21,7 @@ public class LocalTts {
     private static volatile long playingUntilMs = 0;
     private static AudioTrack track;
     private static TextToSpeech sysTts;
+    private static int levelSerial;
 
     public static synchronized boolean ensureInit(Context c) {
         if (inited) return NativeTts.available;
@@ -56,7 +57,9 @@ public class LocalTts {
 
     public static boolean containsCJK(String s) {
         for (char ch : s.toCharArray()) {
-            if (Character.UnicodeScript.of(ch) == Character.UnicodeScript.HAN) return true;
+            if ((ch >= '\u3400' && ch <= '\u4dbf')
+                    || (ch >= '\u4e00' && ch <= '\u9fff')
+                    || (ch >= '\uf900' && ch <= '\ufaff')) return true;
         }
         return false;
     }
@@ -84,6 +87,7 @@ public class LocalTts {
                     Math.max(AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT), 8192),
                     AudioTrack.MODE_STREAM);
             track.play();
+            startPcmEnvelope(pcm, rate);
             int step = 8192;
             for (int off = 0; off < pcm.length; off += step) {
                 track.write(pcm, off, Math.min(step, pcm.length - off));
@@ -94,10 +98,13 @@ public class LocalTts {
                     AudioTrack.MODE_STATIC);
             track.write(pcm, 0, pcm.length);
             track.play();
+            startPcmEnvelope(pcm, rate);
         }
     }
 
     private static void playSystem(Context c, String text) {
+        levelSerial++;
+        VoiceVisualState.clearOutputLevel();
         playingUntilMs = System.currentTimeMillis() + Math.max(1200, text.length() * 90L);
         if (sysTts == null) {
             sysTts = new TextToSpeech(c, status -> {
@@ -109,7 +116,9 @@ public class LocalTts {
     }
 
     public static synchronized void stopPlayback() {
+        levelSerial++;
         playingUntilMs = 0;
+        VoiceVisualState.clearOutputLevel();
         if (track != null) {
             try { track.stop(); track.release(); } catch (Throwable ignored) {}
             track = null;
@@ -124,6 +133,32 @@ public class LocalTts {
 
     public static boolean isPlaying() {
         return System.currentTimeMillis() < playingUntilMs;
+    }
+
+    private static void startPcmEnvelope(final short[] pcm, final int rate) {
+        final int serial = ++levelSerial;
+        Thread envelope = new Thread(() -> {
+            int window = Math.max(1, rate * 80 / 1000);
+            for (int off = 0; off < pcm.length && serial == levelSerial; off += window) {
+                int end = Math.min(pcm.length, off + window);
+                double sum = 0.0;
+                for (int i = off; i < end; i++) {
+                    double sample = pcm[i];
+                    sum += sample * sample;
+                }
+                float rms = end > off
+                        ? (float) (Math.sqrt(sum / (end - off)) / 7000.0) : 0f;
+                VoiceVisualState.setOutputLevel(Math.min(1f, rms));
+                try {
+                    Thread.sleep(80L);
+                } catch (InterruptedException ignored) {
+                    break;
+                }
+            }
+            if (serial == levelSerial) VoiceVisualState.clearOutputLevel();
+        }, "local-tts-level");
+        envelope.setDaemon(true);
+        envelope.start();
     }
 
     public static void waitUntilIdle(long maxMs) {

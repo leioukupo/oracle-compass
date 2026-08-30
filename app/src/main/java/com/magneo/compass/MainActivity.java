@@ -67,6 +67,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
 
         RootGrantNotificationManager.applySaved(this);
         SystemLockscreenManager.applySavedAsync(this);
+        SystemLowBatterySoundManager.applySavedAsync(this);
         if (Prefs.get(this, Prefs.K_PROVIDER, "").isEmpty()) {
             ProviderConfig.apply(this, ProviderConfig.openaiCompatible());
         }
@@ -76,23 +77,33 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         float[] lastPitch = {Float.NaN};
         float[] lastRoll = {Float.NaN};
         int[] lastBattery = {-1};
+        boolean[] lastBatteryCharging = {false};
+        boolean[] lastBatteryFull = {false};
         hub = new SensorHub(this, () -> {
             long now = System.currentTimeMillis();
             float accelMove = (float) Math.abs(Math.sqrt(hub.ax * hub.ax + hub.ay * hub.ay + hub.az * hub.az) - 9.80665f);
             boolean oracleMotion = view != null && view.isOracleDetailActive()
                     && (view.isOracleCollecting() || accelMove > 0.25f);
+            boolean batteryStateChanged = hub.battery != lastBattery[0]
+                    || hub.batteryCharging != lastBatteryCharging[0]
+                    || hub.batteryFull != lastBatteryFull[0];
+            if (batteryStateChanged) {
+                lastBattery[0] = hub.battery;
+                lastBatteryCharging[0] = hub.batteryCharging;
+                lastBatteryFull[0] = hub.batteryFull;
+                if (view != null) view.onBatteryStateChanged();
+            }
             boolean changed = angleChanged(hub.azimuth, lastAzimuth[0], 1.5f)
                     || valueChanged(hub.pitch, lastPitch[0], 1.4f)
                     || valueChanged(hub.roll, lastRoll[0], 1.4f)
-                    || hub.battery != lastBattery[0]
+                    || batteryStateChanged
                     || oracleMotion;
             long minGap = activeFrameMinGapMs(oracleMotion);
-            if (changed && now - lastDraw[0] >= minGap) {
+            if (changed && (batteryStateChanged || now - lastDraw[0] >= minGap)) {
                 lastDraw[0] = now;
                 lastAzimuth[0] = hub.azimuth;
                 lastPitch[0] = hub.pitch;
                 lastRoll[0] = hub.roll;
-                lastBattery[0] = hub.battery;
                 view.postInvalidate();
             }
         });
@@ -295,6 +306,18 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         });
     }
 
+    public static void applyVoiceDiagnosticPrefToActive() {
+        final MainActivity activity = activeMain;
+        if (activity == null) return;
+        activity.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                if (!Prefs.voiceDiagnosticOverlays(activity) && activity.view != null) {
+                    activity.view.setStatus("");
+                }
+            }
+        });
+    }
+
     private void applyLocationPrefs() {
         boolean wifiIpLoc = Prefs.locSourceWifiIp(this);
         hub.setGpsEnabled(Prefs.locSourceGpsDiag(this));
@@ -377,27 +400,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         if (status == null) return "";
         String s = status.trim();
         if (s.isEmpty()) return "";
-        String base = s;
-        while (base.endsWith(".") || base.endsWith("…")) {
-            base = base.substring(0, base.length() - 1).trim();
-        }
-        if (base.equals("常驻聆听中")
-                || base.equals("聆听中")
-                || base.equals("识别中")
-                || base.equals("思考中")
-                || base.equals("合成中")
-                || base.equals("播报中")
-                || base.equals("正在重试识别")
-                || base.equals("听见声音")
-                || base.equals("收到打断")
-                || base.equals("回声已过滤")
-                || base.equals("语音已暂停")
-                || base.equals("切换 TTS 音色")
-                || base.equals("查找 TTS 音色")
-                || base.startsWith("听见：")) {
-            return "";
-        }
-        return s;
+        return Prefs.voiceDiagnosticOverlays(this) ? s : "";
     }
 
     private void hideSystemUi() {

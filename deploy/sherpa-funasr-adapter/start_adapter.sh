@@ -15,7 +15,8 @@ find_one() {
 }
 
 first_glob() {
-  for p in "$1"; do
+  pattern=$1
+  for p in $pattern; do
     if [ -f "$p" ]; then
       printf '%s\n' "$p"
       return 0
@@ -49,6 +50,13 @@ JOINER=$(find_one \
 
 TOKENS=$(find_one "$MODEL/tokens.txt" "$MODEL/tokens.txt.txt")
 BPE=$(find_one "$MODEL/bpe.model" "$MODEL/bpe.vocab" || true)
+if [ -z "${MODELING_UNIT:-}" ]; then
+  if [ -n "$BPE" ]; then
+    MODELING_UNIT=cjkchar+bpe
+  else
+    MODELING_UNIT=cjkchar
+  fi
+fi
 
 echo "Using model: $MODEL"
 echo "encoder: $ENCODER"
@@ -66,6 +74,7 @@ ARGS="
   --tokens $TOKENS
   --num-threads ${NUM_THREADS:-2}
   --partial-interval-ms ${PARTIAL_INTERVAL_MS:-180}
+  --modeling-unit $MODELING_UNIT
 "
 
 if [ -n "$BPE" ]; then

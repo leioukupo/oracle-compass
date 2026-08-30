@@ -572,22 +572,10 @@ public class CompassGlView extends GLSurfaceView {
             float r = rMax * 0.235f;
             float ringR = r * 1.14f;
             float diskR = r * 0.93f;
-            drawArcRing(cx, cy, ringR * 1.17f - 0.85f * scale, ringR * 1.17f + 0.85f * scale,
-                    -26f, 52f, a(C_CYAN, 110), 220);
-            drawArcRing(cx, cy, ringR * 1.17f - 0.85f * scale, ringR * 1.17f + 0.85f * scale,
-                    154f, 52f, a(C_CYAN, 110), 220);
             drawArcRing(cx, cy, ringR - 0.8f * scale, ringR + 0.8f * scale,
                     0f, 360f, a(C_GOLD_DARK, 116), FULL_RING_STEPS);
             drawArcRing(cx, cy, ringR * 0.78f - 0.5f * scale, ringR * 0.78f + 0.5f * scale,
                     0f, 360f, a(C_CYAN, 58), FULL_RING_STEPS);
-            for (int i = 0; i < 4; i++) {
-                float rad = (float) Math.toRadians(-90f + i * 90f);
-                drawLine(cx + (float) Math.cos(rad) * ringR * 0.90f,
-                        cy + (float) Math.sin(rad) * ringR * 0.90f,
-                        cx + (float) Math.cos(rad) * ringR * 1.03f,
-                        cy + (float) Math.sin(rad) * ringR * 1.03f,
-                        1.2f * scale, a(C_GOLD, 130));
-            }
             if (!Float.isNaN(az)) {
                 float showAz = az % 360f;
                 if (showAz < 0f) showAz += 360f;

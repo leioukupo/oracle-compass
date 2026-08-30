@@ -5,9 +5,9 @@ export SHLVL=1
 unset BASH_ENV ENV PROMPT_COMMAND
 
 ROOT=/opt/oracle-voice/asr
-MODEL_DIR=${MODEL_DIR:-sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16}
-MODEL_URL='https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23.tar.bz2'
-MODEL_TAR=$ROOT/model.tar.bz2
+MODEL_DIR=${MODEL_DIR:-sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30}
+MODEL_URL=${MODEL_URL:-https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2}
+MODEL_TAR=$ROOT/$(basename "$MODEL_URL")
 
 mkdir -p "$ROOT"
 cd "$ROOT"
@@ -23,6 +23,15 @@ if [ ! -d "$ROOT/$MODEL_DIR" ]; then
   wget -c "$MODEL_URL" -O "$MODEL_TAR"
   tar xf "$MODEL_TAR"
 fi
+
+test -f "$ROOT/$MODEL_DIR/tokens.txt"
+test -f "$ROOT/$MODEL_DIR/decoder.onnx" || test -f "$ROOT/$MODEL_DIR/decoder-epoch-99-avg-1.onnx"
+test -f "$ROOT/$MODEL_DIR/joiner.int8.onnx" \
+  || test -f "$ROOT/$MODEL_DIR/joiner-epoch-99-avg-1.int8.onnx" \
+  || test -f "$ROOT/$MODEL_DIR/joiner-epoch-99-avg-1.onnx"
+test -f "$ROOT/$MODEL_DIR/encoder.int8.onnx" \
+  || test -f "$ROOT/$MODEL_DIR/encoder-epoch-99-avg-1.int8.onnx" \
+  || test -f "$ROOT/$MODEL_DIR/encoder-epoch-99-avg-1.onnx"
 
 ln -sfn "$ROOT/$MODEL_DIR" "$ROOT/current-model"
 

@@ -16,6 +16,7 @@ public class BootReceiver extends BroadcastReceiver {
                 && !"android.intent.action.QUICKBOOT_POWERON".equals(action)) return;
         RootGrantNotificationManager.applySaved(context);
         SystemLockscreenManager.applySavedAsync(context);
+        SystemLowBatterySoundManager.applySavedAsync(context);
         try {
             SavedWifiAutoConnector.ensureConnected(context);
         } catch (Throwable t) {

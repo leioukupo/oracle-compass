@@ -7,12 +7,15 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
+import android.os.SystemClock;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
 
 import com.magneo.compass.ui.RoundScreen;
 import com.magneo.compass.ui.Ui;
+import com.magneo.compass.voice.VoiceVisualPhase;
+import com.magneo.compass.voice.VoiceVisualState;
 
 import java.util.Calendar;
 import java.util.Locale;
@@ -86,6 +89,28 @@ public class CompassView extends View {
     private float oraclePeakEnergy = 0f;
     private String oracleHint = "";
     private long oracleHintUntil = 0;
+    private boolean effectFrameScheduled;
+    private boolean attached;
+    private long chargingEffectStartedAtMs;
+
+    private final VoiceVisualState.Listener voiceVisualListener =
+            new VoiceVisualState.Listener() {
+                @Override public void onVoiceVisualStateChanged() {
+                    post(new Runnable() {
+                        @Override public void run() { wakeEffectAnimation(); }
+                    });
+                }
+            };
+    private final Runnable effectFrame = new Runnable() {
+        @Override public void run() {
+            effectFrameScheduled = false;
+            if (!attached) return;
+            postInvalidate();
+            VoiceVisualState.Snapshot visual = VoiceVisualState.snapshot();
+            if (!hasAnimatedEffect(visual)) return;
+            scheduleEffectFrame(visual);
+        }
+    };
 
     private final Paint pFill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pStroke = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -121,12 +146,18 @@ public class CompassView extends View {
         glMainMode = enabled;
         setWillNotDraw(false);
         postInvalidate();
+        wakeEffectAnimation();
+    }
+
+    public void onBatteryStateChanged() {
+        chargingEffectStartedAtMs = SystemClock.uptimeMillis();
+        wakeEffectAnimation();
     }
 
     public void toggleDetail() {
         detailMode = !detailMode;
         enterDetailPage(DETAIL_EARTH);
-        postInvalidate();
+        wakeEffectAnimation();
     }
 
     public void syncHardwareDemand() {
@@ -177,7 +208,11 @@ public class CompassView extends View {
         float scale = RoundScreen.scale800(w, h);
         float rMax = RoundScreen.R(w, h) - 4f;  // 安全圆内缩 4px
 
+        VoiceVisualState.Snapshot visual = VoiceVisualState.snapshot();
+        long effectNow = SystemClock.uptimeMillis();
         if (glMainMode && !dragging && !detailMode) {
+            drawChargingEffect(canvas, cx, cy, rMax, scale, effectNow);
+            drawVoiceEffect(canvas, cx, cy, rMax, scale, visual, effectNow);
             drawStatus(canvas, cx, cy, rMax, scale);
             return;
         }
@@ -197,7 +232,22 @@ public class CompassView extends View {
         else if (detailMode) drawDetail(canvas, cx, cy, scale);
         else drawCenter(canvas, cx, cy, rMax * 0.235f, scale, hub.azimuth);
 
+        drawChargingEffect(canvas, cx, cy, rMax, scale, effectNow);
+        if (!dragging && !detailMode) {
+            drawVoiceEffect(canvas, cx, cy, rMax, scale, visual, effectNow);
+        }
         drawStatus(canvas, cx, cy, rMax, scale);
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        attached = true;
+        if (chargingEffectStartedAtMs == 0L) {
+            chargingEffectStartedAtMs = SystemClock.uptimeMillis();
+        }
+        VoiceVisualState.addListener(voiceVisualListener);
+        wakeEffectAnimation();
     }
 
     @Override
@@ -208,11 +258,63 @@ public class CompassView extends View {
 
     @Override
     protected void onDetachedFromWindow() {
+        attached = false;
+        removeCallbacks(effectFrame);
+        effectFrameScheduled = false;
+        VoiceVisualState.removeListener(voiceVisualListener);
         detailMode = false;
         stopOracleCollecting();
         applyDetailResourceDemand();
         recycleStaticLayer();
         super.onDetachedFromWindow();
+    }
+
+    private void wakeEffectAnimation() {
+        postInvalidate();
+        VoiceVisualState.Snapshot visual = VoiceVisualState.snapshot();
+        if (hasAnimatedEffect(visual)) scheduleEffectFrame(visual);
+        else if (effectFrameScheduled) {
+            removeCallbacks(effectFrame);
+            effectFrameScheduled = false;
+        }
+    }
+
+    private void scheduleEffectFrame(VoiceVisualState.Snapshot visual) {
+        if (!attached || effectFrameScheduled || !hasAnimatedEffect(visual)) return;
+        effectFrameScheduled = true;
+        postDelayed(effectFrame, effectFrameDelayMs(visual));
+    }
+
+    private boolean hasAnimatedEffect(VoiceVisualState.Snapshot visual) {
+        return isChargingAnimationActive()
+                || (!dragging && !detailMode && visual != null
+                && visual.phase != VoiceVisualPhase.IDLE);
+    }
+
+    private boolean isChargingAnimationActive() {
+        return hub.batteryCharging && !hub.batteryFull
+                && hub.battery >= 0 && hub.battery < 100;
+    }
+
+    private long effectFrameDelayMs(VoiceVisualState.Snapshot visual) {
+        if (animationPowerCapped()) return 125L;
+        if (visual != null && (visual.phase == VoiceVisualPhase.THINKING
+                || visual.phase == VoiceVisualPhase.SPEAKING
+                || visual.phase == VoiceVisualPhase.ERROR)) {
+            return 83L;
+        }
+        return 100L;
+    }
+
+    private boolean animationPowerCapped() {
+        if (!glMainMode || dragging || detailMode
+                || Prefs.MAIN_FPS_POWER.equals(Prefs.mainFpsMode(getContext()))) {
+            return true;
+        }
+        if (!hub.batteryCharging && hub.battery >= 0 && hub.battery < 15) return true;
+        return com.magneo.compass.web.ScreenStreamer.isActive()
+                || com.magneo.compass.web.H264Streamer.isActive()
+                || com.magneo.compass.web.H264SurfaceStreamer.isActive();
     }
 
     private int a(int color, int alpha) {
@@ -702,6 +804,248 @@ public class CompassView extends View {
         }
     }
 
+    private void drawChargingEffect(Canvas c, float cx, float cy, float rMax, float s,
+                                    long now) {
+        if (!hub.batteryCharging || hub.battery < 0 || hub.battery > 100) return;
+        float outer = rMax * 0.595f;
+        float inner = rMax * 0.565f;
+        float mid = (outer + inner) / 2f;
+        float width = outer - inner - 2.2f * s;
+        tmpRectA.set(cx - mid, cy - mid, cx + mid, cy + mid);
+        pStroke.setStyle(Paint.Style.STROKE);
+        pStroke.setStrokeCap(Paint.Cap.ROUND);
+
+        if (hub.batteryFull || hub.battery >= 100) {
+            pStroke.setColor(a(Color.rgb(255, 220, 82), 190));
+            pStroke.setStrokeWidth(width);
+            c.drawArc(tmpRectA, -90f, 360f, false, pStroke);
+            pStroke.setColor(a(C_GOLD, 70));
+            pStroke.setStrokeWidth(width + 3.6f * s);
+            c.drawArc(tmpRectA, -90f, 360f, false, pStroke);
+            pStroke.setStrokeCap(Paint.Cap.BUTT);
+            return;
+        }
+
+        float filled = hub.battery * 3.6f;
+        float remaining = 360f - filled;
+        float start = -90f + filled;
+        float pulse = 0.5f + 0.5f * (float) Math.sin(now * Math.PI * 2.0 / 1200.0);
+        float targetRad = (float) Math.toRadians(270f);
+        float targetX = cx + (float) Math.cos(targetRad) * mid;
+        float targetY = cy + (float) Math.sin(targetRad) * mid;
+        pFill.setStyle(Paint.Style.FILL);
+        pFill.setColor(a(Color.rgb(255, 222, 88), (int) (78 + pulse * 96)));
+        c.drawCircle(targetX, targetY, (3.8f + pulse * 2.0f) * s, pFill);
+        pFill.setColor(Color.rgb(255, 231, 110));
+        c.drawCircle(targetX, targetY, 2.2f * s, pFill);
+
+        if (remaining < 12f) {
+            pStroke.setColor(a(Color.rgb(255, 218, 74), (int) (100 + pulse * 110)));
+            pStroke.setStrokeWidth(width + pulse * 1.6f * s);
+            c.drawArc(tmpRectA, start, remaining, false, pStroke);
+            pStroke.setStrokeCap(Paint.Cap.BUTT);
+            return;
+        }
+
+        long duration = Math.max(100L, Math.round(remaining / 110f * 1000f));
+        long elapsed = Math.max(0L, now - chargingEffectStartedAtMs);
+        float progress = (elapsed % duration) / (float) duration;
+        float head = start + remaining * progress;
+        float tail = Math.min(28f, Math.max(10f, remaining * 0.22f));
+        int pieces = 8;
+        for (int i = pieces - 1; i >= 0; i--) {
+            float segStart = head - tail * (i + 1f) / pieces;
+            float segEnd = head - tail * i / pieces;
+            if (segEnd <= start) continue;
+            segStart = Math.max(start, segStart);
+            float strength = 1f - i / (float) pieces;
+            pStroke.setColor(a(Color.rgb(255, 211, 58),
+                    (int) (30 + strength * 190)));
+            pStroke.setStrokeWidth(width * (0.48f + strength * 0.48f));
+            c.drawArc(tmpRectA, segStart, Math.max(0.2f, segEnd - segStart), false, pStroke);
+        }
+
+        float headRad = (float) Math.toRadians(head);
+        float headX = cx + (float) Math.cos(headRad) * mid;
+        float headY = cy + (float) Math.sin(headRad) * mid;
+        pFill.setColor(a(Color.rgb(255, 221, 82), 88));
+        c.drawCircle(headX, headY, 6.2f * s, pFill);
+        pFill.setColor(Color.rgb(255, 236, 132));
+        c.drawCircle(headX, headY, 3.0f * s, pFill);
+        pStroke.setStrokeCap(Paint.Cap.BUTT);
+    }
+
+    private void drawVoiceEffect(Canvas c, float cx, float cy, float rMax, float s,
+                                 VoiceVisualState.Snapshot visual, long now) {
+        float r = rMax * 0.235f;
+        float ringR = r * 1.14f;
+        VoiceVisualPhase phase = visual == null ? VoiceVisualPhase.IDLE : visual.phase;
+        if (phase == VoiceVisualPhase.IDLE) {
+            drawStaticVoiceOrnaments(c, cx, cy, ringR, s, true, true);
+        } else if (phase == VoiceVisualPhase.LISTENING) {
+            drawStaticVoiceOrnaments(c, cx, cy, ringR, s, false, true);
+            drawListeningEffect(c, cx, cy, ringR, s, visual.inputLevel, now);
+        } else if (phase == VoiceVisualPhase.THINKING) {
+            drawThinkingEffect(c, cx, cy, ringR, s, visual.phaseStartedAtMs, now);
+        } else if (phase == VoiceVisualPhase.SPEAKING) {
+            drawStaticVoiceOrnaments(c, cx, cy, ringR, s, true, true);
+            drawSpeakingEffect(c, cx, cy, r * 0.93f, s, visual.outputLevel);
+        } else if (phase == VoiceVisualPhase.ERROR) {
+            drawVoiceErrorEffect(c, cx, cy, ringR, s, visual.phaseStartedAtMs, now);
+        }
+    }
+
+    private void drawStaticVoiceOrnaments(Canvas c, float cx, float cy, float ringR, float s,
+                                          boolean cyanArcs, boolean goldMarkers) {
+        pStroke.setStyle(Paint.Style.STROKE);
+        pStroke.setStrokeCap(Paint.Cap.BUTT);
+        if (cyanArcs) {
+            float radius = ringR * 1.17f;
+            tmpRectA.set(cx - radius, cy - radius, cx + radius, cy + radius);
+            pStroke.setColor(a(C_CYAN, 110));
+            pStroke.setStrokeWidth(1.7f * s);
+            c.drawArc(tmpRectA, -26f, 52f, false, pStroke);
+            c.drawArc(tmpRectA, 154f, 52f, false, pStroke);
+        }
+        if (goldMarkers) {
+            pStroke.setColor(a(C_GOLD, 130));
+            pStroke.setStrokeWidth(1.2f * s);
+            for (int i = 0; i < 4; i++) {
+                float rad = (float) Math.toRadians(-90f + i * 90f);
+                c.drawLine(cx + (float) Math.cos(rad) * ringR * 0.90f,
+                        cy + (float) Math.sin(rad) * ringR * 0.90f,
+                        cx + (float) Math.cos(rad) * ringR * 1.03f,
+                        cy + (float) Math.sin(rad) * ringR * 1.03f, pStroke);
+            }
+        }
+    }
+
+    private void drawListeningEffect(Canvas c, float cx, float cy, float ringR, float s,
+                                     float inputLevel, long now) {
+        float level = Math.max(0f, Math.min(1f, inputLevel));
+        float idleBreath = 0.5f + 0.5f * (float) Math.sin(now * Math.PI * 2.0 / 1800.0);
+        float energy = Math.max(0.10f + idleBreath * 0.08f, level);
+        float radius = ringR * (1.17f + energy * 0.018f);
+        float span = 52f + energy * 10f;
+        tmpRectA.set(cx - radius, cy - radius, cx + radius, cy + radius);
+        pStroke.setStyle(Paint.Style.STROKE);
+        pStroke.setStrokeCap(Paint.Cap.ROUND);
+        pStroke.setColor(a(C_CYAN, (int) (34 + energy * 72)));
+        pStroke.setStrokeWidth((4.8f + energy * 2.0f) * s);
+        c.drawArc(tmpRectA, -26f - (span - 52f) / 2f, span, false, pStroke);
+        c.drawArc(tmpRectA, 154f - (span - 52f) / 2f, span, false, pStroke);
+        pStroke.setColor(a(C_CYAN, (int) (92 + energy * 150)));
+        pStroke.setStrokeWidth((1.5f + energy * 2.3f) * s);
+        c.drawArc(tmpRectA, -26f - (span - 52f) / 2f, span, false, pStroke);
+        c.drawArc(tmpRectA, 154f - (span - 52f) / 2f, span, false, pStroke);
+        pStroke.setStrokeCap(Paint.Cap.BUTT);
+    }
+
+    private void drawThinkingEffect(Canvas c, float cx, float cy, float ringR, float s,
+                                    long startedAt, long now) {
+        float elapsed = Math.max(0L, now - startedAt) / 1000f;
+        float cyanRot = (elapsed * 72f) % 360f;
+        float goldRot = -(elapsed * 43f) % 360f;
+        float radius = ringR * 1.17f;
+        tmpRectA.set(cx - radius, cy - radius, cx + radius, cy + radius);
+        pStroke.setStyle(Paint.Style.STROKE);
+        pStroke.setStrokeCap(Paint.Cap.ROUND);
+        pStroke.setColor(a(C_CYAN, 68));
+        pStroke.setStrokeWidth(5.0f * s);
+        c.drawArc(tmpRectA, -26f + cyanRot, 52f, false, pStroke);
+        c.drawArc(tmpRectA, 154f + cyanRot, 52f, false, pStroke);
+        pStroke.setColor(a(C_CYAN, 225));
+        pStroke.setStrokeWidth(2.0f * s);
+        c.drawArc(tmpRectA, -26f + cyanRot, 52f, false, pStroke);
+        c.drawArc(tmpRectA, 154f + cyanRot, 52f, false, pStroke);
+
+        pStroke.setStrokeCap(Paint.Cap.ROUND);
+        pStroke.setColor(a(C_GOLD, 225));
+        pStroke.setStrokeWidth(1.8f * s);
+        for (int i = 0; i < 4; i++) {
+            float rad = (float) Math.toRadians(-90f + i * 90f + goldRot);
+            c.drawLine(cx + (float) Math.cos(rad) * ringR * 0.90f,
+                    cy + (float) Math.sin(rad) * ringR * 0.90f,
+                    cx + (float) Math.cos(rad) * ringR * 1.03f,
+                    cy + (float) Math.sin(rad) * ringR * 1.03f, pStroke);
+        }
+        pStroke.setStrokeCap(Paint.Cap.BUTT);
+    }
+
+    private void drawSpeakingEffect(Canvas c, float cx, float cy, float diskR, float s,
+                                    float outputLevel) {
+        float level = Math.max(0f, Math.min(1f, outputLevel));
+        float response = (float) Math.sqrt(level);
+        float scaleFactor = 1f + response * 0.045f;
+        pStroke.setStyle(Paint.Style.STROKE);
+        pStroke.setColor(a(C_GOLD, (int) (58 + response * 92)));
+        pStroke.setStrokeWidth((5.0f + response * 4.0f) * s);
+        c.drawCircle(cx, cy, diskR * scaleFactor * 1.04f, pStroke);
+
+        float az = Float.isNaN(hub.azimuth) ? 0f : hub.azimuth;
+        float rotation = glMainMode ? -az * 0.18f : -az;
+        drawAnimatedTaiji(c, cx, cy, diskR, s, rotation, scaleFactor, response);
+    }
+
+    private void drawAnimatedTaiji(Canvas c, float cx, float cy, float r, float s,
+                                   float rotation, float scaleFactor, float response) {
+        c.save();
+        c.scale(scaleFactor, scaleFactor, cx, cy);
+        c.rotate(rotation, cx, cy);
+        tmpRectA.set(cx - r, cy - r, cx + r, cy + r);
+        pFill.setStyle(Paint.Style.FILL);
+        pFill.setColor(Color.rgb(217, 169, 44));
+        c.drawCircle(cx, cy, r, pFill);
+
+        tmpPath.reset();
+        tmpPath.moveTo(cx, cy - r);
+        tmpPath.arcTo(tmpRectA, -90f, 180f);
+        tmpPath.close();
+        pFill.setColor(Color.rgb(4, 4, 3));
+        c.drawPath(tmpPath, pFill);
+        c.drawCircle(cx, cy + r / 2f, r / 2f, pFill);
+        pFill.setColor(Color.rgb(217, 169, 44));
+        c.drawCircle(cx, cy - r / 2f, r / 2f, pFill);
+
+        pStroke.setStyle(Paint.Style.STROKE);
+        pStroke.setColor(a(Color.rgb(255, 218, 76), (int) (205 + response * 50)));
+        pStroke.setStrokeWidth((1.9f + response * 1.4f) * s);
+        c.drawCircle(cx, cy, r, pStroke);
+        pFill.setColor(Color.rgb(4, 4, 3));
+        c.drawCircle(cx, cy - r / 2f, r * 0.115f, pFill);
+        pFill.setColor(Color.rgb(245, 201, 62));
+        c.drawCircle(cx, cy + r / 2f, r * 0.115f, pFill);
+        c.restore();
+    }
+
+    private void drawVoiceErrorEffect(Canvas c, float cx, float cy, float ringR, float s,
+                                      long startedAt, long now) {
+        float progress = Math.max(0f, Math.min(1f, (now - startedAt) / 1400f));
+        float eased = 1f - (1f - progress) * (1f - progress);
+        float alpha = 1f - progress;
+        float radius = ringR * (1.30f - eased * 0.22f);
+        pStroke.setStyle(Paint.Style.STROKE);
+        pStroke.setStrokeCap(Paint.Cap.ROUND);
+        pStroke.setColor(a(C_RED, (int) (alpha * 155)));
+        pStroke.setStrokeWidth(7.0f * s);
+        c.drawCircle(cx, cy, radius, pStroke);
+        pStroke.setColor(a(Color.rgb(242, 70, 53), (int) (alpha * 245)));
+        pStroke.setStrokeWidth(2.4f * s);
+        c.drawCircle(cx, cy, radius, pStroke);
+
+        float flash = 0.55f + 0.45f * Math.abs((float) Math.sin(progress * Math.PI * 4.0));
+        pStroke.setColor(a(Color.rgb(246, 64, 48), (int) (alpha * flash * 255)));
+        pStroke.setStrokeWidth(4.0f * s);
+        for (int i = 0; i < 4; i++) {
+            float rad = (float) Math.toRadians(-90f + i * 90f);
+            c.drawLine(cx + (float) Math.cos(rad) * ringR * 0.88f,
+                    cy + (float) Math.sin(rad) * ringR * 0.88f,
+                    cx + (float) Math.cos(rad) * ringR * 1.10f,
+                    cy + (float) Math.sin(rad) * ringR * 1.10f, pStroke);
+        }
+        pStroke.setStrokeCap(Paint.Cap.BUTT);
+    }
+
     private void drawNeedle(Canvas c, float cx, float cy, float r, float az, float s) {
         c.save();
         c.rotate(-az, cx, cy);
@@ -731,32 +1075,14 @@ public class CompassView extends View {
     private void drawCenter(Canvas c, float cx, float cy, float r, float s, float az) {
         float ringR = r * 1.14f;
         float diskR = r * 0.93f;
-        tmpRectA.set(cx - ringR * 1.18f, cy - ringR * 1.18f,
-                cx + ringR * 1.18f, cy + ringR * 1.18f);
         pStroke.setStrokeCap(Paint.Cap.BUTT);
         pStroke.setStyle(Paint.Style.STROKE);
-        pStroke.setColor(a(C_CYAN, 110));
-        pStroke.setStrokeWidth(1.7f * s);
-        c.drawArc(tmpRectA, -26f, 52f, false, pStroke);
-        c.drawArc(tmpRectA, 154f, 52f, false, pStroke);
-
         pStroke.setColor(a(C_GOLD_DARK, 116));
         pStroke.setStrokeWidth(1.6f * s);
         c.drawCircle(cx, cy, ringR, pStroke);
         pStroke.setColor(a(C_CYAN, 58));
         pStroke.setStrokeWidth(1.0f * s);
         c.drawCircle(cx, cy, ringR * 0.78f, pStroke);
-
-        pStroke.setColor(a(C_GOLD, 130));
-        pStroke.setStrokeWidth(1.2f * s);
-        for (int i = 0; i < 4; i++) {
-            float rad = (float) Math.toRadians(-90f + i * 90f);
-            float x1 = cx + (float) Math.cos(rad) * ringR * 0.90f;
-            float y1 = cy + (float) Math.sin(rad) * ringR * 0.90f;
-            float x2 = cx + (float) Math.cos(rad) * ringR * 1.03f;
-            float y2 = cy + (float) Math.sin(rad) * ringR * 1.03f;
-            c.drawLine(x1, y1, x2, y2, pStroke);
-        }
 
         if (!Float.isNaN(az)) {
             float showAz = az % 360f;
@@ -1677,7 +2003,10 @@ public class CompassView extends View {
                     float moved = Math.abs(ev.getX() - downX) + Math.abs(ev.getY() - downY);
                     float slop = 24f * (r / 400f);
                     // 移动超过阈值，或手指落在外圈区域，进入绕圈滑动模式
-                    if (moved > slop || dist > r * 0.30f) dragging = true;
+                    if (moved > slop || dist > r * 0.30f) {
+                        dragging = true;
+                        wakeEffectAnimation();
+                    }
                 }
                 if (dragging) {
                     float deg = (float) Math.toDegrees(Math.atan2(dy, dx)); // -180..180, 0 = right
@@ -1695,7 +2024,7 @@ public class CompassView extends View {
                     int idx = previewIdx;
                     dragging = false;
                     previewIdx = -1;
-                    postInvalidate();
+                    wakeEffectAnimation();
                     if (idx >= 0) actions.onSector(idx);
                     return true;
                 }
@@ -1725,6 +2054,11 @@ public class CompassView extends View {
                 }
                 return true;
             }
+            case MotionEvent.ACTION_CANCEL:
+                dragging = false;
+                previewIdx = -1;
+                wakeEffectAnimation();
+                return true;
         }
         return true;
     }

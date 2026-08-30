@@ -44,21 +44,39 @@ the Android app as the short final-ASR refinement pass. It accepts multipart
 {"text":"..."}
 ```
 
-## Faster model choices
+## Model choices
 
-For less download time, use a smaller ASR model:
+The default is the Chinese int8 model below. It replaces the old 14M model
+while keeping the same WebSocket and HTTP adapter API:
 
-- `sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23`  
-  Chinese only, very small, fastest to pull.
+- `sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30`
+  Chinese only, larger than 14M, better accuracy, still suitable for CPU realtime.
 - `sherpa-onnx-streaming-zipformer-small-ctc-zh-int8-2025-04-01`  
   Chinese only, still small, a bit better quality.
 - `sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16`  
   Bilingual, bigger, more general.
 
-You can override the model tarball during install:
+The official model page reports the 2025 Chinese int8 model at about 0.15 CPU
+real-time factor in its example. The xlarge model is more accurate but is not
+recommended for always-on CPU streaming on this host.
+
+To install the default model on an existing adapter host, the old model
+directory is left in place and only `current-model` is switched:
 
 ```bash
-MODEL_URL='https://www.modelscope.cn/.../your-model.tar.bz2' bash install.sh
+cd /opt/oracle-voice/asr
+env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin SHLVL=1 \
+  MODEL_DIR=sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30 \
+  MODEL_URL='https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2' \
+  bash --noprofile --norc install.sh
+```
+
+To use another compatible model, pass its matching directory and archive URL:
+
+```bash
+MODEL_DIR=your-model-directory \
+MODEL_URL='https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/your-model.tar.bz2' \
+  bash install.sh
 ```
 
 The mirror page for the official ASR model family is:
@@ -100,9 +118,18 @@ curl -sS -F model=paraformer \
 
 ## Notes
 
-The default model is the int8 version of
-`sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16`.
-It is CPU-first and usually fast enough for always-on short utterances.
+The adapter is CPU-first. Keep `NUM_THREADS=2` initially so it does not compete
+with TTS or other services; increase it only after checking CPU load and ASR
+latency. The launcher selects `cjkchar` for the 2025 model and
+`cjkchar+bpe` when a model directory contains a BPE vocabulary. The old model
+remains available for rollback:
+
+```bash
+cd /opt/oracle-voice/asr
+env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin SHLVL=1 \
+  MODEL_DIR=old-model-directory \
+  bash --noprofile --norc install.sh
+```
 
 Official sherpa-onnx docs:
 https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/zipformer-transducer-models.html

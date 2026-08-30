@@ -1,5 +1,6 @@
 package com.magneo.compass.netfs;
 
+import android.annotation.SuppressLint;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
@@ -8,6 +9,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.ClipboardManager;
 import android.text.TextUtils;
+import android.text.Layout;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -59,6 +61,7 @@ public class TextViewerActivity extends com.magneo.compass.BaseActivity {
         }
     };
 
+    @SuppressLint("WrongConstant")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -114,8 +117,8 @@ public class TextViewerActivity extends com.magneo.compass.BaseActivity {
         tv.setTextIsSelectable(true);
         tv.setHorizontallyScrolling(false);
         if (Build.VERSION.SDK_INT >= 23) {
-            tv.setBreakStrategy(0);
-            tv.setHyphenationFrequency(0);
+            tv.setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE);
+            tv.setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE);
         }
         sc.addView(tv, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         LinearLayout.LayoutParams cvp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);

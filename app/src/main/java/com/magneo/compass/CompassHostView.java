@@ -96,6 +96,10 @@ public class CompassHostView extends FrameLayout {
         requestRender();
     }
 
+    public void onBatteryStateChanged() {
+        overlay.onBatteryStateChanged();
+    }
+
     public void toggleDetail() {
         overlay.toggleDetail();
         requestRender();

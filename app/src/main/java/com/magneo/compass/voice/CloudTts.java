@@ -3,6 +3,7 @@ package com.magneo.compass.voice;
 import android.content.Context;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
+import android.media.audiofx.Visualizer;
 import android.util.Log;
 
 import com.magneo.compass.ConversationLog;
@@ -17,6 +18,7 @@ public class CloudTts {
     private static volatile boolean playing;
     private static volatile boolean fading;
     private static int playSerial;
+    private static Visualizer visualizer;
 
     public static synchronized void play(Context c, byte[] audio, Runnable done) {
         play(c, audio, "", done);
@@ -47,15 +49,24 @@ public class CloudTts {
             mp.setOnErrorListener((m, what, extra) -> {
                 ConversationLog.append(c, "error", "TTS 播放失败 what=" + what + " extra=" + extra);
                 Log.w(TAG, "MediaPlayer error what=" + what + " extra=" + extra);
+                VoiceVisualState.showError();
                 finish(m, f, serial);
                 if (done != null) done.run();
                 return true;
             });
             mp.prepare();
+            startVisualizer(mp, serial);
             mp.start();
             ConversationLog.append(c, "system", "TTS play start");
         } catch (Exception e) {
             playing = false;
+            releaseVisualizer();
+            VoiceVisualState.clearOutputLevel();
+            VoiceVisualState.showError();
+            if (mp != null) {
+                try { mp.release(); } catch (Throwable ignored) {}
+                mp = null;
+            }
             ConversationLog.append(c, "error", "TTS 播放异常：" + e.getMessage());
             Log.w(TAG, "play", e);
             if (done != null) done.run();
@@ -65,6 +76,8 @@ public class CloudTts {
     private static synchronized void finish(MediaPlayer m, File f, int serial) {
         playing = false;
         if (playSerial == serial) fading = false;
+        releaseVisualizer();
+        VoiceVisualState.clearOutputLevel();
         if (mp == m) {
             mp = null;
             playSerial++;
@@ -78,6 +91,8 @@ public class CloudTts {
         playing = false;
         fading = false;
         playSerial++;
+        releaseVisualizer();
+        VoiceVisualState.clearOutputLevel();
         if (mp != null) {
             try { mp.stop(); mp.release(); } catch (Throwable ignored) {}
             mp = null;
@@ -119,6 +134,49 @@ public class CloudTts {
 
     public static boolean isFading() {
         return fading;
+    }
+
+    private static void startVisualizer(MediaPlayer player, final int serial) {
+        releaseVisualizer();
+        try {
+            final Visualizer capture = new Visualizer(player.getAudioSessionId());
+            int[] range = Visualizer.getCaptureSizeRange();
+            int captureSize = range != null && range.length > 0 ? range[0] : 128;
+            capture.setCaptureSize(captureSize);
+            capture.setScalingMode(Visualizer.SCALING_MODE_AS_PLAYED);
+            int rate = Math.max(1_000, Math.min(Visualizer.getMaxCaptureRate(), 12_000));
+            capture.setDataCaptureListener(new Visualizer.OnDataCaptureListener() {
+                @Override public void onWaveFormDataCapture(Visualizer visualizer,
+                                                            byte[] waveform,
+                                                            int samplingRate) {
+                    if (playSerial != serial || !playing || waveform == null
+                            || waveform.length == 0) return;
+                    double sum = 0.0;
+                    for (byte sample : waveform) {
+                        int centered = (sample & 0xFF) - 128;
+                        sum += centered * centered;
+                    }
+                    float rms = (float) (Math.sqrt(sum / waveform.length) / 64.0);
+                    VoiceVisualState.setOutputLevel(Math.min(1f, rms));
+                }
+
+                @Override public void onFftDataCapture(Visualizer visualizer, byte[] fft,
+                                                       int samplingRate) {}
+            }, rate, true, false);
+            capture.setEnabled(true);
+            visualizer = capture;
+        } catch (Throwable t) {
+            releaseVisualizer();
+            Log.i(TAG, "TTS waveform capture unavailable; using visual fallback");
+        }
+    }
+
+    private static void releaseVisualizer() {
+        Visualizer old = visualizer;
+        visualizer = null;
+        if (old == null) return;
+        try { old.setEnabled(false); } catch (Throwable ignored) {}
+        try { old.release(); } catch (Throwable ignored) {}
     }
 
     private static String extensionFor(byte[] audio, String contentType) {

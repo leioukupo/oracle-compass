@@ -34,6 +34,7 @@ public class LlmClient {
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
     private static final MediaType AUDIO = MediaType.parse("audio/wav");
     private static final ConnectionPool SHARED_POOL = new ConnectionPool(8, 5, TimeUnit.MINUTES);
+    private static volatile OkHttpClient SHARED_CLIENT;
 
     private final Context ctx;
     private final OkHttpClient client;
@@ -44,12 +45,7 @@ public class LlmClient {
 
     public LlmClient(Context ctx) {
         this.ctx = ctx == null ? null : ctx.getApplicationContext();
-        OkHttpClient.Builder b = com.magneo.compass.netfs.Tls.builder(ctx)
-                .connectionPool(SHARED_POOL)
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(120, TimeUnit.SECONDS)
-                .writeTimeout(90, TimeUnit.SECONDS);
-        client = b.build();
+        client = sharedClient(this.ctx);
         provider = ProviderConfig.normalizeName(Prefs.get(ctx, Prefs.K_PROVIDER, ""));
         ProviderConfig preset = ProviderConfig.byName(provider);
         String commonBase = strip(Prefs.get(ctx, Prefs.K_BASE_URL, ""));
@@ -90,6 +86,24 @@ public class LlmClient {
         ttsUrl = tts;
         ttsModel = Prefs.get(ctx, Prefs.K_TTS_MODEL, "tts-1");
         ttsVoice = Prefs.get(ctx, Prefs.K_TTS_VOICE, "alloy");
+    }
+
+    private static OkHttpClient sharedClient(Context ctx) {
+        OkHttpClient result = SHARED_CLIENT;
+        if (result != null) return result;
+        synchronized (LlmClient.class) {
+            result = SHARED_CLIENT;
+            if (result == null) {
+                result = com.magneo.compass.netfs.Tls.builder(ctx)
+                        .connectionPool(SHARED_POOL)
+                        .connectTimeout(15, TimeUnit.SECONDS)
+                        .readTimeout(120, TimeUnit.SECONDS)
+                        .writeTimeout(90, TimeUnit.SECONDS)
+                        .build();
+                SHARED_CLIENT = result;
+            }
+        }
+        return result;
     }
 
     private static String strip(String s) {
@@ -579,7 +593,6 @@ public class LlmClient {
                     .put("response_format", "wav");
             Request req = new Request.Builder().url(endpoint(ttsUrl, "/audio/speech"))
                     .addHeader("Authorization", "Bearer " + audioApiKey())
-                    .addHeader("Connection", "close")
                     .post(RequestBody.create(JSON, body.toString())).build();
             Call call = client.newCall(req);
             call.enqueue(new Callback() {

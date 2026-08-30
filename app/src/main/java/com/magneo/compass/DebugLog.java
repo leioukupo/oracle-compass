@@ -10,6 +10,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.RandomAccessFile;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -59,6 +60,38 @@ public class DebugLog {
             }
         } catch (Exception e) {
             Log.w(TAG, "read", e);
+        }
+        return arr;
+    }
+
+    /** Bounded tail used by the Web debugger to protect the low-memory device. */
+    public static JSONArray readTail(Context c, int maxEntries, int maxBytes) {
+        JSONArray arr = new JSONArray();
+        int entries = Math.max(1, Math.min(600, maxEntries));
+        int bytes = Math.max(16 * 1024, Math.min(768 * 1024, maxBytes));
+        File f = file(c);
+        if (!f.exists() || f.length() == 0) return arr;
+        try {
+            long offset = Math.max(0L, f.length() - bytes);
+            ByteArrayOutputStream out = new ByteArrayOutputStream((int) Math.min(bytes, f.length()));
+            RandomAccessFile in = new RandomAccessFile(f, "r");
+            try {
+                in.seek(offset);
+                if (offset > 0) in.readLine();
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0 && out.size() < bytes) {
+                    out.write(buf, 0, Math.min(n, bytes - out.size()));
+                }
+            } finally { in.close(); }
+            String[] lines = new String(out.toByteArray(), "UTF-8").split("\\n", -1);
+            int start = Math.max(0, lines.length - entries);
+            for (int i = start; i < lines.length; i++) {
+                if (lines[i].trim().isEmpty()) continue;
+                try { arr.put(new JSONObject(lines[i])); } catch (Exception ignored) {}
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "readTail", e);
         }
         return arr;
     }

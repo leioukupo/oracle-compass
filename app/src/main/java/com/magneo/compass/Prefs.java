@@ -104,9 +104,13 @@ public class Prefs {
     public static final String K_MCP_SLOW_HINT_MAX_COUNT = "mcpSlowHintMaxCount";
     public static final String K_MCP_SLOW_HINT_PHRASES = "mcpSlowHintPhrases";
     public static final String K_DEBUG_MODE = "debugMode";
+    public static final String K_VOICE_DIAGNOSTIC_OVERLAYS = "voiceDiagnosticOverlays";
     public static final String K_DEBUG_MAX_KB = "debugMaxKb";
     public static final String K_ROOT_GRANT_NOTIFICATIONS = "rootGrantNotifications";
     public static final String K_SYSTEM_LOCKSCREEN_ENABLED = "systemLockscreenEnabled";
+    public static final String K_LOW_BATTERY_SOUND = "lowBatterySound";
+    /** Last working system sound path, retained so an enabled toggle can restore it. */
+    public static final String K_LOW_BATTERY_SOUND_PATH = "lowBatterySoundPath";
     public static final String DEFAULT_LOC_WIFI_URL = "";
     public static final String DEFAULT_LOC_IP_URL = "http://ip-api.com/json/?fields=status,lat,lon,query,city,regionName,country,isp";
     public static final String DEFAULT_SYS_PROMPT_VOICE = "你是真理罗盘助手，回答简洁，中文回复。";
@@ -133,7 +137,7 @@ public class Prefs {
     public static final String MAIN_FPS_SMOOTH = "smooth";
     public static final String DEFAULT_MAIN_FPS_MODE = MAIN_FPS_ADAPTIVE;
     public static final int DEFAULT_TEXT_MAX_TOKENS = 1024;
-    public static final int DEFAULT_VOICE_MAX_TOKENS = 800;
+    public static final int DEFAULT_VOICE_MAX_TOKENS = 240;
     public static final int DEFAULT_VISION_MAX_TOKENS = 512;
     public static final int DEFAULT_ORACLE_SHAKE_LEVEL = 4;
     public static final int DEFAULT_ORACLE_SHAKE_FORCE = 70;
@@ -185,12 +189,21 @@ public class Prefs {
     }
     public static boolean vadEnabled(Context c) { return getB(c, K_VAD_ENABLED, DEFAULT_VAD_ENABLED); }
 
+    public static boolean voiceDiagnosticOverlays(Context c) {
+        return getB(c, K_VOICE_DIAGNOSTIC_OVERLAYS, false);
+    }
+
     public static boolean rootGrantNotifications(Context c) {
         return getB(c, K_ROOT_GRANT_NOTIFICATIONS, DEFAULT_ROOT_GRANT_NOTIFICATIONS);
     }
 
     public static boolean systemLockscreenEnabled(Context c) {
         return getB(c, K_SYSTEM_LOCKSCREEN_ENABLED, DEFAULT_SYSTEM_LOCKSCREEN_ENABLED);
+    }
+
+    /** System low-battery alert is opt-in on this dedicated device. */
+    public static boolean lowBatterySoundEnabled(Context c) {
+        return getB(c, K_LOW_BATTERY_SOUND, false);
     }
 
     public static boolean mcpEnabled(Context c) {

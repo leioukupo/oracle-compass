@@ -10,8 +10,16 @@ import org.json.JSONTokener;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class McpManager {
+    private static final ExecutorService WARMUP = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "mcp-tool-warmup");
+        t.setDaemon(true);
+        return t;
+    });
+
     public static JSONArray openAiTools(Context ctx) {
         JSONArray arr = new JSONArray();
         for (McpTool t : listToolsBestEffort(ctx, false)) {
@@ -31,6 +39,13 @@ public class McpManager {
             } catch (Exception ignored) {}
         }
         return out;
+    }
+
+    /** Populate the in-memory tool/session cache before the first spoken request. */
+    public static void warmup(Context ctx) {
+        if (ctx == null || !Prefs.mcpEnabled(ctx)) return;
+        final Context app = ctx.getApplicationContext();
+        WARMUP.execute(() -> listToolsBestEffort(app, false));
     }
 
     public static McpClient.ToolResult call(Context ctx, String fullName, String argsJson)

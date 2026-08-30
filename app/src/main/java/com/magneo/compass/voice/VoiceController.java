@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.regex.Pattern;
 
 import okhttp3.Call;
@@ -47,9 +48,9 @@ public class VoiceController {
     private static final long MANUAL_MAX_MS = 30_000;
     private static final long STREAM_END_SILENCE_MS = 700;
     private static final long STREAM_MIN_SPEECH_MS = 140;
-    private static final long STREAM_MIN_BARGE_STEADY_MS = 420;
+    private static final long STREAM_MIN_BARGE_STEADY_MS = 450;
     private static final long STREAM_MIN_BARGE_SENSITIVE_MS = 240;
-    private static final long BARGE_SHORT_NOISE_MS = 700;
+    private static final long BARGE_SHORT_NOISE_MS = 450;
     private static final long STREAM_MAX_UTTERANCE_MS = 15_000;
     private static final int BARGE_PREROLL_FRAMES = 6; // 360ms, avoid feeding a long TTS tail.
     private static final int BARGE_THRESHOLD_STEADY_MARGIN = 420;
@@ -65,7 +66,13 @@ public class VoiceController {
     private static final long TTS_SEGMENT_TIMEOUT_MS = 12_000;
     private static final long TTS_SEGMENT_RETRY_TIMEOUT_MS = 6_000;
     private static final long FOLLOWUP_WINDOW_MS = 22_000;
-    private static final long BARGE_TTS_FADE_MS = 520;
+    private static final long BARGE_TTS_FADE_MS = 300;
+    // MT6580's VoIP capture path can occasionally stay alive at a near-silent gain.
+    // Recover only after several real VAD boundaries return no usable speech.
+    private static final long LOW_INPUT_MAX_LEVEL = 700;
+    private static final int LOW_INPUT_EMPTY_LIMIT = 3;
+    private static final long LOW_INPUT_WINDOW_MS = 35_000;
+    private static final long LOW_INPUT_RECOVERY_COOLDOWN_MS = 90_000;
     private static final String TTS_STAGE_CUES = "苦笑|微笑|轻笑|冷笑|干笑|大笑|笑|"
             + "叹气|叹了口气|沉默|停顿|思考|皱眉|摊手|扶额|耸肩|清嗓|咳嗽|"
             + "哭笑不得|无奈|认真|温柔|低声|小声";
@@ -104,14 +111,17 @@ public class VoiceController {
     private final AtomicInteger latestUtteranceAsrSession = new AtomicInteger();
     private final AtomicInteger mcpHintCursor = new AtomicInteger();
     private final AtomicBoolean manualBoundaryRequested = new AtomicBoolean(false);
+    private final AtomicBoolean continuousAudioRecoveryRequested = new AtomicBoolean(false);
     private final Object standbyAsrLock = new Object();
+    private final Object audioHealthLock = new Object();
     private final Set<Call> activeCalls = Collections.synchronizedSet(new HashSet<Call>());
     private final Set<FunAsrStreamingClient> asrSessions =
             Collections.synchronizedSet(new HashSet<FunAsrStreamingClient>());
     private final Set<Integer> bargeCandidateSessions =
             Collections.synchronizedSet(new HashSet<Integer>());
     private final AtomicInteger confirmedBargeSession = new AtomicInteger();
-    private final LinkedBlockingQueue<TtsJob> ttsQueue = new LinkedBlockingQueue<>();
+    private final AtomicInteger ttsSequence = new AtomicInteger();
+    private final LinkedBlockingDeque<TtsJob> ttsQueue = new LinkedBlockingDeque<>();
     private final LinkedBlockingQueue<PreparedTts> readyTtsQueue =
             new LinkedBlockingQueue<>();
     private final List<LlmClient.Msg> dialogHistory = new ArrayList<>();
@@ -135,7 +145,11 @@ public class VoiceController {
     private volatile String lastFinalNorm = "";
     private volatile long lastFinalAt;
     private volatile byte[] lastBoundaryPcm;
+    private volatile float visualInputLevel;
     private final AtomicInteger firstTtsQueuedTurn = new AtomicInteger();
+    private int lowInputEmptySegments;
+    private long lowInputWindowStartedAt;
+    private long lastLowInputRecoveryAt;
     private AudioEffect aec;
     private AudioEffect ns;
     private AudioEffect agc;
@@ -260,6 +274,9 @@ public class VoiceController {
         listening.set(true);
         ConversationLog.append(ctx, "system", "ASR mode=streaming endpoint="
                 + FunAsrStreamingClient.normalizeWsUrl(llm.asrUrl));
+        // Keep tool discovery out of the first real user turn.  This never calls
+        // a tool or generates audio; it only warms the MCP HTTP/session cache.
+        McpManager.warmup(ctx);
         setStatus("常驻聆听中...");
         continuousThread = new Thread(this::continuousLoop, "voice-continuous");
         continuousThread.setDaemon(true);
@@ -269,6 +286,7 @@ public class VoiceController {
     public void stopContinuousListening() {
         continuousRunning.set(false);
         listening.set(false);
+        clearVisualInputLevel();
         manualBoundaryRequested.set(false);
         cancelActiveCalls();
         synchronized (standbyAsrLock) {
@@ -342,12 +360,22 @@ public class VoiceController {
 
     /** Speak an answer generated outside the normal text-only voice loop. */
     public void speakText(String text) {
+        speakText(text, 0, null);
+    }
+
+    /**
+     * Speaks externally supplied text, optionally giving UI a brief lead before playback.
+     * The callback runs only once, after audio has been prepared and immediately before the lead.
+     */
+    public void speakText(String text, int playbackLeadMs, Runnable beforePlayback) {
         String t = compact(text, 500).trim();
         if (t.isEmpty()) return;
         int turnId = turnSerial.incrementAndGet();
         cancelActiveCalls();
         stopTtsPlayback();
-        enqueueTts(turnId, t);
+        PlaybackLead lead = beforePlayback == null ? null
+                : new PlaybackLead(Math.max(0, playbackLeadMs), beforePlayback);
+        enqueueTts(turnId, t, true, lead);
     }
 
     public void shutdown() {
@@ -362,11 +390,66 @@ public class VoiceController {
         synchronized (VoiceController.class) {
             if (instance == this) instance = null;
         }
+        VoiceVisualState.reset();
     }
 
     private void setStatus(String s) {
+        updateVisualState(s);
         StatusListener l = status;
         if (l != null) l.onStatus(s);
+    }
+
+    private void updateVisualState(String statusText) {
+        String s = statusText == null ? "" : statusText.trim();
+        if (s.contains("错误") || s.contains("异常") || s.contains("失败") || s.contains("未配置")
+                || s.contains("无返回") || s.contains("不可用") || s.contains("缺少")) {
+            VoiceVisualState.setPhase(restingVisualPhase());
+            VoiceVisualState.showError();
+            return;
+        }
+        if (s.contains("暂停")) {
+            VoiceVisualState.setPhase(VoiceVisualPhase.IDLE);
+        } else if (s.contains("播报")) {
+            VoiceVisualState.setPhase(VoiceVisualPhase.SPEAKING);
+        } else if (s.contains("识别") || s.contains("思考") || s.contains("合成")
+                || s.contains("重试") || s.contains("查找") || s.contains("切换")) {
+            VoiceVisualState.setPhase(VoiceVisualPhase.THINKING);
+        } else if (s.contains("聆听") || s.contains("听见") || s.contains("打断")
+                || s.contains("回声")) {
+            VoiceVisualState.setPhase(VoiceVisualPhase.LISTENING);
+        } else if (s.isEmpty()) {
+            VoiceVisualState.setPhase(restingVisualPhase());
+        }
+    }
+
+    private VoiceVisualPhase restingVisualPhase() {
+        if (ttsSpeaking.get() || CloudTts.isPlaying() || LocalTts.isPlaying()) {
+            return VoiceVisualPhase.SPEAKING;
+        }
+        if (busy.get() || !ttsQueue.isEmpty() || !readyTtsQueue.isEmpty()
+                || bufferedAsrInFlight.get()) {
+            return VoiceVisualPhase.THINKING;
+        }
+        if (listening.get() || continuousRunning.get()) {
+            return VoiceVisualPhase.LISTENING;
+        }
+        return VoiceVisualPhase.IDLE;
+    }
+
+    private void updateVisualInputLevel(long level, long noiseFloor, int threshold) {
+        float floor = noiseFloor > 0 ? noiseFloor : threshold * 0.35f;
+        float span = Math.max(220f, threshold - floor);
+        float target = (level - floor) / (span * 2.4f);
+        target = Math.max(0f, Math.min(1f, target));
+        target = (float) Math.sqrt(target);
+        float alpha = target > visualInputLevel ? 0.38f : 0.08f;
+        visualInputLevel += (target - visualInputLevel) * alpha;
+        VoiceVisualState.setInputLevel(visualInputLevel);
+    }
+
+    private void clearVisualInputLevel() {
+        visualInputLevel = 0f;
+        VoiceVisualState.setInputLevel(0f);
     }
 
     private void trackCall(Call call) {
@@ -423,6 +506,10 @@ public class VoiceController {
             prewarmAsrSession(llm.asrUrl);
             setStatus("常驻聆听中...");
             while (continuousRunning.get() && !shuttingDown.get()) {
+                if (continuousAudioRecoveryRequested.getAndSet(false)) {
+                    ConversationLog.append(ctx, "system", "Audio input recovery: rebuilding recorder");
+                    break;
+                }
                 int n = recorder.read(buf, 0, buf.length);
                 if (n <= 0) continue;
                 long frameMs = Math.max(10, n * 1000L / SAMPLE_RATE);
@@ -430,6 +517,8 @@ public class VoiceController {
                 boolean ttsNow = ttsSpeaking.get();
                 String bargeMode = bargeMode();
                 byte[] pcm = shortsToBytes(buf, n);
+                updateVisualInputLevel(level, noiseFloor,
+                        adaptiveVoiceThreshold(baseThreshold, noiseFloor));
 
                 if (!speechActive) {
                     if (!ttsNow) {
@@ -546,7 +635,56 @@ public class VoiceController {
             if (c != null) c.close();
             continuousRunning.set(false);
             listening.set(false);
+            clearVisualInputLevel();
+            VoiceVisualState.setPhase(restingVisualPhase());
         }
+    }
+
+    private void noteAsrAudioHealth(AsrTurn turn, boolean usableSpeech, String reason) {
+        if (turn == null || turn.bargeCandidate) return;
+        long now = System.currentTimeMillis();
+        boolean lowInput = turn.speechMs >= 650 && turn.maxLevel > 0
+                && turn.maxLevel < LOW_INPUT_MAX_LEVEL;
+        boolean recover = false;
+        synchronized (audioHealthLock) {
+            if (usableSpeech || !lowInput) {
+                lowInputEmptySegments = 0;
+                lowInputWindowStartedAt = 0;
+                return;
+            }
+            if (lowInputWindowStartedAt == 0 || now - lowInputWindowStartedAt > LOW_INPUT_WINDOW_MS) {
+                lowInputWindowStartedAt = now;
+                lowInputEmptySegments = 0;
+            }
+            lowInputEmptySegments++;
+            if (lowInputEmptySegments >= LOW_INPUT_EMPTY_LIMIT
+                    && now - lastLowInputRecoveryAt >= LOW_INPUT_RECOVERY_COOLDOWN_MS) {
+                lastLowInputRecoveryAt = now;
+                lowInputEmptySegments = 0;
+                lowInputWindowStartedAt = 0;
+                recover = true;
+            }
+        }
+        if (!recover || !continuousAudioRecoveryRequested.compareAndSet(false, true)) return;
+        ConversationLog.append(ctx, "system", "Audio input low-gain recovery requested"
+                + " reason=" + reason + " level=" + turn.maxLevel
+                + " speechMs=" + turn.speechMs);
+        DebugLog.append(ctx, "audio.input_recovery", "reason=" + reason
+                + " level=" + turn.maxLevel + " speechMs=" + turn.speechMs);
+        asrRetryExec.schedule(() -> restartContinuousAfterInputRecovery(0),
+                900, TimeUnit.MILLISECONDS);
+    }
+
+    private void restartContinuousAfterInputRecovery(int attempts) {
+        if (shuttingDown.get() || !Prefs.vadEnabled(ctx)) return;
+        if (continuousRunning.get()) {
+            if (attempts < 6) {
+                asrRetryExec.schedule(() -> restartContinuousAfterInputRecovery(attempts + 1),
+                        350, TimeUnit.MILLISECONDS);
+            }
+            return;
+        }
+        ensureContinuousListening();
     }
 
     private FunAsrStreamingClient beginAsrSession(final int sessionId, String rawUrl) {
@@ -723,6 +861,9 @@ public class VoiceController {
                 + (turn == null ? "" : " speechMs=" + turn.speechMs
                 + " maxLevel=" + turn.maxLevel + " threshold=" + turn.threshold)
                 + " text=" + compact(text, 70));
+        // Clearing queues alone is racy: an in-flight synthesis request can complete
+        // after the fade and put an old sentence back into the playback queue.
+        turnSerial.incrementAndGet();
         stopTtsPlayback(true);
         cancelActiveCalls();
         setStatus("收到打断...");
@@ -776,6 +917,7 @@ public class VoiceController {
         if (text.isEmpty()) {
             String rescued = rescueWeakFastAsr(asrTurn, trace, sessionId, "empty");
             if (rescued.isEmpty()) {
+                noteAsrAudioHealth(asrTurn, false, "empty_final");
                 if (asrTurn != null && asrTurn.bargeCandidate) {
                     ConversationLog.append(ctx, "system", "barge ignored reason=empty"
                             + " speechMs=" + asrTurn.speechMs
@@ -797,6 +939,7 @@ public class VoiceController {
             String rescued = rescuedWeakFast ? "" : rescueWeakFastAsr(asrTurn, trace,
                     sessionId, "ignored " + compact(text, 40));
             if (rescued.isEmpty()) {
+                noteAsrAudioHealth(asrTurn, false, "filtered_final");
                 ConversationLog.append(ctx, "system", "ASR final ignored[" + sessionId + "]: "
                         + compact(text, 60)
                         + (asrTurn == null ? "" : " speechMs=" + asrTurn.speechMs
@@ -828,6 +971,7 @@ public class VoiceController {
             text = refined;
         }
         if (isDuplicateFinal(text)) return;
+        noteAsrAudioHealth(asrTurn, true, "usable_final");
         if (isLikelyEcho(text)) {
             ConversationLog.append(ctx, "heard", "[回声过滤] " + text);
             setStatus("回声已过滤");
@@ -1050,19 +1194,44 @@ public class VoiceController {
         if (fast.isEmpty()) return true;
         if (refined.equals(fast)) return false;
         if (containsCjkText(fastText) && isUntrustedLatinAsr(refinedText, null)) return false;
+        if (hasUnsupportedChineseAsrScript(refinedText)
+                && !hasUnsupportedChineseAsrScript(fastText)) return false;
+        // Punctuation or a one-character variation is not enough evidence to
+        // replace a fast result that is already meaningful.
+        if (stripAsrPunctuation(refined).equals(stripAsrPunctuation(fast))) return false;
         int fastScore = asrCandidateScore(fastText);
         int refinedScore = asrCandidateScore(refinedText);
         int fastBad = asrBadPhraseCount(fastText);
         int refinedBad = asrBadPhraseCount(refinedText);
-        if (refinedScore >= fastScore + 2) return true;
-        if (refinedBad < fastBad && refinedScore >= fastScore - 1) return true;
-        if (hasAsrDomainTerm(refinedText) && !hasAsrDomainTerm(fastText)) return true;
-        if (looksAddressedOrQuestion(refinedText) && !looksAddressedOrQuestion(fastText)) return true;
-        if (refined.contains(fast) && refined.length() >= fast.length()) return true;
         if (fast.contains(refined) && refined.length() + 2 < fast.length()
                 && refinedScore <= fastScore && refinedBad >= fastBad) return false;
-        if (refinedScore > fastScore) return true;
-        return refined.length() >= fast.length() + 2 && refinedBad <= fastBad;
+        boolean domainGain = hasAsrDomainTerm(refinedText) && !hasAsrDomainTerm(fastText);
+        boolean badPhraseGain = refinedBad < fastBad;
+        boolean intentGain = looksAddressedOrQuestion(refinedText)
+                && !looksAddressedOrQuestion(fastText);
+        if ((domainGain || badPhraseGain || intentGain) && refinedScore >= fastScore - 1) return true;
+        if (refinedScore >= fastScore + 3
+                && Math.abs(refined.length() - fast.length()) <= 12) return true;
+        return false;
+    }
+
+    private String stripAsrPunctuation(String text) {
+        return normalizeSpeechText(text).replaceAll("[^\\p{L}\\p{N}\\u4e00-\\u9fff]", "");
+    }
+
+    private boolean hasUnsupportedChineseAsrScript(String text) {
+        String s = text == null ? "" : text;
+        int han = 0;
+        int hangul = 0;
+        int cyrillic = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c >= '\u4e00' && c <= '\u9fff') han++;
+            else if ((c >= '\uac00' && c <= '\ud7af')
+                    || (c >= '\u1100' && c <= '\u11ff')) hangul++;
+            else if ((c >= '\u0400' && c <= '\u04ff')) cyrillic++;
+        }
+        return hangul > 0 && hangul >= han || cyrillic > 0 && han == 0;
     }
 
     private void submitFinalText(String text, boolean autoMode) {
@@ -1194,6 +1363,7 @@ public class VoiceController {
                 if (n <= 0) continue;
                 long frameMs = Math.max(10, n * 1000L / SAMPLE_RATE);
                 long level = rms(buf, n);
+                updateVisualInputLevel(level, 0L, threshold);
                 boolean voiced = level > threshold;
                 byte[] bytes = shortsToBytes(buf, n);
                 if (!autoStop) {
@@ -1241,6 +1411,7 @@ public class VoiceController {
             releaseAudioEffects();
         }
         listening.set(false);
+        clearVisualInputLevel();
         if (heard && !cancelRequested && bos.size() > 0) {
             byte[] wav = toWav(bos.toByteArray());
             processLegacyWav(wav, autoStop);
@@ -1531,6 +1702,7 @@ public class VoiceController {
         if (normalized.length() <= 1) return true;
         if (!containsChineseAsciiOrDigit(normalized)) return true;
         if (isKnownSilenceHallucination(normalized)) return true;
+        if (hasUnsupportedChineseAsrScript(text)) return true;
         if (isUntrustedLatinAsr(text, turn)) return true;
         return turn != null && turn.speechMs < 450 && normalized.length() <= 2;
     }
@@ -1877,23 +2049,72 @@ public class VoiceController {
         int len = sb.length();
         if (len == 0) return -1;
         String enders = "。！？!?；;\n";
+        int firstEnd = -1;
         for (int i = 0; i < len; i++) {
-            if (i >= 5 && enders.indexOf(sb.charAt(i)) >= 0) return i + 1;
-        }
-        if (!finishing && firstSegment) {
-            if (len >= 16) return Math.min(len, 16);
-            if (len >= 12 && pendingStartedAt > 0
-                    && System.currentTimeMillis() - pendingStartedAt >= FIRST_SENTENCE_IDLE_CUT_MS) {
-                return len;
+            if (i >= 5 && enders.indexOf(sb.charAt(i)) >= 0) {
+                firstEnd = i + 1;
+                break;
             }
         }
-        if (!finishing && len > 24) {
-            for (int i = Math.min(len - 1, 32); i >= 10; i--) {
-                if ("，,、 ".indexOf(sb.charAt(i)) >= 0) return i + 1;
+        if (firstSegment) {
+            if (firstEnd > 0) return firstEnd;
+            if (!finishing) {
+                if (len >= 16) return safeTtsCut(sb, 16, 12, 22);
+                if (len >= 12 && pendingStartedAt > 0
+                        && System.currentTimeMillis() - pendingStartedAt >= FIRST_SENTENCE_IDLE_CUT_MS) {
+                    return safeTtsCut(sb, len, 12, 22);
+                }
             }
-            return Math.min(len, 28);
+            return finishing ? len : -1;
+        }
+
+        // The first sentence is latency-critical.  Every later piece needs to
+        // be long enough that its audio covers the next cloud synthesis request.
+        // Otherwise LightTTS (2-4 s per request) can never catch up on a story.
+        final int min = 24;
+        final int target = 40;
+        final int max = 50;
+        if (firstEnd >= min) return firstEnd;
+        if (firstEnd > 0 && !finishing) {
+            int scanEnd = Math.min(len, max);
+            for (int i = firstEnd; i < scanEnd; i++) {
+                if (enders.indexOf(sb.charAt(i)) >= 0 && i + 1 >= min) return i + 1;
+            }
+            if (len < target) return -1;
+        }
+        if (!finishing && len >= target) {
+            int upper = Math.min(len, max);
+            for (int i = upper - 1; i >= min; i--) {
+                if ("，,、 ".indexOf(sb.charAt(i)) >= 0) return safeTtsCut(sb, i + 1, min, max);
+            }
+            return safeTtsCut(sb, target, min, max);
+        }
+        if (finishing && len > max) {
+            int upper = Math.min(len, max);
+            for (int i = upper - 1; i >= min; i--) {
+                if ("，,、 ".indexOf(sb.charAt(i)) >= 0) return safeTtsCut(sb, i + 1, min, max);
+            }
+            return safeTtsCut(sb, target, min, max);
         }
         return finishing ? len : -1;
+    }
+
+    private int safeTtsCut(StringBuilder sb, int proposed, int min, int max) {
+        int len = sb.length();
+        int cut = Math.max(1, Math.min(proposed, len));
+        if (cut >= len || !isLatinTokenChar(sb.charAt(cut - 1))
+                || !isLatinTokenChar(sb.charAt(cut))) return cut;
+        int forward = cut;
+        while (forward < len && forward < max && isLatinTokenChar(sb.charAt(forward))) forward++;
+        if (forward < len && !isLatinTokenChar(sb.charAt(forward))) return forward;
+        int back = cut;
+        while (back > min && isLatinTokenChar(sb.charAt(back - 1))) back--;
+        return back >= min ? back : cut;
+    }
+
+    private boolean isLatinTokenChar(char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                || (c >= '0' && c <= '9') || c == '_' || c == '-';
     }
 
     private void enqueueTts(int turnId, String text) {
@@ -1901,6 +2122,10 @@ public class VoiceController {
     }
 
     private void enqueueTts(int turnId, String text, boolean markTrace) {
+        enqueueTts(turnId, text, markTrace, null);
+    }
+
+    private void enqueueTts(int turnId, String text, boolean markTrace, PlaybackLead playbackLead) {
         String t = text == null ? "" : text.trim();
         if (t.isEmpty() || turnId != turnSerial.get()) return;
         String speech = prepareTtsText(t);
@@ -1916,15 +2141,42 @@ public class VoiceController {
             ConversationLog.append(ctx, "system", "first_tts_enqueue_ms="
                     + trace.firstTtsEnqueueMs() + " text=" + compact(speech, 24));
         }
-        TtsJob job = new TtsJob(turnId, speech, System.currentTimeMillis());
+        TtsJob job = newTtsJob(turnId, speech, System.currentTimeMillis(), 0, 0, playbackLead);
         ConversationLog.append(ctx, "system", "TTS segment enqueue turn=" + turnId
+                + " seq=" + job.sequence
+                + " retry=" + job.retryCount
                 + " q=" + ttsQueue.size()
                 + " ready=" + readyTtsQueue.size()
                 + (speech.equals(t) ? "" : " cleaned_from=" + compact(t, 18))
                 + " text=" + compact(speech, 32));
         DebugLog.append(ctx, markTrace ? "tts.enqueue" : "tts.hint_enqueue",
                 "turn=" + turnId + " text=" + speech);
-        ttsQueue.offer(job);
+        ttsQueue.offerLast(job);
+    }
+
+    private void enqueueTtsRetryFront(TtsJob failed, String text, int splitDepth) {
+        String speech = prepareTtsText(text);
+        if (speech.isEmpty() || failed.turnId != turnSerial.get()) return;
+        TtsJob job = newTtsJob(failed.turnId, speech, failed.queuedAt, splitDepth,
+                failed.retryCount + 1, failed.playbackLead);
+        ttsQueue.offerFirst(job);
+        ConversationLog.append(ctx, "system", "TTS segment requeued front turn="
+                + failed.turnId + " seq=" + job.sequence + " depth=" + splitDepth
+                + " retry=" + job.retryCount + " q=" + ttsQueue.size()
+                + " text=" + compact(speech, 32));
+        DebugLog.append(ctx, "tts.requeue", "turn=" + failed.turnId
+                + " depth=" + splitDepth + " text=" + speech);
+    }
+
+    private TtsJob newTtsJob(int turnId, String text, long queuedAt,
+                             int splitDepth, int retryCount) {
+        return newTtsJob(turnId, text, queuedAt, splitDepth, retryCount, null);
+    }
+
+    private TtsJob newTtsJob(int turnId, String text, long queuedAt,
+                             int splitDepth, int retryCount, PlaybackLead playbackLead) {
+        return new TtsJob(ttsSequence.incrementAndGet(), turnId, text, queuedAt,
+                splitDepth, retryCount, playbackLead);
     }
 
     private String prepareTtsText(String text) {
@@ -2016,21 +2268,22 @@ public class VoiceController {
             setStatus("未配置云端 TTS");
             return null;
         }
-        ConversationLog.append(ctx, "system", "TTS synth start: " + compact(job.text, 40));
-        final String[] firstError = {null};
-        PreparedTts prepared = synthesizeCloudTtsOnce(llm, job, null, firstError,
-                TTS_SEGMENT_TIMEOUT_MS);
-        if (prepared != null || job.turnId != turnSerial.get()) return prepared;
-
-        String msg = firstError[0] == null ? "无音频返回" : firstError[0];
-        if (isTransientTtsError(msg)) {
-            ConversationLog.append(ctx, "system", "TTS segment retry after transient error: "
-                    + compact(msg, 60) + " text=" + compact(job.text, 32));
-            final String[] retryError = {null};
-            prepared = synthesizeCloudTtsOnce(llm, job, null, retryError,
-                    TTS_SEGMENT_RETRY_TIMEOUT_MS);
+        long synthStartedAt = System.currentTimeMillis();
+        ConversationLog.append(ctx, "system", "TTS synth start turn=" + job.turnId
+                + " seq=" + job.sequence + " retry=" + job.retryCount
+                + " q=" + ttsQueue.size() + " ready=" + readyTtsQueue.size()
+                + ": " + compact(job.text, 40));
+        PreparedTts prepared = null;
+        String msg = "无音频返回";
+        for (int attempt = 0; attempt < 2; attempt++) {
+            final String[] attemptError = {null};
+            prepared = synthesizeCloudTtsOnce(llm, job, null, attemptError,
+                    attempt == 0 ? TTS_SEGMENT_TIMEOUT_MS : TTS_SEGMENT_RETRY_TIMEOUT_MS);
             if (prepared != null || job.turnId != turnSerial.get()) return prepared;
-            msg = retryError[0] == null ? msg : retryError[0];
+            msg = attemptError[0] == null ? msg : attemptError[0];
+            if (!isTransientTtsError(msg)) break;
+            ConversationLog.append(ctx, "system", "TTS segment retry attempt=" + (attempt + 1)
+                    + " err=" + compact(msg, 60) + " text=" + compact(job.text, 32));
         }
         if (isTtsVoiceNotFound(msg)) {
             ConversationLog.append(ctx, "error", "TTS 失败：" + msg);
@@ -2049,7 +2302,8 @@ public class VoiceController {
                         TTS_SEGMENT_TIMEOUT_MS);
                 if (prepared != null) {
                     ConversationLog.append(ctx, "system",
-                            "TTS voice fallback retry ok: " + selectedVoice);
+                            "TTS voice fallback retry ok seq=" + job.sequence + ": "
+                                    + selectedVoice);
                     return prepared;
                 }
                 msg = retryError[0] == null ? "无音频返回" : retryError[0];
@@ -2058,16 +2312,61 @@ public class VoiceController {
             }
         }
 
+        if (isTransientTtsError(msg) && job.splitDepth == 0
+                && job.turnId == turnSerial.get()) {
+            List<String> pieces = splitTtsSegment(job.text);
+            if (pieces.size() > 1) {
+                for (int i = pieces.size() - 1; i >= 0; i--) {
+                    enqueueTtsRetryFront(job, pieces.get(i), 1);
+                }
+                ConversationLog.append(ctx, "system", "TTS segment split after failure: "
+                        + compact(msg, 60) + " pieces=" + pieces.size()
+                        + " seq=" + job.sequence + " retry=" + job.retryCount
+                        + " text=" + compact(job.text, 42));
+                return null;
+            }
+        }
+
         ConversationLog.append(ctx, "error", "TTS 失败：" + msg);
         ConversationLog.append(ctx, "system", "TTS segment skipped turn=" + job.turnId
+                + " seq=" + job.sequence + " retry=" + job.retryCount
+                + " synth_ms=" + (System.currentTimeMillis() - synthStartedAt)
                 + " err=" + compact(msg, 60) + " text=" + compact(job.text, 40));
         setStatus("TTS 失败：" + compact(msg, 18));
         return null;
     }
 
+    private List<String> splitTtsSegment(String text) {
+        ArrayList<String> out = new ArrayList<>();
+        String s = text == null ? "" : text.trim();
+        if (s.length() < 16) {
+            if (!s.isEmpty()) out.add(s);
+            return out;
+        }
+        int midpoint = s.length() / 2;
+        int cut = -1;
+        for (int radius = 0; radius <= 12 && cut < 0; radius++) {
+            int left = midpoint - radius;
+            int right = midpoint + radius;
+            if (left >= 8 && isTtsSplitChar(s.charAt(left))) cut = left + 1;
+            else if (right < s.length() - 8 && isTtsSplitChar(s.charAt(right))) cut = right + 1;
+        }
+        if (cut < 8 || cut > s.length() - 8) cut = midpoint;
+        String first = s.substring(0, cut).trim();
+        String second = s.substring(cut).trim();
+        if (!first.isEmpty()) out.add(first);
+        if (!second.isEmpty()) out.add(second);
+        return out;
+    }
+
+    private boolean isTtsSplitChar(char c) {
+        return "。！？!?；;，,、 ".indexOf(c) >= 0;
+    }
+
     private PreparedTts synthesizeCloudTtsOnce(LlmClient llm, TtsJob job,
                                                String voiceOverride, String[] errorOut,
                                                long timeoutMs) {
+        long attemptStartedAt = System.currentTimeMillis();
         final byte[][] audio = {null};
         final String[] contentType = {""};
         final String[] error = {null};
@@ -2137,8 +2436,10 @@ public class VoiceController {
             ConversationLog.append(ctx, "system", "tts_audio_ms=" + trace.firstTtsAudioMs()
                     + " bytes=" + audio[0].length);
         }
-        ConversationLog.append(ctx, "system", "TTS segment audio ms="
-                + (System.currentTimeMillis() - job.queuedAt)
+        ConversationLog.append(ctx, "system", "TTS segment audio turn=" + job.turnId
+                + " seq=" + job.sequence + " retry=" + job.retryCount
+                + " synth_ms=" + (System.currentTimeMillis() - attemptStartedAt)
+                + " queued_ms=" + (System.currentTimeMillis() - job.queuedAt)
                 + " bytes=" + audio[0].length
                 + " text=" + compact(job.text, 28));
         return new PreparedTts(job, audio[0], contentType[0]);
@@ -2212,6 +2513,21 @@ public class VoiceController {
         ConversationLog.append(ctx, "system", "TTS audio bytes=" + prepared.audio.length
                 + " ct=" + compact(prepared.contentType, 40));
 
+        if (job.playbackLead != null && job.playbackLead.begin()) {
+            try {
+                job.playbackLead.beforePlayback.run();
+            } catch (Throwable t) {
+                Log.w(TAG, "TTS playback lead callback", t);
+            }
+            try {
+                Thread.sleep(job.playbackLead.delayMs);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            if (job.turnId != turnSerial.get() || shuttingDown.get()) return;
+        }
+
         lastTtsStartAt = System.currentTimeMillis();
         ttsHoldoffUntil = lastTtsStartAt + TTS_START_HOLDOFF_MS;
         ttsSpeaking.set(true);
@@ -2222,8 +2538,11 @@ public class VoiceController {
             trace.firstPlayStartAt = System.currentTimeMillis();
             ConversationLog.append(ctx, "system", "play_start_ms=" + trace.playStartMs());
         }
-        ConversationLog.append(ctx, "system", "TTS segment play queued_ms="
+        ConversationLog.append(ctx, "system", "TTS segment play turn=" + job.turnId
+                + " seq=" + job.sequence + " retry=" + job.retryCount
+                + " queued_ms="
                 + (System.currentTimeMillis() - job.queuedAt)
+                + " q=" + ttsQueue.size() + " ready=" + readyTtsQueue.size()
                 + " text=" + compact(job.text, 28));
         long deadline = System.currentTimeMillis() + 90_000;
         while (CloudTts.isPlaying() && job.turnId == turnSerial.get()
@@ -2234,6 +2553,8 @@ public class VoiceController {
         ttsSpeaking.set(false);
         lastTtsEndAt = System.currentTimeMillis();
         ttsHoldoffUntil = lastTtsEndAt + TTS_END_HOLDOFF_MS;
+        VoiceVisualState.clearOutputLevel();
+        VoiceVisualState.setPhase(restingVisualPhase());
     }
 
     private void stopTtsPlayback() {
@@ -2253,6 +2574,8 @@ public class VoiceController {
         ttsSpeaking.set(false);
         lastTtsEndAt = System.currentTimeMillis();
         ttsHoldoffUntil = lastTtsEndAt + TTS_END_HOLDOFF_MS;
+        VoiceVisualState.clearOutputLevel();
+        VoiceVisualState.setPhase(restingVisualPhase());
     }
 
     private void addRecentDialogHistory(List<LlmClient.Msg> out, int turns) {
@@ -2535,14 +2858,38 @@ public class VoiceController {
     }
 
     private static class TtsJob {
+        final int sequence;
         final int turnId;
         final String text;
         final long queuedAt;
+        final int splitDepth;
+        final int retryCount;
+        final PlaybackLead playbackLead;
 
-        TtsJob(int turnId, String text, long queuedAt) {
+        TtsJob(int sequence, int turnId, String text, long queuedAt,
+               int splitDepth, int retryCount, PlaybackLead playbackLead) {
+            this.sequence = sequence;
             this.turnId = turnId;
             this.text = text;
             this.queuedAt = queuedAt;
+            this.splitDepth = splitDepth;
+            this.retryCount = retryCount;
+            this.playbackLead = playbackLead;
+        }
+    }
+
+    private static class PlaybackLead {
+        final int delayMs;
+        final Runnable beforePlayback;
+        final AtomicBoolean used = new AtomicBoolean(false);
+
+        PlaybackLead(int delayMs, Runnable beforePlayback) {
+            this.delayMs = delayMs;
+            this.beforePlayback = beforePlayback;
+        }
+
+        boolean begin() {
+            return used.compareAndSet(false, true);
         }
     }
 

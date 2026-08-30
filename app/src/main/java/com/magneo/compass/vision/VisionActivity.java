@@ -20,7 +20,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
-import android.text.TextUtils;
 import android.text.TextPaint;
 import android.util.Base64;
 import android.util.Log;
@@ -50,8 +49,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class VisionActivity extends com.magneo.compass.BaseActivity {
     private static final String TAG = "VisionActivity";
+    private static volatile VisionActivity activeVision;
     /** 直出预览不经过此处；仅为定格和视觉请求保留低频最新帧。 */
     private static final long VISION_FRAME_INTERVAL_MS = 200L;
+    private static final int VISION_CAPTION_LEAD_MS = 500;
+    private static final float VISION_CAPTION_SCROLL_DP_PER_SEC = 64f;
+    private static final long DIRECT_PREVIEW_FRAME_TIMEOUT_MS = 1200L;
 
     private enum UiState {
         WAITING, LISTENING, THINKING, SPEAKING, FROZEN, ERROR
@@ -68,7 +71,13 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
     private volatile int camH;
     private volatile boolean rendering;
     private volatile String overlayText = "";
+    private volatile String voiceDiagnosticText = "";
     private volatile long overlaySetAt = 0;
+    private volatile boolean captionIsSpeechAnswer;
+    private volatile boolean captionSpeechStarted;
+    private volatile boolean captionSpeechFinished;
+    private volatile boolean directPreviewFrameSeen;
+    private volatile boolean directPreviewFallbackActive;
     private volatile boolean useHalVisionFrames = true;
     private volatile boolean mechanicalStyle = true;
     private volatile boolean resumed;
@@ -91,14 +100,23 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
     private int previewLayoutCamH;
     private int previewLayoutParentW;
     private int previewLayoutParentH;
+    private final Runnable directPreviewWatchdog = new Runnable() {
+        @Override public void run() {
+            if (!resumed || !useHalVisionFrames || directPreviewFrameSeen
+                    || directPreviewFallbackActive) return;
+            enableDirectPreviewFallback();
+        }
+    };
     private final Runnable uiStatePoll = new Runnable() {
         @Override public void run() {
             if (!resumed) return;
             if (aiBusy.get()) {
                 setUiState(UiState.THINKING);
             } else if (voiceController != null && voiceController.isBusy()) {
+                if (captionIsSpeechAnswer) captionSpeechStarted = true;
                 setUiState(UiState.SPEAKING);
             } else if (uiState == UiState.THINKING || uiState == UiState.SPEAKING) {
+                if (uiState == UiState.SPEAKING && captionSpeechStarted) finishSpeechCaption();
                 setUiState(idleUiState());
             }
             if (overlayView != null) overlayView.invalidate();
@@ -142,8 +160,13 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         previewView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             @Override public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
                 if (resumed && useHalVisionFrames) {
+                    directPreviewFrameSeen = false;
+                    directPreviewFallbackActive = false;
                     CameraStreamService.setVisionPreviewSurface(surface);
                     VisionActivity.this.h.post(VisionActivity.this::layoutDirectPreview);
+                    VisionActivity.this.h.removeCallbacks(directPreviewWatchdog);
+                    VisionActivity.this.h.postDelayed(directPreviewWatchdog,
+                            DIRECT_PREVIEW_FRAME_TIMEOUT_MS);
                 }
             }
 
@@ -152,11 +175,15 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
             }
 
             @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
+                VisionActivity.this.h.removeCallbacks(directPreviewWatchdog);
                 CameraStreamService.clearVisionPreviewSurface(surface);
                 return true;
             }
 
-            @Override public void onSurfaceTextureUpdated(SurfaceTexture surface) {}
+            @Override public void onSurfaceTextureUpdated(SurfaceTexture surface) {
+                directPreviewFrameSeen = true;
+                VisionActivity.this.h.removeCallbacks(directPreviewWatchdog);
+            }
         });
         root.addView(previewView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -178,17 +205,23 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
 
     @Override protected void onResume() {
         super.onResume();
+        activeVision = this;
         resumed = true;
         mechanicalStyle = Prefs.visionOverlayMechanical(this);
         useHalVisionFrames = Prefs.VISION_FRAME_SOURCE_HAL.equals(Prefs.visionFrameSource(this));
         halFrameSeq = 0;
         lastRenderedSeq = -1;
         lastAcceptedFrameMs = 0;
+        directPreviewFrameSeen = false;
+        directPreviewFallbackActive = false;
         synchronized (latestFrameLock) { latestNv21 = null; }
         frozenFrame = null;
         camW = 0;
         camH = 0;
         overlayText = "";
+        captionIsSpeechAnswer = false;
+        captionSpeechStarted = false;
+        captionSpeechFinished = false;
         setUiState(UiState.WAITING);
         startedCameraForVision = !CameraStreamService.isActive();
         if (startedCameraForVision) {
@@ -203,6 +236,8 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
             if (previewView.isAvailable()) {
                 CameraStreamService.setVisionPreviewSurface(previewView.getSurfaceTexture());
                 h.post(this::layoutDirectPreview);
+                h.removeCallbacks(directPreviewWatchdog);
+                h.postDelayed(directPreviewWatchdog, DIRECT_PREVIEW_FRAME_TIMEOUT_MS);
             }
         } else {
             CameraStreamService.clearVisionPreviewSurface(previewView.getSurfaceTexture());
@@ -228,6 +263,7 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
     }
 
     @Override protected void onPause() {
+        if (activeVision == this) activeVision = null;
         resumed = false;
         visionTurn.incrementAndGet();
         aiBusy.set(false);
@@ -311,6 +347,18 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         if (t != null) t.interrupt();
     }
 
+    /** Fall back to the Camera1 callback path only when the direct TextureView receives no frame. */
+    private void enableDirectPreviewFallback() {
+        if (!resumed || !useHalVisionFrames || directPreviewFrameSeen || directPreviewFallbackActive
+                || previewView == null || frameView == null) return;
+        directPreviewFallbackActive = true;
+        CameraStreamService.clearVisionPreviewSurface(previewView.getSurfaceTexture());
+        previewView.setVisibility(View.INVISIBLE);
+        frameView.setVisibility(View.VISIBLE);
+        lastRenderedSeq = -1;
+        startRenderThread();
+    }
+
     /** 预览输出已旋转 90 度，按旧 Canvas 路径的 center-crop 规则铺满屏幕。 */
     private void layoutDirectPreview() {
         if (!useHalVisionFrames || previewView == null || rootView == null) return;
@@ -379,9 +427,11 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
                 }
                 remember(text, answer);
                 ConversationLog.append(this, "assistant", "[灵眼] " + answer);
-                showOverlay(answer, UiState.SPEAKING);
                 VoiceController vc = voiceController == null ? VoiceController.get(this, null) : voiceController;
-                vc.speakText(answer);
+                voiceController = vc;
+                showOverlay("", UiState.THINKING);
+                vc.speakText(answer, VISION_CAPTION_LEAD_MS,
+                        () -> showOverlay(answer, UiState.SPEAKING));
             } catch (Exception e) {
                 showTransientError("错误: " + e.getMessage());
             } finally {
@@ -409,7 +459,6 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
             @Override public void onDelta(String s) {
                 if (s == null || s.isEmpty()) return;
                 synchronized (lock) { streamed.append(s); }
-                showOverlay(streamed.toString(), UiState.THINKING);
             }
             @Override public void onDone(String full) {
                 synchronized (lock) {
@@ -549,10 +598,19 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         String text = s == null ? "" : s.replace('\n', ' ').replace('\r', ' ').trim();
         h.post(() -> {
             overlayText = text;
-            overlaySetAt = System.currentTimeMillis();
+            overlaySetAt = SystemClock.uptimeMillis();
+            captionIsSpeechAnswer = state == UiState.SPEAKING && !text.isEmpty();
+            captionSpeechStarted = false;
+            captionSpeechFinished = false;
             if (state != null) uiState = state;
             if (overlayView != null) overlayView.invalidate();
         });
+    }
+
+    private void finishSpeechCaption() {
+        if (!captionIsSpeechAnswer || captionSpeechFinished) return;
+        captionSpeechFinished = true;
+        if (overlayView != null) overlayView.invalidate();
     }
 
     private void clearOverlayIf(String oldText) {
@@ -560,9 +618,11 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
     }
 
     private void showTransientError(String text) {
-        showOverlay(text, UiState.ERROR);
+        boolean visible = Prefs.voiceDiagnosticOverlays(this);
+        if (visible) showOverlay(text, UiState.ERROR);
+        else setUiState(UiState.ERROR);
         h.postDelayed(() -> {
-            clearOverlayIf(text);
+            if (visible) clearOverlayIf(text);
             if (uiState == UiState.ERROR && aiConfigured) setUiState(idleUiState());
         }, 3500);
     }
@@ -580,13 +640,44 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
     private void onVoiceStatus(String status) {
         if (!resumed || status == null) return;
         String s = status.trim();
+        boolean diagnostics = Prefs.voiceDiagnosticOverlays(this);
+        if (!diagnostics) voiceDiagnosticText = "";
+        if (s.isEmpty()) {
+            String old = voiceDiagnosticText;
+            voiceDiagnosticText = "";
+            if (diagnostics && !old.isEmpty() && old.equals(overlayText)) showOverlay("");
+            return;
+        }
         if (s.contains("错误") || s.contains("失败") || s.contains("未配置")) {
+            if (diagnostics) voiceDiagnosticText = s;
             showTransientError(s);
         } else if (s.contains("识别") || s.contains("思考") || s.contains("重试")) {
             setUiState(UiState.THINKING);
         } else if (s.contains("聆听") || s.contains("听见")) {
             setUiState(idleUiState());
         }
+        if (diagnostics && !s.isEmpty()
+                && !s.contains("错误") && !s.contains("失败") && !s.contains("未配置")) {
+            voiceDiagnosticText = s;
+            showOverlay(s);
+        }
+    }
+
+    public static void applyVoiceDiagnosticPrefToActive() {
+        final VisionActivity activity = activeVision;
+        if (activity == null || Prefs.voiceDiagnosticOverlays(activity)) return;
+        activity.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                String old = activity.voiceDiagnosticText;
+                activity.voiceDiagnosticText = "";
+                if (!old.isEmpty() && old.equals(activity.overlayText)) {
+                    activity.showOverlay("");
+                }
+                if (activity.uiState == UiState.ERROR && activity.aiConfigured) {
+                    activity.setUiState(activity.idleUiState());
+                }
+            }
+        });
     }
 
     private void toggleFrozenFrame() {
@@ -708,7 +799,6 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
         }
 
         @Override protected void onDraw(Canvas canvas) {
-            String text = overlayText;
             float w = getWidth();
             float h = getHeight();
             float shortSide = Math.min(w, h);
@@ -720,7 +810,6 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
                 drawMechanical(canvas, cx, cy, shortSide, now);
                 if (resumed) postInvalidateDelayed(33);
             }
-            if (!TextUtils.isEmpty(text)) drawCaption(canvas, text, cx, h, shortSide);
         }
 
         private void drawMechanical(Canvas canvas, float cx, float cy, float shortSide, long now) {
@@ -906,15 +995,17 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
             textPaint.setColor(Ui.COLOR_TEXT);
             textPaint.setTextSize(Ui.dpF(VisionActivity.this, 13));
             textPaint.setTextAlign(Paint.Align.CENTER);
-            float barW = shortSide * 0.69f;
             float padX = Ui.dpF(VisionActivity.this, 14);
-            float maxTextW = barW - padX * 2f;
-            List<String> lines = captionLines(text, maxTextW, 3);
+            float measuredTextW = textPaint.measureText(text);
             Paint.FontMetrics fm = textPaint.getFontMetrics();
             float lineH = fm.descent - fm.ascent + Ui.dpF(VisionActivity.this, 2);
-            float padY = Ui.dpF(VisionActivity.this, 9);
-            float barH = padY * 2f + lineH * lines.size();
+            float padY = Ui.dpF(VisionActivity.this, 8);
+            float barH = padY * 2f + lineH;
             float barCy = h - shortSide * 0.225f;
+            float maxBarW = Math.min(shortSide * 0.82f,
+                    captionSafeWidth(shortSide, barCy, h, barH));
+            float minBarW = Math.min(Ui.dpF(VisionActivity.this, 104), maxBarW);
+            float barW = Math.max(minBarW, Math.min(maxBarW, measuredTextW + padX * 2f));
             r.set(cx - barW / 2f, barCy - barH / 2f, cx + barW / 2f, barCy + barH / 2f);
             p.setStyle(Paint.Style.FILL);
             p.setColor(Color.argb(194, 8, 7, 5));
@@ -927,43 +1018,47 @@ public class VisionActivity extends com.magneo.compass.BaseActivity {
                     Ui.dpF(VisionActivity.this, 6), p);
 
             float baseY = r.top + padY - fm.ascent;
-            for (String line : lines) {
-                canvas.drawText(line, cx, baseY, textPaint);
-                baseY += lineH;
+            float clipLeft = r.left + padX;
+            float clipRight = r.right - padX;
+            float viewportW = clipRight - clipLeft;
+            boolean scrollSpeechAnswer = captionIsSpeechAnswer && measuredTextW > viewportW;
+            int save = canvas.save();
+            canvas.clipRect(clipLeft, r.top, clipRight, r.bottom);
+            if (!scrollSpeechAnswer) {
+                canvas.drawText(text, cx, baseY, textPaint);
+                canvas.restoreToCount(save);
+                return;
             }
+
+            float travel = Math.max(0f, measuredTextW - viewportW);
+            float offset = travel;
+            if (!captionSpeechFinished) {
+                long elapsed = Math.max(0L, SystemClock.uptimeMillis() - overlaySetAt);
+                long startPause = 0L;
+                long moveMs = Math.max(900L,
+                        Math.round(travel / Ui.dpF(VisionActivity.this,
+                                VISION_CAPTION_SCROLL_DP_PER_SEC) * 1000f));
+                if (elapsed <= startPause) {
+                    offset = 0f;
+                } else if (elapsed < startPause + moveMs) {
+                    float t = (elapsed - startPause) / (float) moveMs;
+                    offset = travel * (t * t * (3f - 2f * t));
+                }
+            }
+            textPaint.setTextAlign(Paint.Align.LEFT);
+            canvas.drawText(text, clipLeft - offset, baseY, textPaint);
+            canvas.restoreToCount(save);
         }
 
-        private List<String> captionLines(String source, float maxWidth, int maxLines) {
-            List<String> out = new ArrayList<>();
-            String rest = source == null ? "" : source.trim();
-            while (!rest.isEmpty() && out.size() < maxLines) {
-                if (out.size() == maxLines - 1) {
-                    out.add(TextUtils.ellipsize(rest, textPaint, maxWidth,
-                            TextUtils.TruncateAt.END).toString());
-                    break;
-                }
-                int count = textPaint.breakText(rest, true, maxWidth, null);
-                if (count <= 0) count = 1;
-                if (count >= rest.length()) {
-                    out.add(rest);
-                    break;
-                }
-                int cut = preferredBreak(rest, count);
-                out.add(rest.substring(0, cut).trim());
-                rest = rest.substring(cut).trim();
-            }
-            if (out.isEmpty()) out.add("");
-            return out;
-        }
-
-        private int preferredBreak(String text, int max) {
-            int floor = Math.max(1, max / 2);
-            for (int i = Math.min(max, text.length() - 1); i >= floor; i--) {
-                char c = text.charAt(i - 1);
-                if (Character.isWhitespace(c) || c == '，' || c == '。' || c == '；'
-                        || c == ',' || c == '.' || c == ';') return i;
-            }
-            return max;
+        /** Keep the caption's lower corners inside the physical round display. */
+        private float captionSafeWidth(float shortSide, float barCy, float height, float barH) {
+            float radius = shortSide / 2f;
+            float edgeY = Math.abs(barCy - height / 2f) + barH / 2f
+                    + Ui.dpF(VisionActivity.this, 4);
+            if (edgeY >= radius) return Ui.dpF(VisionActivity.this, 48);
+            float halfChord = (float) Math.sqrt(radius * radius - edgeY * edgeY);
+            float inset = Ui.dpF(VisionActivity.this, 12);
+            return Math.max(Ui.dpF(VisionActivity.this, 48), (halfChord - inset) * 2f);
         }
 
         private int withAlpha(int color, int alpha) {

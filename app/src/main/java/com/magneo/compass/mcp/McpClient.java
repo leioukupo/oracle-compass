@@ -99,7 +99,9 @@ public class McpClient {
     }
 
     public void refresh(McpServerConfig cfg) throws IOException {
-        TOOL_CACHE.remove(cacheKey(cfg));
+        String key = cacheKey(cfg);
+        TOOL_CACHE.remove(key);
+        SESSIONS.remove(key);
         listTools(cfg, true);
     }
 
@@ -235,7 +237,11 @@ public class McpClient {
     }
 
     private static String cacheKey(McpServerConfig cfg) {
-        return cfg.id + "@" + cfg.url;
+        // A Streamable HTTP session can be scoped to the credential.  Keeping an
+        // old Mcp-Session-Id after the user replaces a Bearer token yields the
+        // confusing case where tools/list works while tools/call is rejected.
+        String token = cfg.bearerToken == null ? "" : cfg.bearerToken;
+        return cfg.id + "@" + cfg.url + "#" + Integer.toHexString(token.hashCode());
     }
 
     private static String clip(String s, int max) {
