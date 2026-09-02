@@ -396,6 +396,7 @@ public class SettingsActivity extends BaseActivity {
         homeStatusView = subtle(homeStatus);
         homeStatusView.setGravity(Gravity.CENTER);
         b.addView(homeStatusView, fullLp(4));
+        summaryRow(b, "屏幕策略", Prefs.screenPolicyLabel(this), this::chooseScreenPolicy);
         actionButton(b, "设为默认桌面", () -> {
             homeStatus = "已打开系统桌面选择";
             if (homeStatusView != null) homeStatusView.setText(homeStatus);
@@ -411,6 +412,29 @@ public class SettingsActivity extends BaseActivity {
         }, true);
     }
 
+    private void chooseScreenPolicy() {
+        String cur = Prefs.screenPolicy(this);
+        new RoundDialog(this)
+                .title("屏幕策略")
+                .item((Prefs.SCREEN_POLICY_PLUGGED.equals(cur) ? "✓ " : "") + "插电常亮 · 拔电自动熄屏", () -> {
+                    Prefs.put(this, Prefs.K_SCREEN_POLICY, Prefs.SCREEN_POLICY_PLUGGED);
+                    MainActivity.applyScreenPolicyToActive();
+                    selectCategory(cat);
+                })
+                .item((Prefs.SCREEN_POLICY_ALWAYS.equals(cur) ? "✓ " : "") + "始终常亮", () -> {
+                    Prefs.put(this, Prefs.K_SCREEN_POLICY, Prefs.SCREEN_POLICY_ALWAYS);
+                    MainActivity.applyScreenPolicyToActive();
+                    selectCategory(cat);
+                })
+                .item((Prefs.SCREEN_POLICY_SLEEP.equals(cur) ? "✓ " : "") + "始终自动熄屏", () -> {
+                    Prefs.put(this, Prefs.K_SCREEN_POLICY, Prefs.SCREEN_POLICY_SLEEP);
+                    MainActivity.applyScreenPolicyToActive();
+                    selectCategory(cat);
+                })
+                .cancel()
+                .show();
+    }
+
     private void buildApps(LinearLayout b) {
         summaryRow(b, "网页设置", SettingsWebServer.url(), this::showWebSettings);
         actionButton(b, "优先应用 1-8", () -> startActivity(new Intent(this, PriorityAppsActivity.class)), false);
@@ -421,7 +445,7 @@ public class SettingsActivity extends BaseActivity {
     }
 
     private void buildConv(LinearLayout b) {
-        int maxKb = Prefs.getI(this, Prefs.K_CONV_MAX_KB, 1024);
+        int maxKb = ConversationLog.maxKb(this);
         int cleanMin = Prefs.getI(this, Prefs.K_CONV_CLEAN_MIN, 60);
         long size = ConversationLog.size(this);
         summaryRow(b, "当前记录", formatBytes(size), this::showConvReadInfo);
@@ -825,8 +849,8 @@ public class SettingsActivity extends BaseActivity {
 
     private void chooseLogMax() {
         RoundDialog d = new RoundDialog(this).title("大小上限");
-        int[] vals = {512, 1024, 4096, 10240};
-        int cur = Prefs.getI(this, Prefs.K_CONV_MAX_KB, 1024);
+        int[] vals = {512, 1024, 4096};
+        int cur = ConversationLog.maxKb(this);
         for (int v : vals) {
             final int value = v;
             d.item((cur == v ? "✓ " : "") + v + " KB", () -> {
@@ -834,7 +858,7 @@ public class SettingsActivity extends BaseActivity {
                 selectCategory(cat);
             });
         }
-        d.item("自定义", () -> editInt("大小上限 KB", Prefs.K_CONV_MAX_KB, 1024, 100, 20480, " KB"))
+        d.item("自定义", () -> editInt("大小上限 KB", Prefs.K_CONV_MAX_KB, 4096, 100, 4096, " KB"))
                 .cancel()
                 .show();
     }

@@ -20,6 +20,7 @@ public class DebugLog {
     private static final String TAG = "DebugLog";
     private static final String FILE = "debug-chain.log";
     private static final int DEFAULT_MAX_KB = 4096;
+    private static final int HARD_MAX_KB = 4096;
 
     private DebugLog() {}
 
@@ -50,18 +51,7 @@ public class DebugLog {
     }
 
     public static JSONArray read(Context c) {
-        JSONArray arr = new JSONArray();
-        try {
-            byte[] all = readBytes(file(c));
-            String s = new String(all, "UTF-8");
-            for (String line : s.split("\n", -1)) {
-                if (line.trim().isEmpty()) continue;
-                try { arr.put(new JSONObject(line)); } catch (Exception ignored) {}
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "read", e);
-        }
-        return arr;
+        return readTail(c, 600, 384 * 1024);
     }
 
     /** Bounded tail used by the Web debugger to protect the low-memory device. */
@@ -97,7 +87,10 @@ public class DebugLog {
     }
 
     public static long size(Context c) {
-        try { return file(c).length(); } catch (Exception e) { return 0; }
+        try {
+            File dir = c.getApplicationContext().getFilesDir();
+            return length(dir, FILE) + length(dir, FILE + ".1") + length(dir, FILE + ".2");
+        } catch (Exception e) { return 0; }
     }
 
     public static void clear(Context c) {
@@ -105,55 +98,78 @@ public class DebugLog {
             synchronized (DebugLog.class) {
                 //noinspection ResultOfMethodCallIgnored
                 file(c).delete();
+                File dir = file(c).getParentFile();
+                new File(dir, FILE + ".1").delete();
+                new File(dir, FILE + ".2").delete();
+                new File(dir, FILE + ".tmp").delete();
             }
         } catch (Exception ignored) {}
     }
 
     private static void enforceLimit(Context c, File f) {
-        int maxKb = Math.max(256, Math.min(20480,
-                Prefs.getI(c, Prefs.K_DEBUG_MAX_KB, DEFAULT_MAX_KB)));
+        int maxKb = maxKb(c);
         long max = maxKb * 1024L;
         if (!f.exists() || f.length() <= max) return;
-        long keep = Math.max(128L * 1024, max / 2);
         try {
-            byte[] all = readBytes(f);
-            String s = new String(all, "UTF-8");
-            String[] lines = s.split("\n", -1);
-            StringBuilder sb = new StringBuilder();
-            for (int i = lines.length - 1; i >= 0 && sb.length() < keep; i--) {
-                String l = lines[i];
-                if (l.trim().isEmpty()) continue;
-                sb.insert(0, l + "\n");
+            File first = new File(f.getParentFile(), FILE + ".1");
+            File second = new File(f.getParentFile(), FILE + ".2");
+            if (first.exists()) {
+                if (second.exists()) second.delete();
+                first.renameTo(second);
+                if (second.exists() && second.length() > max) trimTailInPlace(second, max);
             }
-            File tmp = new File(f.getParentFile(), FILE + ".tmp");
-            FileOutputStream out = new FileOutputStream(tmp);
-            try { out.write(sb.toString().getBytes("UTF-8")); } finally { out.close(); }
-            if (!tmp.renameTo(f)) {
-                FileOutputStream out2 = new FileOutputStream(f, false);
-                try { out2.write(sb.toString().getBytes("UTF-8")); } finally { out2.close(); }
-                //noinspection ResultOfMethodCallIgnored
-                tmp.delete();
-            }
+            if (!f.renameTo(first)) trimTailInPlace(f, max);
+            else if (first.exists() && first.length() > max) trimTailInPlace(first, max);
         } catch (Exception e) {
             Log.w(TAG, "enforce", e);
         }
     }
 
-    private static byte[] readBytes(File f) throws Exception {
-        if (f == null || !f.exists() || f.length() == 0) return new byte[0];
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        FileInputStream in = new FileInputStream(f);
+    private static void trimTailInPlace(File f, long keep) throws Exception {
+        long start = Math.max(0L, f.length() - keep);
+        File tmp = new File(f.getParentFile(), FILE + ".tmp");
+        RandomAccessFile in = new RandomAccessFile(f, "r");
         try {
+            in.seek(start);
+            if (start > 0) in.readLine();
+            FileOutputStream out = new FileOutputStream(tmp, false);
+            try {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            } finally { out.close(); }
+        } finally { in.close(); }
+        if (!tmp.renameTo(f)) {
+            FileOutputStream out = new FileOutputStream(f, false);
             byte[] buf = new byte[8192];
-            int n;
-            while ((n = in.read(buf)) >= 0) {
-                if (n == 0) continue;
-                out.write(buf, 0, n);
-            }
-        } finally {
-            in.close();
+            FileInputStreamCompat.copy(tmp, out, buf);
+            out.close();
+            tmp.delete();
         }
-        return out.toByteArray();
+    }
+
+    private static long length(File dir, String name) {
+        File f = new File(dir, name);
+        return f.exists() ? f.length() : 0L;
+    }
+
+    public static int maxKb(Context c) {
+        int configured = Prefs.getI(c, Prefs.K_DEBUG_MAX_KB, DEFAULT_MAX_KB);
+        if (configured > HARD_MAX_KB) {
+            Prefs.putI(c, Prefs.K_DEBUG_MAX_KB, HARD_MAX_KB);
+            configured = HARD_MAX_KB;
+        }
+        return Math.max(256, Math.min(HARD_MAX_KB, configured));
+    }
+
+    private static final class FileInputStreamCompat {
+        static void copy(File source, FileOutputStream out, byte[] buf) throws Exception {
+            java.io.FileInputStream in = new java.io.FileInputStream(source);
+            try {
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            } finally { in.close(); }
+        }
     }
 
     private static String clip(String s, int max) {

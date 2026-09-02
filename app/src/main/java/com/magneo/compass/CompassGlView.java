@@ -11,6 +11,7 @@ import android.graphics.RectF;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.opengl.GLUtils;
+import android.os.SystemClock;
 
 import com.magneo.compass.ui.RoundScreen;
 import com.magneo.compass.ui.Ui;
@@ -28,6 +29,13 @@ import javax.microedition.khronos.opengles.GL10;
 /** OpenGL ES 2.0 主罗盘渲染层。详情/拖拽仍由 CompassView 的 Canvas 覆盖层负责。 */
 public class CompassGlView extends GLSurfaceView {
     private final CompassRenderer renderer;
+    private volatile boolean ritualFrameScheduled;
+    private final Runnable ritualFrame = new Runnable() {
+        @Override public void run() {
+            ritualFrameScheduled = false;
+            requestRenderSafe();
+        }
+    };
 
     public CompassGlView(Context context, SensorHub hub, Runnable fallback) {
         super(context);
@@ -35,13 +43,28 @@ public class CompassGlView extends GLSurfaceView {
         setEGLConfigChooser(new MsaaConfigChooser());
         getHolder().setFormat(PixelFormat.RGBA_8888);
         try { setPreserveEGLContextOnPause(true); } catch (Throwable ignored) {}
-        renderer = new CompassRenderer(context.getApplicationContext(), hub, fallback);
+        renderer = new CompassRenderer(context.getApplicationContext(), hub, fallback,
+                new Runnable() {
+                    @Override public void run() { requestRitualFrame(); }
+                });
         setRenderer(renderer);
         setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
     }
 
     public void requestRenderSafe() {
         try { requestRender(); } catch (Throwable ignored) {}
+    }
+
+    private void requestRitualFrame() {
+        if (ritualFrameScheduled) return;
+        ritualFrameScheduled = true;
+        postDelayed(ritualFrame, 83L);
+    }
+
+    @Override protected void onDetachedFromWindow() {
+        removeCallbacks(ritualFrame);
+        ritualFrameScheduled = false;
+        super.onDetachedFromWindow();
     }
 
     private static final class MsaaConfigChooser implements EGLConfigChooser {
@@ -111,6 +134,7 @@ public class CompassGlView extends GLSurfaceView {
         private final Context context;
         private final SensorHub hub;
         private final Runnable fallback;
+        private final Runnable frameRequester;
         private final Paint pFill = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint pStroke = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint pText = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -151,11 +175,14 @@ public class CompassGlView extends GLSurfaceView {
         private final int[] dirTextures = new int[4];
         private final int[] dirTextureSizes = new int[4];
         private boolean surfaceReady;
+        private long timeRitualSlot = Long.MIN_VALUE;
+        private long timeRitualStartedAtMs;
 
-        CompassRenderer(Context context, SensorHub hub, Runnable fallback) {
+        CompassRenderer(Context context, SensorHub hub, Runnable fallback, Runnable frameRequester) {
             this.context = context;
             this.hub = hub;
             this.fallback = fallback;
+            this.frameRequester = frameRequester;
             pStroke.setStyle(Paint.Style.STROKE);
             pText.setSubpixelText(true);
         }
@@ -209,13 +236,17 @@ public class CompassGlView extends GLSurfaceView {
                 Calendar now = Calendar.getInstance();
                 int hourZhi = currentHourZhi(now);
                 int hourGan = currentHourGan(now, hourZhi);
+                updateTimeRitual(now);
                 ensureStaticTexture(hourZhi, hourGan);
                 drawTexture(staticTexture, 0f, 0f, w, h);
+                drawNightDim(TimeRitual.isNight(now));
                 float az = Float.isNaN(hub.azimuth) ? 0f : hub.azimuth;
                 drawBatteryRing();
                 drawCompassRing(az);
                 drawClock(now);
+                drawTimeRitualPulse(hourZhi, hourGan, TimeRitual.isNight(now));
                 drawCenter(az);
+                if (isTimeRitualActive() && frameRequester != null) frameRequester.run();
             } catch (Throwable t) {
                 fail();
             }
@@ -541,6 +572,58 @@ public class CompassGlView extends GLSurfaceView {
             drawSecondComet(r, cal.get(Calendar.SECOND) * 6f);
         }
 
+        private void updateTimeRitual(Calendar now) {
+            long slot = TimeRitual.slotKey(now);
+            if (timeRitualSlot == Long.MIN_VALUE) {
+                timeRitualSlot = slot;
+            } else if (slot != timeRitualSlot) {
+                timeRitualSlot = slot;
+                timeRitualStartedAtMs = SystemClock.uptimeMillis();
+            }
+        }
+
+        private boolean isTimeRitualActive() {
+            return timeRitualStartedAtMs > 0L
+                    && SystemClock.uptimeMillis() - timeRitualStartedAtMs < TimeRitual.PULSE_MS;
+        }
+
+        private float timeRitualProgress() {
+            if (timeRitualStartedAtMs <= 0L) return 1f;
+            long elapsed = SystemClock.uptimeMillis() - timeRitualStartedAtMs;
+            return Math.max(0f, Math.min(1f, elapsed / (float) TimeRitual.PULSE_MS));
+        }
+
+        private void drawNightDim(boolean night) {
+            if (night) drawCircle(cx, cy, rMax, Color.argb(24, 0, 0, 0), FULL_RING_STEPS);
+        }
+
+        private void drawTimeRitualPulse(int hourZhi, int hourGan, boolean night) {
+            if (!isTimeRitualActive()) return;
+            float progress = timeRitualProgress();
+            float glow = (float) Math.sin(Math.PI * progress);
+            if (night) glow *= 0.88f;
+
+            float zhiOuter = rMax * 0.865f;
+            float zhiInner = rMax * 0.715f;
+            float zhiRadius = (zhiOuter + zhiInner) * 0.5f;
+            drawArcRing(cx, cy, zhiRadius - (1.15f + glow) * scale,
+                    zhiRadius + (1.15f + glow) * scale,
+                    hourZhi * 30f - 88f, 26f,
+                    a(C_GOLD, (int) (76f + 150f * glow)), 96);
+
+            float ganOuter = zhiInner;
+            float ganInner = rMax * 0.610f;
+            float ganRadius = (ganOuter + ganInner) * 0.5f;
+            drawArcRing(cx, cy, ganRadius - (0.75f + 0.55f * glow) * scale,
+                    ganRadius + (0.75f + 0.55f * glow) * scale,
+                    hourGan * 36f - 87f, 30f,
+                    a(C_GOLD, (int) (48f + 112f * glow)), 96);
+
+            float ringRadius = rMax * (0.31f + 0.07f * progress);
+            drawArcRing(cx, cy, ringRadius - 0.72f * scale, ringRadius + 0.72f * scale,
+                    0f, 360f, a(C_GOLD, (int) (88f * (1f - progress))), FULL_RING_STEPS);
+        }
+
         private void drawSecondComet(float r, float deg) {
             float trailR = r * 0.82f;
             float end = deg - 90f;
@@ -807,20 +890,11 @@ public class CompassGlView extends GLSurfaceView {
         }
 
         private int currentHourZhi(Calendar cal) {
-            int hour = cal.get(Calendar.HOUR_OF_DAY);
-            return ((hour + 1) / 2) % 12;
+            return TimeRitual.hourZhi(cal);
         }
 
         private int currentHourGan(Calendar cal, int hourZhi) {
-            int year = cal.get(Calendar.YEAR);
-            int month = cal.get(Calendar.MONTH) + 1;
-            int day = cal.get(Calendar.DAY_OF_MONTH);
-            int a = (14 - month) / 12;
-            int y2 = year + 4800 - a;
-            int m = month + 12 * a - 3;
-            int jdn = day + (153 * m + 2) / 5 + 365 * y2 + y2 / 4 - y2 / 100 + y2 / 400 - 32045;
-            int dayGan = ((jdn + 9) % 10 + 10) % 10;
-            return ((dayGan % 5) * 2 + hourZhi) % 10;
+            return TimeRitual.hourGan(cal, hourZhi);
         }
     }
 }

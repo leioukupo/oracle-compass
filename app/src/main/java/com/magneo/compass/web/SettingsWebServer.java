@@ -39,6 +39,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 /** 本机网页设置服务：同网络浏览器打开当前设备 IP 的 8080 端口可配置应用（不含推流）。 */
@@ -48,6 +55,15 @@ public class SettingsWebServer {
     private static volatile ServerSocket server;
     private static volatile Thread thread;
     private static volatile Context app;
+    private static final ExecutorService webWorkers = new ThreadPoolExecutor(
+            4, 4, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<Runnable>(16),
+            new ThreadFactory() {
+                @Override public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "web-conn");
+                    t.setDaemon(true);
+                    return t;
+                }
+            }, new ThreadPoolExecutor.AbortPolicy());
 
     public static synchronized void start(Context c) {
         if (server != null) return;
@@ -124,9 +140,11 @@ public class SettingsWebServer {
         while (server != null && !server.isClosed()) {
             try {
                 Socket s = server.accept();
-                Thread t = new Thread(() -> handle(s), "web-conn");
-                t.setDaemon(true);
-                t.start();
+                try {
+                    webWorkers.execute(() -> handle(s));
+                } catch (RejectedExecutionException e) {
+                    try { s.close(); } catch (IOException ignored) {}
+                }
             } catch (IOException ignored) {}
         }
     }
@@ -167,9 +185,18 @@ public class SettingsWebServer {
                 if (!requireAuth(out, authed)) return;
                 serveClearDebug(out);
             }
-            else if (path.equals("/stream")) { serveStream(s); return; }
-            else if (path.equals("/h264")) { serveH264(s); return; }
-            else if (path.equals("/h264fast")) { serveH264Fast(s); return; }
+            else if (path.equals("/stream")) {
+                if (!requireAuth(out, authed)) return;
+                serveStream(s); return;
+            }
+            else if (path.equals("/h264")) {
+                if (!requireAuth(out, authed)) return;
+                serveH264(s); return;
+            }
+            else if (path.equals("/h264fast")) {
+                if (!requireAuth(out, authed)) return;
+                serveH264Fast(s); return;
+            }
             else if (path.equals("/stream_state")) serveStreamState(out);
             else if (path.equals("/system_status")) serveSystemStatus(out);
             else if (path.equals("/gps/reset")) {
@@ -184,8 +211,14 @@ public class SettingsWebServer {
                 if (!requireAuth(out, authed)) return;
                 serveTouch(out, req.target); return;
             }
-            else if (path.equals("/cam")) { serveCamPage(out); }
-            else if (path.equals("/camhttp")) { com.magneo.compass.cam.CameraHttpStreamer.serve(s); return; }
+            else if (path.equals("/cam")) {
+                if (!requireAuth(out, authed)) return;
+                serveCamPage(out, req.target);
+            }
+            else if (path.equals("/camhttp")) {
+                if (!requireAuth(out, authed)) return;
+                com.magneo.compass.cam.CameraHttpStreamer.serve(s); return;
+            }
             else if (path.equals("/cam/start")) {
                 if (!requireAuth(out, authed)) return;
                 com.magneo.compass.cam.CameraStreamService.start(app); serveText(out, "正在启动摄像头推流…");
@@ -194,9 +227,18 @@ public class SettingsWebServer {
                 if (!requireAuth(out, authed)) return;
                 com.magneo.compass.cam.CameraStreamService.stop(app); serveText(out, "已停止");
             }
-            else if (path.equals("/cam/status")) serveCamStatus(out);
-            else if (path.equals("/cam/offer")) serveCamOffer(out, body);
-            else if (path.equals("/cam/answer")) serveCamAnswer(out);
+            else if (path.equals("/cam/status")) {
+                if (!requireAuth(out, authed)) return;
+                serveCamStatus(out);
+            }
+            else if (path.equals("/cam/offer")) {
+                if (!requireAuth(out, authed)) return;
+                serveCamOffer(out, body);
+            }
+            else if (path.equals("/cam/answer")) {
+                if (!requireAuth(out, authed)) return;
+                serveCamAnswer(out);
+            }
             else if (path.equals("/frpc/status")) serveFrpcStatus(out);
             else if (path.equals("/frpc/start")) {
                 if (!requireAuth(out, authed)) return;
@@ -419,7 +461,10 @@ public class SettingsWebServer {
     }
 
     private static boolean isAuthed(Request req) {
-        return req != null && AppManager.authorized(app, req.header("x-appmgr-token"));
+        if (req == null) return false;
+        String token = req.header("x-appmgr-token");
+        if (token == null || token.trim().isEmpty()) token = qParam(req.target, "access");
+        return AppManager.authorized(app, token);
     }
 
     private static boolean requireAuth(OutputStream out, boolean authed) throws IOException {
@@ -571,6 +616,7 @@ public class SettingsWebServer {
                 .append("<h3 style='margin-top:16px'>显示性能</h3>")
                 .append(rowSelect("主屏渲染", "mainRenderer", null, "<option value='gl'>OpenGL</option><option value='canvas'>Canvas</option>", null))
                 .append(rowSelect("帧率策略", "mainFpsMode", null, "<option value='adaptive'>自适应</option><option value='power'>省电</option><option value='smooth'>流畅</option>", null))
+                .append(rowSelect("屏幕策略", "screenPolicy", null, "<option value='plugged'>插电常亮 · 拔电自动熄屏</option><option value='always'>始终常亮</option><option value='sleep'>始终自动熄屏</option>", null))
                 .append("<p class='hint'>保存后回到主屏生效；Web 预览开启或低电量时会自动压低主屏刷新。</p>")
                 .append("<h3 style='margin-top:16px'>坤 · 占卜</h3>")
                 .append(rowRange("起卦力度", Prefs.K_ORACLE_SHAKE_FORCE, 0, 100, "0 最灵敏，100 最用力；数值越大越难触发"))
@@ -635,7 +681,7 @@ public class SettingsWebServer {
                 .append("<div class='inline'><button type='button' onclick='loadDebugLog()'>刷新日志</button><button type='button' class='danger' onclick='clearDebugLog()'>清空调试日志</button><span class='state' id='debugMsg'></span></div>")
                 .append("</div><div class='box'><h3>时间线</h3><div id='debugLog' class='log' style='max-height:560px'></div></div></div></section>")
                 .append("<section class='panel' id='tab-records'><div class='sectionTitle'><h2>记录 / 备份</h2><small>排障与恢复</small></div><div class='cols'><div class='box'><h3>对话记录</h3>")
-                .append(rowInput("大小上限(KB)", "convMaxKb", "text", "1024"))
+                .append(rowInput("大小上限(KB)", "convMaxKb", "text", "4096"))
                 .append(rowInput("清理间隔(分钟)", "convCleanMin", "text", "60"))
                 .append("<div class='row'><label>过滤角色</label><select id='convFilter' onchange='loadConv()'><option value='all'>全部</option><option value='user'>用户</option><option value='assistant'>AI</option><option value='heard'>听见</option><option value='error'>错误</option></select></div><div class='inline'><button type='button' class='danger' onclick='clearConv()'>清空记录</button><span class='state' id='convMsg'></span></div><div id='conv' class='log'></div></div>")
                 .append("<div class='box'><h3>配置备份</h3><div class='inline'><button type='button' onclick='backupExport()'>导出当前配置</button><button type='button' class='secondary' onclick='backupRestore()'>从下面内容恢复</button><span class='state' id='backupMsg'></span></div><textarea id='backupContent' placeholder='导出后会显示 JSON；也可以粘贴旧 prefs.json 后恢复。' style='min-height:260px'></textarea></div>")
@@ -653,19 +699,19 @@ public class SettingsWebServer {
                 .append("function api(m,u,b,cb,ct){var x=new XMLHttpRequest();x.open(m,u,true);hdr(x);if(ct)x.setRequestHeader('Content-Type',ct);x.onload=function(){var d=null;try{d=JSON.parse(x.responseText)}catch(e){d={ok:false,err:x.responseText||'请求失败'}}if(cb)cb(d,x)};x.onerror=function(){if(cb)cb({ok:false,err:'网络错误'},x)};x.send(b||null)}")
                 .append("function textApi(m,u,b,cb,ct){var x=new XMLHttpRequest();x.open(m,u,true);hdr(x);if(ct)x.setRequestHeader('Content-Type',ct);x.onload=function(){if(cb)cb(x.responseText,x)};x.onerror=function(){if(cb)cb('网络错误',x)};x.send(b||null)}")
                 .append("function chip(id,text,ok,bad){var e=q('#'+id);if(!e)return;e.textContent=text||'未知';var c=e.parentNode;c.className='chip'+(ok?' ok':'')+(bad?' bad':'')}")
-                .append("function boot(){wireTabs();wireDirty();wireAuthKeys();publicStatus();authState();setInterval(publicStatus,3000)}")
+                .append("var publicTimer=null;function boot(){wireTabs();wireDirty();wireAuthKeys();publicStatus();publicTimer=setInterval(function(){if(!document.hidden)publicStatus()},5000)}")
                 .append("function authState(){api('GET','/appmgr/state',null,function(d){var p=q('#authPanel'),c=q('#console'),b=q('#authBadge'),h=q('#authHelp');if(!d||!d.ok){b.textContent='未登录';return}if(!d.hasPassword){h.textContent='首次使用请设置管理密码';b.textContent='未设置密码';p.classList.remove('hidden');c.classList.add('hidden');return}if(d.authed){b.textContent='已登录';p.classList.add('hidden');c.classList.remove('hidden');q('#savebar').classList.remove('hidden');if(!started){started=true;initConsole()}}else{b.textContent='未登录';p.classList.remove('hidden');c.classList.add('hidden');q('#savebar').classList.add('hidden')}})}")
                 .append("function appLogin(){api('POST','/appmgr/login',enc({password:q('#appPwd').value}),function(d){if(d&&d.ok){token=d.token;sessionStorage.setItem('appmgrToken',token);q('#appPwd').value='';msg('appAuth','已登录');authState()}else msg('appAuth',d&&d.err?d.err:'登录失败')},'application/x-www-form-urlencoded')}")
                 .append("function appSetup(){api('POST','/appmgr/setup',enc({password:q('#appPwd').value,oldPassword:q('#appOldPwd').value}),function(d){if(d&&d.ok){token=d.token;sessionStorage.setItem('appmgrToken',token);q('#appPwd').value='';q('#appOldPwd').value='';msg('appAuth','管理密码已保存');authState()}else msg('appAuth',d&&d.err?d.err:'设置失败')},'application/x-www-form-urlencoded')}")
                 .append("function wireAuthKeys(){var p=q('#appPwd'),o=q('#appOldPwd');if(p)p.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();appLogin()}});if(o)o.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();appSetup()}})}")
                 .append("function msg(id,t){var e=q('#'+id);if(e)e.textContent=t||''}")
-                .append("function publicStatus(){api('GET','/status',null,function(d){if(d){chip('ovVad',d.vadEnabled?'开启':'关闭',!!d.vadEnabled,!d.vadEnabled);chip('ovAsr',d.asrUrlSet?'已配置':'未配置',!!d.asrUrlSet,!d.asrUrlSet);chip('ovAsrFinal',d.asrFinalUrlSet?'已配置':'未配置',!!d.asrFinalUrlSet,false);chip('ovLlm',d.apiKeySet?d.apiKeyMask:'未设置',!!d.apiKeySet,!d.apiKeySet);chip('ovTts',d.ttsUrlSet?'已配置':'未配置',!!d.ttsUrlSet,!d.ttsUrlSet)}});api('GET','/frpc/status',null,function(d){if(d)chip('ovFrpc',d.status==='running'?'运行中':(d.status==='error'?'异常':'停止'),d.status==='running',d.status==='error')});api('GET','/adb/status',null,function(d){if(!d)return;var h=d.health||'checking',t=h==='healthy'?'服务正常':(h==='degraded'?'连接积压':(h==='down'?'未监听':'检测中'));chip('ovAdb',t,h==='healthy',h==='degraded'||h==='down')})}")
+                .append("function publicStatus(){api('GET','/status',null,function(d){if(d){chip('ovVad',d.vadEnabled?'开启':'关闭',!!d.vadEnabled,!d.vadEnabled);chip('ovAsr',d.asrUrlSet?'已配置':'未配置',!!d.asrUrlSet,!d.asrUrlSet);chip('ovAsrFinal',d.asrFinalUrlSet?'已配置':'未配置',!!d.asrFinalUrlSet,false);chip('ovLlm',d.apiKeySet?d.apiKeyMask:'未设置',!!d.apiKeySet,!d.apiKeySet);chip('ovTts',d.ttsUrlSet?'已配置':'未配置',!!d.ttsUrlSet,!d.ttsUrlSet)}});if(!started){api('GET','/frpc/status',null,function(d){if(d)chip('ovFrpc',d.status==='running'?'运行中':(d.status==='error'?'异常':'停止'),d.status==='running',d.status==='error')});api('GET','/adb/status',null,function(d){if(!d)return;var h=d.health||'checking',t=h==='healthy'?'服务正常':(h==='degraded'?'连接积压':(h==='down'?'未监听':'检测中'));chip('ovAdb',t,h==='healthy',h==='degraded'||h==='down')})}}")
                 .append("function pct(v){v=Number(v);return v>=0?(Math.round(v)+'%'):'--'}function metric(v,t){return t?t:pct(v)}function meter(n,v,t){var e=q('#sys'+n),b=q('#sys'+n+'Bar');if(e)e.textContent=metric(v,t);if(b)b.style.width=(Number(v)>=0?Math.max(0,Math.min(100,Number(v))):0)+'%'}")
                 .append("function renderHwDiag(h){var box=q('#hwDiag');if(!box)return;h=h||{};var rows=[['传感器',h.sensors||'--'],['姿态',h.pose||'--'],['磁场',h.magnetic||'--'],['GPS请求',h.gpsRequest||'--'],['GPS驱动',h.gpsDriver||'--'],['GPS动作',h.gpsAction||'--'],['卫星',h.gps||'--'],['弱项',h.untrusted||'--'],['校准',h.magCalibration||'--']];var out='';for(var i=0;i<rows.length;i++)out+='<div class=\"item\"><div class=\"main\"><b>'+esc(rows[i][0])+'</b><small>'+esc(rows[i][1])+'</small></div></div>';box.innerHTML=out}")
                 .append("function gpsReset(){if(!confirm('清理 GPS 辅助数据并重新搜星？建议在室外空旷处使用。'))return;msg('gpsResetMsg','正在触发...');api('POST','/gps/reset','',function(d){msg('gpsResetMsg',d&&d.ok?(d.msg||'已触发'):(d&&d.err?d.err:'失败'));setTimeout(systemStatus,800)},'application/x-www-form-urlencoded')}")
-                .append("function systemStatus(){api('GET','/system_status',null,renderSystem)}function renderSystem(d){if(!d)return;q('#sysTime').textContent=d.time||'--:--';q('#sysDate').textContent=d.date||'';meter('Cpu',d.cpu);meter('AppCpu',d.appCpu);meter('Ram',d.memPct);meter('Gpu',d.gpu,d.gpuText);meter('Bat',d.battery,d.batteryText);renderHwDiag(d.hardware);var bat=d.batteryText||pct(d.battery),gt=d.gpuText||pct(d.gpu),core=(d.cpuOnline&&d.cpuPossible)?(' · 核 '+d.cpuOnline+'/'+d.cpuPossible):'',appCore=(Number(d.appCpuCore)>=0?(' · 单核 '+pct(d.appCpuCore)):''),renderer=(d.mainRenderer==='canvas'?'Canvas':'OpenGL'),fps=d.mainFpsMode==='power'?'省电':(d.mainFpsMode==='smooth'?'流畅':'自适应');q('#sysCore').textContent='总 '+pct(d.cpu)+' · App '+pct(d.appCpu)+appCore+core+' · RAM '+pct(d.memPct)+' · Mali '+gt+' · 电 '+bat+' · '+renderer+'/'+fps;q('#sysGps').textContent=d.gps||'';q('#sysUpdated').textContent='更新 '+(d.time||'');var note='CPU/RAM/温度来自设备实时采样；App 为在线核心总口径，单核用于看主线程压力。';if(d.streamActive)note='屏幕预览正在运行，会明显增加 CPU 和温度。';q('#sysLoadNote').textContent=note;var temps=d.temps||[],ring=q('#sysTempRing');if(!ring)return;ring.innerHTML='';for(var i=0;i<temps.length;i++){var el=document.createElement('div');el.className='tempdot';el.innerHTML='<span>'+esc(temps[i].name||'温度')+'</span><b>'+Number(temps[i].c||0).toFixed(0)+'°</b>';ring.appendChild(el)}if(!temps.length){var e=document.createElement('div');e.className='tempdot';e.innerHTML='<span>温度</span><b>--</b>';ring.appendChild(e)}}")
-                .append("function initConsole(){loadStatus();lowBatterySoundStatus();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();bootAssetStatus();fsList();loadConv();loadDebugLog();setInterval(function(){frpcRefresh();camRefresh();adbStatus();appState()},3000);setInterval(systemStatus,2000);setInterval(loadConv,4000)}")
-                .append("function wireTabs(){var bs=qa('.tab');for(var i=0;i<bs.length;i++)bs[i].onclick=function(){var id=this.getAttribute('data-tab');var b=qa('.tab'),p=qa('.panel');for(var j=0;j<b.length;j++)b[j].classList.remove('active');for(var k=0;k<p.length;k++)p[k].classList.remove('active');this.classList.add('active');q('#tab-'+id).classList.add('active')}}")
+                .append("function systemStatus(){api('GET','/system_status',null,renderSystem)}function renderSystem(d){if(!d)return;q('#sysTime').textContent=d.time||'--:--';q('#sysDate').textContent=d.date||'';meter('Cpu',d.cpu);meter('AppCpu',d.appCpu);meter('Ram',d.memPct);meter('Gpu',d.gpu,d.gpuText);meter('Bat',d.battery,d.batteryText);renderHwDiag(d.hardware);var bat=d.batteryText||pct(d.battery),gt=d.gpuText||pct(d.gpu),core=(d.cpuOnline&&d.cpuPossible)?(' · 核 '+d.cpuOnline+'/'+d.cpuPossible):'',appCore=(Number(d.appCpuCore)>=0?(' · 单核 '+pct(d.appCpuCore)):''),renderer=(d.mainRenderer==='canvas'?'Canvas':'OpenGL'),fps=d.mainFpsMode==='power'?'省电':(d.mainFpsMode==='smooth'?'流畅':'自适应');q('#sysCore').textContent='总 '+pct(d.cpu)+' · App '+pct(d.appCpu)+appCore+core+' · RAM '+pct(d.memPct)+' · Mali '+gt+' · 电 '+bat+' · '+renderer+'/'+fps;q('#sysGps').textContent=d.gps||'';q('#sysUpdated').textContent='更新 '+(d.time||'');var note='loadavg '+(d.loadAvg1||'--')+' / '+(d.loadAvg5||'--')+' / '+(d.loadAvg15||'--')+' · 可运行 '+(d.runnable==null?'--':d.runnable)+' · D状态 '+(d.blockedThreads==null?'--':d.blockedThreads)+' · App线程 '+(d.appThreads==null?'--':d.appThreads);if(d.streamActive)note+=' · 屏幕预览会增加 CPU/温度';if(d.wifiScanAgeMs>=0)note+=' · Wi-Fi扫描 '+Math.round(d.wifiScanAgeMs/60000)+'分钟前';if(d.conversationBytes!=null)note+=' · 日志 '+Math.round(d.conversationBytes/1024)+'KB';q('#sysLoadNote').textContent=note;var temps=d.temps||[],ring=q('#sysTempRing');if(!ring)return;ring.innerHTML='';for(var i=0;i<temps.length;i++){var el=document.createElement('div');el.className='tempdot';el.innerHTML='<span>'+esc(temps[i].name||'温度')+'</span><b>'+Number(temps[i].c||0).toFixed(0)+'°</b>';ring.appendChild(el)}if(!temps.length){var e=document.createElement('div');e.className='tempdot';e.innerHTML='<span>温度</span><b>--</b>';ring.appendChild(e)}}")
+                .append("var consoleTimer=null;function stopConsolePolling(){if(consoleTimer){clearInterval(consoleTimer);consoleTimer=null}}function startConsolePolling(){stopConsolePolling();if(document.hidden)return;consoleTimer=setInterval(function(){if(document.hidden)return;frpcRefresh();camRefresh();adbStatus();appState();systemStatus();if(activeTab('records'))loadConv();if(activeTab('debug'))loadDebugLog();},5000)}function activeTab(id){var e=q('#tab-'+id);return !!(e&&e.className.indexOf('active')>=0)}function refreshTabData(id){if(id==='records')loadConv();else if(id==='debug')loadDebugLog();else if(id==='apps')loadApps();else if(id==='files')fsList()}function initConsole(){loadStatus();lowBatterySoundStatus();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();bootAssetStatus();fsList();startConsolePolling()}")
+                .append("function wireTabs(){var bs=qa('.tab');for(var i=0;i<bs.length;i++)bs[i].onclick=function(){var id=this.getAttribute('data-tab');var b=qa('.tab'),p=qa('.panel');for(var j=0;j<b.length;j++)b[j].classList.remove('active');for(var k=0;k<p.length;k++)p[k].classList.remove('active');this.classList.add('active');q('#tab-'+id).classList.add('active');refreshTabData(id)}}document.addEventListener('visibilitychange',function(){if(document.hidden)stopConsolePolling();else{publicStatus();if(started){startConsolePolling();refreshTabData('records')}}});")
                 .append("function wireDirty(){var f=q('#f');if(!f)return;var es=f.querySelectorAll('input,textarea,select');for(var i=0;i<es.length;i++){es[i].addEventListener('input',markDirty);es[i].addEventListener('change',markDirty)}}")
                 .append("function markDirty(){dirty=true;q('#dirtyState').textContent='有未保存修改';q('#dirtyState').style.color='var(--gold)'}function clean(){dirty=false;q('#dirtyState').textContent='已保存';q('#dirtyState').style.color='var(--ok)'}")
                 .append("function loadStatus(){api('GET','/status',null,function(d){if(!d||!d.authed){authState();return}for(var k in d){var e=q('[name=\"'+k+'\"]');if(!e)continue;var mcpTok=k.indexOf('mcpServer')===0&&k.indexOf('Token')>=0;if(e.type==='checkbox')e.checked=(d[k]===true||d[k]==='true');else if(k!=='apiKey'&&k!=='voiceApiKey'&&!mcpTok)e.value=d[k]}q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';msg('apiKeyState',d.apiKeySet?'当前 '+d.apiKeyMask:'当前未设置');msg('voiceKeyState',d.voiceApiKeySet?'当前 '+d.voiceApiKeyMask:'当前未设置');var rg=d.rootGrantStatus||{},ls=d.systemLockscreenStatus||{};msg('rootGrantActual','Magisk 数据库：'+(rg.detail||'状态未知'));msg('lockscreenActual','LockSettingsService：'+(ls.detail||'状态未知')+(ls.secureCredential?' · 检测到安全凭据':''));for(var i=1;i<=3;i++){var p='mcpServer'+i,s=q('[name='+p+'Token]');if(s)s.value='';msg(p+'TokenState',d[p+'TokenSet']?'当前 '+d[p+'TokenMask']:'当前未设置')}syncRanges();clean()})}")
@@ -677,9 +723,9 @@ public class SettingsWebServer {
                 .append("function runMcp(kind){var u=kind==='refresh'?'/mcp/refresh':'/mcp/test';msg('mcpState',kind==='refresh'?'刷新中...':'测试中...');api('POST',u,'',function(d){if(!d){msg('mcpState','无返回');return}var ts=d.tools||[],ss=d.servers||[],lines=[];for(var i=0;i<ss.length;i++){lines.push((ss[i].ok===false?'! ':'✓ ')+(ss[i].name||ss[i].id)+' · '+(ss[i].url||'')+' · 工具 '+(ss[i].toolCount||0)+(ss[i].err?(' · '+ss[i].err):''))}for(var j=0;j<ts.length;j++){lines.push('  - '+ts[j].name+' · '+(ts[j].description||''))}if(d.errors&&d.errors.length)lines.push('错误: '+d.errors.join('；'));q('#mcpTools').textContent=lines.join('\\n')||'未发现工具';msg('mcpState',d.ok?('完成 · '+ts.length+' 个工具 · '+(d.ms||0)+'ms'):(d.err||'失败'))},'application/x-www-form-urlencoded')}")
                 .append("function runMcpCall(){var n=(q('#mcpToolName').value||'').trim(),a=(q('#mcpToolArgs').value||'{}').trim();if(!n){msg('mcpCallState','请先刷新并填写工具名');return}try{JSON.parse(a)}catch(e){msg('mcpCallState','参数不是合法 JSON');return}msg('mcpCallState','调用中...');api('POST','/mcp/call',enc({toolName:n,toolArgs:a}),function(d){if(!d){msg('mcpCallState','无返回');return}q('#mcpCallResult').textContent=d.text||d.err||'';msg('mcpCallState',d.ok?('成功 · '+(d.ms||0)+'ms'):('失败 · '+(d.ms||0)+'ms'))},'application/x-www-form-urlencoded')}")
                 .append("function openTtsSelfTest(){msg('testTts','正在打开设备页面...');api('POST','/open/tts_test','',function(d){msg('testTts',d&&d.ok?'已打开设备自检页':('打开失败 '+(d&&d.err?d.err:'未知错误')))},'application/x-www-form-urlencoded')}")
-                .append("function frpcRefresh(){api('GET','/frpc/status',null,function(d){if(!d)return;msg('frpcState',d.status==='running'?'运行中':(d.status==='error'?'异常':'已停止'));msg('frpcStateDetail',d.detail?' · '+d.detail:'');var l=q('#frpcLog');if(l){l.textContent=d.log||'';l.scrollTop=l.scrollHeight}})}")
+                .append("function frpcRefresh(){api('GET','/frpc/status',null,function(d){if(!d)return;var label=d.status==='running'?'运行中':(d.status==='error'?'异常':'已停止');msg('frpcState',label);chip('ovFrpc',label,d.status==='running',d.status==='error');msg('frpcStateDetail',d.detail?' · '+d.detail:'');var l=q('#frpcLog');if(l){l.textContent=d.log||'';l.scrollTop=l.scrollHeight}})}")
                 .append("function frpcStart(){textApi('GET','/frpc/start',null,function(t){msg('frpcMsg',t);frpcRefresh()})}function frpcStop(){textApi('GET','/frpc/stop',null,function(t){msg('frpcMsg',t);frpcRefresh()})}")
-                .append("function adbStatus(){api('GET','/adb/status',null,function(d){if(!d)return;if(document.activeElement!==q('#adbPort'))q('#adbPort').value=d.port||5555;q('#adbAuto').checked=!!d.autoStart;var ap=d.activePort||d.servicePort||d.persistPort||'--',h=d.health||'checking',t=h==='healthy'?'服务正常':(h==='degraded'?'连接积压':(h==='down'?'未监听':'检测中'));msg('adbState',t);msg('adbDetail',' · 端口 '+ap+' · adbd='+(d.daemonState||'--')+' · 协议='+(d.protocolDetail||'未检测')+' · 开机同步='+(d.tunnelSynchronized?'完成':'等待')+' · 连续失败 '+(d.consecutiveFailures||0)+' · CLOSE_WAIT '+(d.closeWaitSockets||0)+' · '+(d.lastCheckDetail||'')+' · 主机状态以 adb devices 为准');var l=q('#adbLog');if(l)l.textContent=d.log||''})}")
+                .append("function adbStatus(){api('GET','/adb/status',null,function(d){if(!d)return;if(document.activeElement!==q('#adbPort'))q('#adbPort').value=d.port||5555;q('#adbAuto').checked=!!d.autoStart;var ap=d.activePort||d.servicePort||d.persistPort||'--',h=d.health||'checking',t=h==='healthy'?'服务正常':(h==='degraded'?'连接积压':(h==='down'?'未监听':'检测中'));msg('adbState',t);chip('ovAdb',t,h==='healthy',h==='degraded'||h==='down');msg('adbDetail',' · 端口 '+ap+' · adbd='+(d.daemonState||'--')+' · 协议='+(d.protocolDetail||'未检测')+' · 开机同步='+(d.tunnelSynchronized?'完成':'等待')+' · 连续失败 '+(d.consecutiveFailures||0)+' · CLOSE_WAIT '+(d.closeWaitSockets||0)+' · '+(d.lastCheckDetail||'')+' · 主机状态以 adb devices 为准');var l=q('#adbLog');if(l)l.textContent=d.log||''})}")
                 .append("function adbBody(){return enc({port:q('#adbPort').value,autoStart:q('#adbAuto').checked?'true':'false'})}function adbSave(){api('POST','/adb/save',adbBody(),function(d){msg('adbMsg',d&&d.ok?'已保存':(d&&d.err?d.err:'失败'));adbStatus()},'application/x-www-form-urlencoded')}function adbStart(){if(!confirm('启动 ADB TCP 会重启 adbd，继续？'))return;api('POST','/adb/start',adbBody(),function(d){msg('adbMsg',d&&d.ok?(d.msg||'已启动'):(d&&d.err?d.err:'失败'));adbStatus()},'application/x-www-form-urlencoded')}function adbStop(){if(!confirm('关闭 ADB TCP 会断开远程 ADB，继续？'))return;api('POST','/adb/stop','',function(d){msg('adbMsg',d&&d.ok?(d.msg||'已关闭'):(d&&d.err?d.err:'失败'));setTimeout(adbStatus,1500)},'application/x-www-form-urlencoded')}")
                 .append("function deviceReboot(){var c=prompt('设备会立即重启。输入 REBOOT DEVICE 确认：');if(c!=='REBOOT DEVICE')return;api('POST','/device/reboot',enc({confirm:c}),function(d){msg('adbMsg',d&&d.ok?'重启命令已提交':(d&&d.err?d.err:'重启失败'))},'application/x-www-form-urlencoded')}")
                 .append("function camRefresh(){api('GET','/cam/status',null,function(d){if(!d)return;msg('camState',d.status==='running'?('运行中 · '+(d.detail||'')):d.status);q('#camBtn').textContent=d.status==='running'?'停止推流':'启动推流';q('#camUrls').innerHTML=(d.rtsp?'<div>RTSP: '+esc(d.rtsp)+'</div>':'')+(d.rtmpUrl?'<div>RTMP: '+esc(d.rtmpUrl)+'</div>':'')+(d.webrtc?'<div>WebRTC: '+esc(d.webrtc)+'</div>':'')+(d.realFps?'<div>实际帧率: '+esc(d.realFps)+' fps</div>':'')})}")
@@ -688,10 +734,10 @@ public class SettingsWebServer {
                 .append("function boxAt(pos){if(pos+8>boxBuf.length)return null;var size=((boxBuf[pos]<<24)|(boxBuf[pos+1]<<16)|(boxBuf[pos+2]<<8)|boxBuf[pos+3])>>>0;var type=String.fromCharCode(boxBuf[pos+4],boxBuf[pos+5],boxBuf[pos+6],boxBuf[pos+7]);return{size:size,type:type,start:pos}}")
                 .append("function flushBoxes(my){while(true){if(!initDone){var a=boxAt(boxOff),b=boxAt(boxOff+(a?a.size:0));if(!a||!b||a.type!=='ftyp'||b.type!=='moov'||boxOff+a.size+b.size>boxBuf.length)break;pending.push(boxBuf.slice(boxOff,boxOff+a.size+b.size).buffer);boxOff+=a.size+b.size;initDone=true}else{var c=boxAt(boxOff),d=boxAt(boxOff+(c?c.size:0));if(!c||!d||c.type!=='moof'||d.type!=='mdat'||boxOff+c.size+d.size>boxBuf.length)break;pending.push(boxBuf.slice(boxOff,boxOff+c.size+d.size).buffer);boxOff+=c.size+d.size}if(boxOff===boxBuf.length){boxBuf=new Uint8Array(0);boxOff=0}pumpSb(my)}}")
                 .append("function pumpSb(my){if(my!==sess||!mse||!sb||appending||!pending.length)return;try{appending=true;sb.appendBuffer(pending.shift())}catch(e){appending=false;pending=[];if(e.name!=='InvalidStateError')msg('sstate','MSE 追加失败：'+e)}}")
-                .append("function startH264(){var video=q('#h264v'),img=q('#screen'),st=q('#sstate');if(!window.MediaSource){var sel=q('[name=streamMode]');if(sel)sel.value='mjpeg';if(video)video.style.display='none';if(img){img.src='/stream';img.style.display='block'}if(st)st.textContent='浏览器不支持 H.264 MSE，已切到 MJPEG';return}var my=++sess;boxBuf=new Uint8Array(0);boxOff=0;initDone=false;appending=false;pending=[];gotData=false;streamEnded=false;mse=new MediaSource();video.src=URL.createObjectURL(mse);mse.addEventListener('sourceopen',function(){if(my!==sess)return;var mySb=null;try{mySb=mse.addSourceBuffer('video/mp4; codecs=\\\"avc1.42E01E\\\"')}catch(e){try{mySb=mse.addSourceBuffer('video/mp4; codecs=\\\"avc1.4D401E\\\"')}catch(e2){msg('sstate','无法创建 H.264 解码器');return}}sb=mySb;mySb.mode='segments';mySb.addEventListener('updateend',function(){if(my!==sess){appending=false;pending=[];return}appending=false;pumpSb(my)});mySb.addEventListener('error',function(){if(my===sess)msg('sstate','MSE 错误：浏览器拒绝该媒体数据')});abortCtl=new AbortController();fetch(currentMode()==='h264fast'?'/h264fast':'/h264',{signal:abortCtl.signal}).then(function(r){if(my!==sess)return;if(!r.ok||!r.body){msg('sstate','推流失败 '+r.status+'，请点停止后重试');return}var reader=r.body.getReader();function step(){reader.read().then(function(res){if(my!==sess)return;if(res.done){streamEnded=true;try{video.pause()}catch(e){}msg('sstate','推流已结束（保持最后一帧）');return}var nb=new Uint8Array(boxBuf.length+res.value.length);nb.set(boxBuf,0);nb.set(res.value,boxBuf.length);boxBuf=nb;flushBoxes(my);gotData=true;if(watchdog){clearTimeout(watchdog);watchdog=null}if(st&&st.textContent.indexOf('失败')<0&&st.textContent.indexOf('错误')<0)st.textContent=initDone?'H.264 推流中':'已连接，等待首帧…';video.play().catch(function(){});step()}).catch(function(e){if(e.name!=='AbortError'&&my===sess)msg('sstate','推流中断：'+e)})}step()}).catch(function(e){if(e.name!=='AbortError'&&my===sess)msg('sstate','推流失败：'+e)});watchdog=setTimeout(function(){if(my===sess&&!gotData&&streamOn)msg('sstate','12 秒未收到数据：设备端推流可能未启动，点停止后重试')},12000)})}")
+                .append("function startH264(){var video=q('#h264v'),img=q('#screen'),st=q('#sstate');if(!window.MediaSource){var sel=q('[name=streamMode]');if(sel)sel.value='mjpeg';if(video)video.style.display='none';if(img){img.src='/stream?access='+encodeURIComponent(token);img.style.display='block'}if(st)st.textContent='浏览器不支持 H.264 MSE，已切到 MJPEG';return}var my=++sess;boxBuf=new Uint8Array(0);boxOff=0;initDone=false;appending=false;pending=[];gotData=false;streamEnded=false;mse=new MediaSource();video.src=URL.createObjectURL(mse);mse.addEventListener('sourceopen',function(){if(my!==sess)return;var mySb=null;try{mySb=mse.addSourceBuffer('video/mp4; codecs=\\\"avc1.42E01E\\\"')}catch(e){try{mySb=mse.addSourceBuffer('video/mp4; codecs=\\\"avc1.4D401E\\\"')}catch(e2){msg('sstate','无法创建 H.264 解码器');return}}sb=mySb;mySb.mode='segments';mySb.addEventListener('updateend',function(){if(my!==sess){appending=false;pending=[];return}appending=false;pumpSb(my)});mySb.addEventListener('error',function(){if(my===sess)msg('sstate','MSE 错误：浏览器拒绝该媒体数据')});abortCtl=new AbortController();fetch((currentMode()==='h264fast'?'/h264fast':'/h264')+'?access='+encodeURIComponent(token),{signal:abortCtl.signal}).then(function(r){if(my!==sess)return;if(!r.ok||!r.body){msg('sstate','推流失败 '+r.status+'，请点停止后重试');return}var reader=r.body.getReader();function step(){reader.read().then(function(res){if(my!==sess)return;if(res.done){streamEnded=true;try{video.pause()}catch(e){}msg('sstate','推流已结束（保持最后一帧）');return}var nb=new Uint8Array(boxBuf.length+res.value.length);nb.set(boxBuf,0);nb.set(res.value,boxBuf.length);boxBuf=nb;flushBoxes(my);gotData=true;if(watchdog){clearTimeout(watchdog);watchdog=null}if(st&&st.textContent.indexOf('失败')<0&&st.textContent.indexOf('错误')<0)st.textContent=initDone?'H.264 推流中':'已连接，等待首帧…';video.play().catch(function(){});step()}).catch(function(e){if(e.name!=='AbortError'&&my===sess)msg('sstate','推流中断：'+e)})}step()}).catch(function(e){if(e.name!=='AbortError'&&my===sess)msg('sstate','推流失败：'+e)});watchdog=setTimeout(function(){if(my===sess&&!gotData&&streamOn)msg('sstate','12 秒未收到数据：设备端推流可能未启动，点停止后重试')},12000)})}")
                 .append("function stopH264(){sess++;if(abortCtl){try{abortCtl.abort()}catch(e){}abortCtl=null}if(watchdog){clearTimeout(watchdog);watchdog=null}if(mse){try{mse.endOfStream()}catch(e){}mse=null;sb=null}boxBuf=new Uint8Array(0);boxOff=0;initDone=false;appending=false;pending=[];gotData=false;var v=q('#h264v');if(v){v.removeAttribute('src');try{v.load()}catch(e){}}}")
                 .append("function streamState(){if(!streamOn)return;var vv=q('#h264v'),st=q('#sstate'),m=currentMode();if(vv&&(m==='h264'||m==='h264fast')&&gotData){if(vv.videoWidth>0){if(st.textContent.indexOf('已解码')<0)st.textContent='H.264 推流中 · 已解码 '+vv.videoWidth+'x'+vv.videoHeight}else if(st.textContent.indexOf('未解码')<0&&st.textContent.indexOf('推流中')>=0){st.textContent='H.264 推流中 · 浏览器尚未解码（readyState='+vv.readyState+'）'}if(!streamEnded&&vv.paused&&gotData)vv.play().catch(function(){})}api('GET','/stream_state',null,function(d){if(!d)return;if(d.mode==='mjpeg'&&m==='mjpeg')msg('sstate','MJPEG 推流中 · '+d.fps+'fps');else if(d.mode==='idle'&&streamOn)msg('sstate','设备端预览已停止，可重试')})}")
-                .append("function toggleStream(){var img=q('#screen'),video=q('#h264v'),tp=q('#touchpad'),st=q('#sstate'),btn=q('#sbtn');streamOn=!streamOn;if(streamOn){var m=currentMode();if(tp)tp.style.display='block';if(btn)btn.textContent='停止屏幕预览';if(streamPoll)clearInterval(streamPoll);streamPoll=setInterval(streamState,1500);if(m==='mjpeg'){stopH264();if(video)video.style.display='none';if(img){img.src='/stream';img.style.display='block'}if(st)st.textContent='MJPEG 预览中'}else{if(img){img.src='';img.style.display='none'}if(video)video.style.display='block';if(st)st.textContent=m==='h264fast'?'正在启动 H.264 高速…':'正在启动 H.264…';startH264()}}else{if(streamPoll){clearInterval(streamPoll);streamPoll=null}streamEnded=true;stopH264();if(img){img.src='';img.style.display='none'}if(video)video.style.display='none';if(tp)tp.style.display='none';if(btn)btn.textContent='开始屏幕预览';if(st)st.textContent=''}}")
+                .append("function toggleStream(){var img=q('#screen'),video=q('#h264v'),tp=q('#touchpad'),st=q('#sstate'),btn=q('#sbtn');streamOn=!streamOn;if(streamOn){var m=currentMode();if(tp)tp.style.display='block';if(btn)btn.textContent='停止屏幕预览';if(streamPoll)clearInterval(streamPoll);streamPoll=setInterval(streamState,1500);if(m==='mjpeg'){stopH264();if(video)video.style.display='none';if(img){img.src='/stream?access='+encodeURIComponent(token);img.style.display='block'}if(st)st.textContent='MJPEG 预览中'}else{if(img){img.src='';img.style.display='none'}if(video)video.style.display='block';if(st)st.textContent=m==='h264fast'?'正在启动 H.264 高速…':'正在启动 H.264…';startH264()}}else{if(streamPoll){clearInterval(streamPoll);streamPoll=null}streamEnded=true;stopH264();if(img){img.src='';img.style.display='none'}if(video)video.style.display='none';if(tp)tp.style.display='none';if(btn)btn.textContent='开始屏幕预览';if(st)st.textContent=''}}")
                 .append("function keyEvent(code){textApi('GET','/key?code='+code,null,function(){msg('tstat','已发送按键 '+code);setTimeout(function(){msg('tstat','')},1200)})}")
                 .append("var tp=q('#touchpad'),td={on:false,moved:false,x:0,y:0,lx:0,ly:0,last:0};function tPos(ev){var r=tp.getBoundingClientRect(),cx=(ev.clientX-r.left)/r.width,cy=(ev.clientY-r.top)/r.height,dx=cx-.5,dy=cy-.5;if(dx*dx+dy*dy>.25)return null;return{x:Math.max(0,Math.min(800,Math.round(cx*800))),y:Math.max(0,Math.min(800,Math.round(cy*800)))}}function tSend(qs){textApi('GET','/touch?'+qs,null,function(){})}if(tp){tp.addEventListener('pointerdown',function(ev){ev.preventDefault();var p=tPos(ev);if(!p)return;td.on=true;td.moved=false;td.x=p.x;td.y=p.y;td.lx=p.x;td.ly=p.y;td.last=0});tp.addEventListener('pointermove',function(ev){ev.preventDefault();if(!td.on)return;var p=tPos(ev);if(!p)return;if(!td.moved&&Math.abs(p.x-td.x)+Math.abs(p.y-td.y)<10)return;td.moved=true;var now=Date.now();if(now-td.last>70){tSend('act=move&x='+p.x+'&y='+p.y+'&px='+td.lx+'&py='+td.ly);td.lx=p.x;td.ly=p.y;td.last=now}});function tend(){if(!td.on)return;td.on=false;if(!td.moved)tSend('act=tap&x='+td.x+'&y='+td.y)}tp.addEventListener('pointerup',tend);tp.addEventListener('pointercancel',tend)}")
                 .append("function fsBody(){return enc({id:q('#fsId').value,name:q('#fsName').value,type:q('#fsType').value,host:q('#fsHost').value,port:q('#fsPort').value,user:q('#fsUser').value,pass:q('#fsPass').value,root:q('#fsRoot').value,domain:q('#fsDomain').value})}")
@@ -898,7 +944,7 @@ public class SettingsWebServer {
                 + "<span id='camMsg'></span></div>"
                 + "<div style='color:#8a8272;font-size:11px'>状态：<span id='camState'>未知</span>"
                 + "<div id='camUrls' style='margin-top:4px'></div></div>"
-                + "<div style='color:#8a8272;font-size:11px'>RTSP 用 VLC 等播放 <b>rtsp://127.0.0.1:端口/cam</b>（本机可直接访问；远程访问请走 frpc）；网页播放 <a href='/cam' target='_blank' style='color:#d4af37'>点这里打开摄像头直播页</a>。已实测：720p 可达，摄像头回调硬件上限 16fps（60/30fps 目标自动降级），码率 VBR 最高按设置值。状态区会显示实际帧率。</div>"
+                + "<div style='color:#8a8272;font-size:11px'>RTSP 用 VLC 等播放 <b>rtsp://127.0.0.1:端口/cam</b>（本机可直接访问；远程访问请走 frpc）；网页播放 <a href='#' onclick=\"window.open('/cam?access='+encodeURIComponent(token),'_blank');return false;\" style='color:#d4af37'>点这里打开摄像头直播页</a>。已实测：720p 可达，摄像头回调硬件上限 16fps（60/30fps 目标自动降级），码率 VBR 最高按设置值。状态区会显示实际帧率。</div>"
                 + "</fieldset>"
                 + "<fieldset><legend>内网穿透 frpc</legend>"
                 + "<div class='row'><label style='width:100%'>frpc.toml 配置（保存后生效）</label></div>"
@@ -915,7 +961,7 @@ public class SettingsWebServer {
                 + "<pre id='frpcLog' style='background:#171512;border:1px solid #6b5a2e;border-radius:10px;padding:8px;max-height:200px;overflow-y:auto;font-size:11px;white-space:pre-wrap;color:#8fbf6a'></pre>"
                 + "</fieldset>"
                 + "<fieldset><legend>对话记录</legend>"
-                + "<div class='row'><label>大小上限(KB)</label><input type='text' name='convMaxKb'></div>"
+                + "<div class='row'><label>大小上限(KB)</label><input type='text' name='convMaxKb' placeholder='4096'> </div>"
                 + "<div class='row'><label>清理间隔(分钟)</label><input type='text' name='convCleanMin'>"
                 + "<div style='color:#8a8272;font-size:11px;margin-left:114px'>0=关闭定时清理（超出上限时写入仍会自动裁剪）</div></div>"
                 + "<div style='text-align:center'><button type='button' onclick='clearConv()'>清空记录</button><span id='convMsg'></span></div>"
@@ -1252,7 +1298,7 @@ public class SettingsWebServer {
         }
     }
 
-    private static void serveCamPage(OutputStream out) throws IOException {
+    private static void serveCamPage(OutputStream out, String target) throws IOException {
         String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>真理罗盘 · 摄像头</title>"
                 + "<style>body{background:#0d0b08;color:#e8dcc0;font-family:sans-serif;text-align:center;margin:0;padding:20px}"
                 + "h1{color:#d4af37;font-size:18px}"
@@ -1267,6 +1313,8 @@ public class SettingsWebServer {
                 + "<button type='button' onclick='startWr()'>WebRTC（实验）</button></div>"
                 + "<div style='margin-top:6px;font-size:11px;color:#8a8272'>MSE = H.264 实时流（默认，兼容好）；WebRTC 在这台 MT6580 上硬编兼容性有限，失败时用 MSE 或 RTSP</div>"
                 + "<script>"
+                + "var access=(location.search.match(/[?&]access=([^&]*)/)||[])[1]||'';try{access=decodeURIComponent(access);}catch(e){}"
+                + "function authUrl(u){return u+(u.indexOf('?')>=0?'&':'?')+'access='+encodeURIComponent(access);}"
                 + "var v=document.getElementById('v'),st=document.getElementById('st');"
                 + "var mse=null,sb=null,abortCtl=null,boxBuf=new Uint8Array(0),boxOff=0,initDone=false,appending=false,pending=[];"
                 + "function boxAt(pos){if(pos+8>boxBuf.length)return null;"
@@ -1296,7 +1344,7 @@ public class SettingsWebServer {
                 + "catch(e2){st.textContent='无法创建解码器';return;}}"
                 + "sb.addEventListener('updateend',pumpSb);"
                 + "abortCtl=new AbortController();"
-                + "fetch('/camhttp',{signal:abortCtl.signal}).then(function(r){"
+                + "fetch(authUrl('/camhttp'),{signal:abortCtl.signal}).then(function(r){"
                 + "if(!r.ok||!r.body){st.textContent='连接失败 '+r.status;return;}"
                 + "var reader=r.body.getReader();"
                 + "function step(){reader.read().then(function(res){"
@@ -1316,10 +1364,10 @@ public class SettingsWebServer {
                 + "(async function(){try{pc.addTransceiver('video',{direction:'recvonly'});"
                 + "var offer=await pc.createOffer();await pc.setLocalDescription(offer);"
                 + "while(pc.iceGatheringState!=='complete'){await sleep(200);}"
-                + "var r=await fetch('/cam/offer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sdp:pc.localDescription.sdp})});"
+                + "var r=await fetch(authUrl('/cam/offer'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sdp:pc.localDescription.sdp})});"
                 + "var ok=await r.text();if(ok!=='true'){st.textContent='设备拒绝连接';return;}"
                 + "st.textContent='等待设备应答…';var ans=null;"
-                + "for(var i=0;i<80;i++){var r2=await fetch('/cam/answer');var d=await r2.json();"
+                + "for(var i=0;i<80;i++){var r2=await fetch(authUrl('/cam/answer'));var d=await r2.json();"
                 + "if(d&&d.sdp){ans=d;break;}await sleep(500);}"
                 + "if(!ans){st.textContent='设备无应答（WebRTC 不可用）';return;}"
                 + "await pc.setRemoteDescription(ans);"
@@ -1439,11 +1487,11 @@ public class SettingsWebServer {
             o.put("uaDesktop", Prefs.getB(app, Prefs.K_UA_DESKTOP, false));
             o.put("noImages", Prefs.getB(app, Prefs.K_NO_IMAGES, false));
             o.put("browserRoundFit", Prefs.getB(app, Prefs.K_BROWSER_ROUND_FIT, true));
-            o.put("convMaxKb", String.valueOf(Prefs.getI(app, Prefs.K_CONV_MAX_KB, 1024)));
+            o.put("convMaxKb", String.valueOf(ConversationLog.maxKb(app)));
             o.put("convCleanMin", String.valueOf(Prefs.getI(app, Prefs.K_CONV_CLEAN_MIN, 60)));
             o.put("debugMode", Prefs.getB(app, Prefs.K_DEBUG_MODE, false));
             o.put(Prefs.K_VOICE_DIAGNOSTIC_OVERLAYS, Prefs.voiceDiagnosticOverlays(app));
-            o.put("debugMaxKb", String.valueOf(Prefs.getI(app, Prefs.K_DEBUG_MAX_KB, 4096)));
+            o.put("debugMaxKb", String.valueOf(DebugLog.maxKb(app)));
             o.put("sysPromptVoice", Prefs.get(app, Prefs.K_SYS_PROMPT_VOICE, Prefs.DEFAULT_SYS_PROMPT_VOICE));
             o.put("sysPromptVision", Prefs.get(app, Prefs.K_SYS_PROMPT_VISION, Prefs.DEFAULT_SYS_PROMPT_VISION));
             o.put("streamMode", normalizeStreamMode(Prefs.get(app, Prefs.K_STREAM_MODE, "h264")));
@@ -1453,6 +1501,7 @@ public class SettingsWebServer {
             o.put("streamBitrate", String.valueOf(Prefs.getI(app, Prefs.K_STREAM_BITRATE, 1500)));
             o.put("mainRenderer", Prefs.mainRenderer(app));
             o.put("mainFpsMode", Prefs.mainFpsMode(app));
+            o.put(Prefs.K_SCREEN_POLICY, Prefs.screenPolicy(app));
             o.put(Prefs.K_ROOT_GRANT_NOTIFICATIONS, Prefs.rootGrantNotifications(app));
             o.put(Prefs.K_SYSTEM_LOCKSCREEN_ENABLED, Prefs.systemLockscreenEnabled(app));
             o.put(Prefs.K_LOW_BATTERY_SOUND, Prefs.lowBatterySoundEnabled(app));
@@ -1520,6 +1569,9 @@ public class SettingsWebServer {
                     Prefs.put(app, k, Prefs.normalizeMainRenderer(v));
                 } else if (k.equals(Prefs.K_MAIN_FPS_MODE)) {
                     Prefs.put(app, k, Prefs.normalizeMainFpsMode(v));
+                } else if (k.equals(Prefs.K_SCREEN_POLICY)) {
+                    Prefs.put(app, k, Prefs.screenPolicyValue(v));
+                    com.magneo.compass.MainActivity.applyScreenPolicyToActive();
                 } else if (k.equals(Prefs.K_LOC_SOURCE)) {
                     Prefs.put(app, k, Prefs.normalizeLocSource(v));
                     syncRuntimeGpsSource();
@@ -1539,11 +1591,11 @@ public class SettingsWebServer {
                 } else if (k.equals(Prefs.K_STREAM_MODE)) {
                     Prefs.put(app, k, normalizeStreamMode(v));
                 } else if (k.equals("convMaxKb")) {
-                    try { Prefs.putI(app, k, Math.max(100, Math.min(20480, Integer.parseInt(v)))); } catch (Exception ignored) {}
+                    try { Prefs.putI(app, k, Math.max(100, Math.min(4096, Integer.parseInt(v)))); } catch (Exception ignored) {}
                 } else if (k.equals("convCleanMin")) {
                     try { Prefs.putI(app, k, Math.max(0, Math.min(1440, Integer.parseInt(v)))); } catch (Exception ignored) {}
                 } else if (k.equals(Prefs.K_DEBUG_MAX_KB)) {
-                    try { Prefs.putI(app, k, Math.max(256, Math.min(20480, Integer.parseInt(v)))); } catch (Exception ignored) {}
+                    try { Prefs.putI(app, k, Math.max(256, Math.min(4096, Integer.parseInt(v)))); } catch (Exception ignored) {}
                 } else if (k.equals(Prefs.K_MCP_MAX_TOOL_ROUNDS)) {
                     try { Prefs.putI(app, k, Math.max(0, Math.min(6, Integer.parseInt(v)))); } catch (Exception ignored) {}
                 } else if (k.equals(Prefs.K_MCP_SLOW_HINT_MS)) {
@@ -2271,7 +2323,7 @@ public class SettingsWebServer {
         try {
             o.put("entries", ConversationLog.readTail(app, 250, 160 * 1024));
             o.put("sizeKb", ConversationLog.size(app) / 1024L);
-            o.put("maxKb", Prefs.getI(app, Prefs.K_CONV_MAX_KB, 1024));
+            o.put("maxKb", ConversationLog.maxKb(app));
             o.put("cleanMin", Prefs.getI(app, Prefs.K_CONV_CLEAN_MIN, 60));
         } catch (Exception ignored) {}
         byte[] b = o.toString().getBytes("UTF-8");
@@ -2293,7 +2345,7 @@ public class SettingsWebServer {
             o.put("enabled", Prefs.getB(app, Prefs.K_DEBUG_MODE, false));
             o.put("entries", DebugLog.readTail(app, 320, 384 * 1024));
             o.put("sizeKb", DebugLog.size(app) / 1024L);
-            o.put("maxKb", Prefs.getI(app, Prefs.K_DEBUG_MAX_KB, 4096));
+            o.put("maxKb", DebugLog.maxKb(app));
         } catch (Exception e) {
             putErr(o, e.getMessage());
         }
@@ -2332,6 +2384,19 @@ public class SettingsWebServer {
             o.put("mainRenderer", Prefs.mainRenderer(app));
             o.put("mainFpsMode", Prefs.mainFpsMode(app));
             o.put("temps", readTemps());
+            LoadInfo load = readLoadInfo();
+            o.put("loadAvg1", load.one);
+            o.put("loadAvg5", load.five);
+            o.put("loadAvg15", load.fifteen);
+            o.put("runnable", load.runnable);
+            o.put("loadThreads", load.totalTasks);
+            o.put("blockedThreads", readBlockedTaskCount());
+            o.put("appThreads", readSelfThreadCount());
+            o.put("uptimeMs", android.os.SystemClock.elapsedRealtime());
+            o.put("wifiScanAgeMs", com.magneo.compass.WifiLocator.scanAgeMs());
+            o.put("wifiResultAgeMs", com.magneo.compass.WifiLocator.resultAgeMs());
+            o.put("conversationBytes", ConversationLog.size(app));
+            o.put("debugBytes", DebugLog.size(app));
             com.magneo.compass.SensorHub h = com.magneo.compass.SensorHub.instance;
             String locSource = Prefs.locSource(app);
             String gpsTxt = "定位关闭";
@@ -2575,6 +2640,7 @@ public class SettingsWebServer {
         byte[] b = "ok".getBytes("UTF-8");
         writeHead(out, "text/plain; charset=utf-8", b.length);
         out.write(b);
+        com.magneo.compass.MainActivity.wakeScreenForInteractionActive();
         int key = parseBoundedInt(code, -1, 0, 300);
         if (key >= 0) runRoot("input keyevent " + key);
     }
@@ -2585,6 +2651,7 @@ public class SettingsWebServer {
         byte[] b = "ok".getBytes("UTF-8");
         writeHead(out, "text/plain; charset=utf-8", b.length);
         out.write(b);
+        com.magneo.compass.MainActivity.wakeScreenForInteractionActive();
         int ix = parseBoundedInt(x, -1, 0, 800);
         int iy = parseBoundedInt(y, -1, 0, 800);
         if (act == null || ix < 0 || iy < 0) return;
@@ -2660,6 +2727,81 @@ public class SettingsWebServer {
             lastCpuPct = smooth(raw, cpuSmooth, cpuSmoothState);
             return lastCpuPct;
         } catch (Exception e) { return lastCpuPct; }
+    }
+
+    private static final class LoadInfo {
+        final String one, five, fifteen;
+        final int runnable, totalTasks;
+        LoadInfo(String one, String five, String fifteen, int runnable, int totalTasks) {
+            this.one = one;
+            this.five = five;
+            this.fifteen = fifteen;
+            this.runnable = runnable;
+            this.totalTasks = totalTasks;
+        }
+    }
+
+    private static LoadInfo readLoadInfo() {
+        String s = readFile("/proc/loadavg", 256);
+        if (s == null || s.trim().isEmpty()) return new LoadInfo("--", "--", "--", -1, -1);
+        String[] p = s.trim().split("\\s+");
+        String tasks = p.length > 3 ? p[3] : "";
+        int slash = tasks.indexOf('/');
+        int runnable = parseHealthInt(slash > 0 ? tasks.substring(0, slash) : "", -1);
+        int total = parseHealthInt(slash > 0 && slash + 1 < tasks.length()
+                ? tasks.substring(slash + 1) : "", -1);
+        return new LoadInfo(p.length > 0 ? p[0] : "--", p.length > 1 ? p[1] : "--",
+                p.length > 2 ? p[2] : "--", runnable, total);
+    }
+
+    private static int parseHealthInt(String value, int fallback) {
+        try { return Integer.parseInt(value.trim()); } catch (Exception ignored) { return fallback; }
+    }
+
+    private static long procHealthAt;
+    private static int cachedBlockedTasks = -1;
+    private static synchronized int readBlockedTaskCount() {
+        long now = System.currentTimeMillis();
+        if (now - procHealthAt < 15000L) return cachedBlockedTasks;
+        procHealthAt = now;
+        int count = 0;
+        try {
+            File proc = new File("/proc");
+            File[] processes = proc.listFiles();
+            if (processes != null) {
+                for (File process : processes) {
+                    if (!isNumeric(process.getName())) continue;
+                    File taskDir = new File(process, "task");
+                    File[] tasks = taskDir.listFiles();
+                    if (tasks == null) continue;
+                    for (File task : tasks) {
+                        String stat = readFile(new File(task, "stat").getAbsolutePath(), 1024);
+                        if (stat != null) {
+                            int end = stat.lastIndexOf(')');
+                            if (end >= 0 && end + 2 < stat.length() && stat.charAt(end + 2) == 'D') count++;
+                        }
+                        if (count >= 999) return cachedBlockedTasks = count;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return cachedBlockedTasks = count;
+    }
+
+    private static int readSelfThreadCount() {
+        try {
+            File[] files = new File("/proc/self/task").listFiles();
+            return files == null ? -1 : files.length;
+        } catch (Exception e) { return -1; }
+    }
+
+    private static boolean isNumeric(String value) {
+        if (value == null || value.isEmpty()) return false;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c < '0' || c > '9') return false;
+        }
+        return true;
     }
 
     private static long[] readCpuTicks() throws Exception {

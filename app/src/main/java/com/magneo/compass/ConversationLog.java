@@ -8,7 +8,6 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.RandomAccessFile;
 import java.text.SimpleDateFormat;
@@ -22,7 +21,8 @@ import java.util.concurrent.TimeUnit;
 public class ConversationLog {
     private static final String TAG = "ConversationLog";
     private static final String FILE = "conversations.log";
-    private static final int DEFAULT_MAX_KB = 1024;   // 默认上限 1MB
+    private static final int DEFAULT_MAX_KB = 4096;   // 默认上限 4MB；轮转总量约 12MB
+    private static final int HARD_MAX_KB = 4096;      // MT6580 上单文件硬上限 4MB
     private static final int DEFAULT_CLEAN_MIN = 60;  // 默认每 60 分钟检查一次
 
     private static volatile ScheduledExecutorService cleaner;
@@ -54,51 +54,61 @@ public class ConversationLog {
         }
     }
 
-    /** 大小超限时丢弃旧记录，保留最新约一半容量。 */
+    /** 大小超限时轮转文件，避免把整个日志读入内存再重写。 */
     private static void enforceLimit(Context c, File f) {
-        int maxKb = clamp(Prefs.getI(c, Prefs.K_CONV_MAX_KB, DEFAULT_MAX_KB), 100, 20480);
+        int maxKb = effectiveMaxKb(c);
         long max = maxKb * 1024L;
         if (!f.exists() || f.length() <= max) return;
-        long keep = Math.max(64L * 1024, max / 2);
         try {
-            byte[] all = readBytes(f);
-            String s = new String(all, "UTF-8");
-            String[] lines = s.split("\n", -1);
-            StringBuilder sb = new StringBuilder();
-            for (int i = lines.length - 1; i >= 0 && sb.length() < keep; i--) {
-                String l = lines[i];
-                if (l.trim().isEmpty()) continue;
-                sb.insert(0, l + "\n");
+            File first = new File(f.getParentFile(), FILE + ".1");
+            File second = new File(f.getParentFile(), FILE + ".2");
+            if (first.exists()) {
+                if (second.exists()) second.delete();
+                first.renameTo(second);
+                if (second.exists() && second.length() > max) trimTailInPlace(second, max);
             }
-            byte[] b = sb.toString().getBytes("UTF-8");
-            File tmp = new File(c.getFilesDir(), FILE + ".tmp");
-            FileOutputStream out = new FileOutputStream(tmp);
-            try { out.write(b); } finally { out.close(); }
-            if (!tmp.renameTo(f)) {
-                FileOutputStream o2 = new FileOutputStream(f);
-                try { o2.write(b); } finally { o2.close(); }
-                //noinspection ResultOfMethodCallIgnored
-                tmp.delete();
+            if (!f.renameTo(first)) {
+                // 极少数文件系统不允许 rename 时只保留安全尾部，仍不读入整文件。
+                trimTailInPlace(f, max);
+            } else if (first.exists() && first.length() > max) {
+                trimTailInPlace(first, max);
             }
         } catch (Exception e) {
             Log.w(TAG, "enforceLimit", e);
         }
     }
 
-    /** 读取全部记录，返回 JSONArray（旧→新）。 */
-    public static JSONArray read(Context c) {
-        JSONArray arr = new JSONArray();
+    private static int effectiveMaxKb(Context c) {
+        return clamp(Prefs.getI(c, Prefs.K_CONV_MAX_KB, DEFAULT_MAX_KB), 100, HARD_MAX_KB);
+    }
+
+    /** 仅在 rename 不可用时使用固定大小窗口，窗口内仍不会构造整文件字符串。 */
+    private static void trimTailInPlace(File f, long keep) throws Exception {
+        long start = Math.max(0L, f.length() - keep);
+        File tmp = new File(f.getParentFile(), FILE + ".tmp");
+        RandomAccessFile in = new RandomAccessFile(f, "r");
         try {
-            byte[] all = readBytes(file(c.getApplicationContext()));
-            String s = new String(all, "UTF-8");
-            for (String line : s.split("\n", -1)) {
-                if (line.trim().isEmpty()) continue;
-                try { arr.put(new JSONObject(line)); } catch (Exception ignored) {}
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "read", e);
+            in.seek(start);
+            if (start > 0) in.readLine();
+            FileOutputStream out = new FileOutputStream(tmp, false);
+            try {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            } finally { out.close(); }
+        } finally { in.close(); }
+        if (!tmp.renameTo(f)) {
+            FileOutputStream out = new FileOutputStream(f, false);
+            try {
+                FileInputStreamCompat.copy(tmp, out);
+            } finally { out.close(); }
+            tmp.delete();
         }
-        return arr;
+    }
+
+    /** 读取有限的最新记录，避免历史调用者把大文件整体载入低内存设备。 */
+    public static JSONArray read(Context c) {
+        return readTail(c, 500, 256 * 1024);
     }
 
     /** Read a bounded tail for the Web console; never materialize a multi-MB log. */
@@ -134,7 +144,10 @@ public class ConversationLog {
     }
 
     public static long size(Context c) {
-        try { return file(c.getApplicationContext()).length(); } catch (Exception e) { return 0; }
+        try {
+            File dir = c.getApplicationContext().getFilesDir();
+            return length(dir, FILE) + length(dir, FILE + ".1") + length(dir, FILE + ".2");
+        } catch (Exception e) { return 0; }
     }
 
     public static void clear(Context c) {
@@ -143,6 +156,9 @@ public class ConversationLog {
             synchronized (ConversationLog.class) {
                 //noinspection ResultOfMethodCallIgnored
                 f.delete();
+                new File(f.getParentFile(), FILE + ".1").delete();
+                new File(f.getParentFile(), FILE + ".2").delete();
+                new File(f.getParentFile(), FILE + ".tmp").delete();
             }
         } catch (Exception ignored) {}
     }
@@ -151,6 +167,7 @@ public class ConversationLog {
     public static void startCleaner(Context c) {
         if (cleaner != null) return;
         final Context ac = c.getApplicationContext();
+        migrateMaxSetting(ac);
         lastCleanAt = System.currentTimeMillis();
         cleaner = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "conv-cleaner");
@@ -177,20 +194,29 @@ public class ConversationLog {
         return Math.max(lo, Math.min(hi, v));
     }
 
-    private static byte[] readBytes(File f) throws Exception {
-        if (!f.exists() || f.length() == 0) return new byte[0];
-        FileInputStream in = new FileInputStream(f);
-        try {
-            byte[] b = new byte[(int) Math.min(f.length(), Integer.MAX_VALUE)];
-            int off = 0;
-            while (off < b.length) {
-                int n = in.read(b, off, b.length - off);
-                if (n < 0) break;
-                off += n;
-            }
-            return off == b.length ? b : java.util.Arrays.copyOf(b, off);
-        } finally {
-            in.close();
+    public static int maxKb(Context c) {
+        return effectiveMaxKb(c);
+    }
+
+    private static void migrateMaxSetting(Context c) {
+        int configured = Prefs.getI(c, Prefs.K_CONV_MAX_KB, DEFAULT_MAX_KB);
+        if (configured > HARD_MAX_KB) Prefs.putI(c, Prefs.K_CONV_MAX_KB, HARD_MAX_KB);
+    }
+
+    private static long length(File dir, String name) {
+        File f = new File(dir, name);
+        return f.exists() ? f.length() : 0L;
+    }
+
+    /** Small streaming copy helper kept local for Android 5.1 compatibility. */
+    private static final class FileInputStreamCompat {
+        static void copy(File source, FileOutputStream out) throws Exception {
+            java.io.FileInputStream in = new java.io.FileInputStream(source);
+            try {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            } finally { in.close(); }
         }
     }
 }

@@ -92,6 +92,8 @@ public class CompassView extends View {
     private boolean effectFrameScheduled;
     private boolean attached;
     private long chargingEffectStartedAtMs;
+    private long timeRitualSlot = Long.MIN_VALUE;
+    private long timeRitualStartedAtMs;
 
     private final VoiceVisualState.Listener voiceVisualListener =
             new VoiceVisualState.Listener() {
@@ -222,11 +224,17 @@ public class CompassView extends View {
         Calendar now = Calendar.getInstance();
         int hourZhi = currentHourZhi(now);
         int hourGan = currentHourGan(now, hourZhi);
+        updateTimeRitual(now, !detailMode && !dragging);
         drawStaticLayer(canvas, cx, cy, rMax, scale, hourZhi, hourGan);
+        if (!detailMode) drawNightDim(canvas, cx, cy, rMax, TimeRitual.isNight(now));
         if (highlight >= 0) drawSectorHighlight(canvas, cx, cy, rMax, scale, highlight);
         drawBatteryRing(canvas, cx, cy, rMax, scale);
         drawCompassRing(canvas, cx, cy, rMax * 0.55f, az, scale);
         drawClock(canvas, cx, cy, rMax * 0.36f, scale, now);
+        if (!detailMode && !dragging) {
+            drawTimeRitualPulse(canvas, cx, cy, rMax, scale, hourZhi, hourGan,
+                    TimeRitual.isNight(now));
+        }
 
         if (dragging && previewIdx >= 0) drawCenterPreview(canvas, cx, cy, rMax, scale);
         else if (detailMode) drawDetail(canvas, cx, cy, scale);
@@ -287,6 +295,7 @@ public class CompassView extends View {
 
     private boolean hasAnimatedEffect(VoiceVisualState.Snapshot visual) {
         return isChargingAnimationActive()
+                || (!glMainMode && !dragging && !detailMode && isTimeRitualActive())
                 || (!dragging && !detailMode && visual != null
                 && visual.phase != VoiceVisualPhase.IDLE);
     }
@@ -319,6 +328,72 @@ public class CompassView extends View {
 
     private int a(int color, int alpha) {
         return (color & 0x00FFFFFF) | (Math.max(0, Math.min(255, alpha)) << 24);
+    }
+
+    private void updateTimeRitual(Calendar now, boolean animate) {
+        long slot = TimeRitual.slotKey(now);
+        if (timeRitualSlot == Long.MIN_VALUE) {
+            timeRitualSlot = slot;
+            return;
+        }
+        if (slot == timeRitualSlot) return;
+        timeRitualSlot = slot;
+        timeRitualStartedAtMs = animate ? SystemClock.uptimeMillis() : 0L;
+        if (animate) wakeEffectAnimation();
+    }
+
+    private boolean isTimeRitualActive() {
+        return timeRitualStartedAtMs > 0L
+                && SystemClock.uptimeMillis() - timeRitualStartedAtMs < TimeRitual.PULSE_MS;
+    }
+
+    private float timeRitualProgress() {
+        if (timeRitualStartedAtMs <= 0L) return 1f;
+        long elapsed = SystemClock.uptimeMillis() - timeRitualStartedAtMs;
+        return Math.max(0f, Math.min(1f, elapsed / (float) TimeRitual.PULSE_MS));
+    }
+
+    private void drawNightDim(Canvas c, float cx, float cy, float rMax, boolean night) {
+        if (!night) return;
+        pFill.setStyle(Paint.Style.FILL);
+        pFill.setColor(Color.argb(24, 0, 0, 0));
+        c.drawCircle(cx, cy, rMax, pFill);
+    }
+
+    private void drawTimeRitualPulse(Canvas c, float cx, float cy, float rMax, float s,
+                                      int hourZhi, int hourGan, boolean night) {
+        if (!isTimeRitualActive()) return;
+        float progress = timeRitualProgress();
+        float glow = (float) Math.sin(Math.PI * progress);
+        if (night) glow *= 0.88f;
+
+        float zhiOuter = rMax * 0.865f;
+        float zhiInner = rMax * 0.715f;
+        float zhiRadius = (zhiOuter + zhiInner) * 0.5f;
+        float zhiStart = hourZhi * 30f - 90f + 2f;
+        tmpRectA.set(cx - zhiRadius, cy - zhiRadius, cx + zhiRadius, cy + zhiRadius);
+        pStroke.setStyle(Paint.Style.STROKE);
+        pStroke.setStrokeCap(Paint.Cap.ROUND);
+        pStroke.setColor(a(C_GOLD, (int) (76f + 150f * glow)));
+        pStroke.setStrokeWidth((2.3f + 2.0f * glow) * s);
+        c.drawArc(tmpRectA, zhiStart, 26f, false, pStroke);
+
+        float ganOuter = zhiInner;
+        float ganInner = rMax * 0.610f;
+        float ganRadius = (ganOuter + ganInner) * 0.5f;
+        float ganStart = hourGan * 36f - 90f + 3f;
+        tmpRectB.set(cx - ganRadius, cy - ganRadius, cx + ganRadius, cy + ganRadius);
+        pStroke.setColor(a(C_GOLD, (int) (48f + 112f * glow)));
+        pStroke.setStrokeWidth((1.5f + 1.15f * glow) * s);
+        c.drawArc(tmpRectB, ganStart, 30f, false, pStroke);
+
+        float spread = 0.07f * progress;
+        float ringRadius = rMax * (0.31f + spread);
+        tmpRectC.set(cx - ringRadius, cy - ringRadius, cx + ringRadius, cy + ringRadius);
+        pStroke.setStrokeCap(Paint.Cap.BUTT);
+        pStroke.setColor(a(C_GOLD, (int) (88f * (1f - progress))));
+        pStroke.setStrokeWidth(1.45f * s);
+        c.drawArc(tmpRectC, 0f, 360f, false, pStroke);
     }
 
     private int blend(int from, int to, float t) {
@@ -624,20 +699,11 @@ public class CompassView extends View {
     }
 
     private int currentHourZhi(Calendar cal) {
-        int hour = cal.get(Calendar.HOUR_OF_DAY);
-        return ((hour + 1) / 2) % 12;
+        return TimeRitual.hourZhi(cal);
     }
 
     private int currentHourGan(Calendar cal, int hourZhi) {
-        int year = cal.get(Calendar.YEAR);
-        int month = cal.get(Calendar.MONTH) + 1;
-        int day = cal.get(Calendar.DAY_OF_MONTH);
-        int a = (14 - month) / 12;
-        int y2 = year + 4800 - a;
-        int m = month + 12 * a - 3;
-        int jdn = day + (153 * m + 2) / 5 + 365 * y2 + y2 / 4 - y2 / 100 + y2 / 400 - 32045;
-        int dayGan = ((jdn + 9) % 10 + 10) % 10;
-        return ((dayGan % 5) * 2 + hourZhi) % 10;
+        return TimeRitual.hourGan(cal, hourZhi);
     }
 
     /** 天干地支环：保留术数信息，但压低对比度，让它成为外圈导航和中心罗盘之间的辅助纹理。 */

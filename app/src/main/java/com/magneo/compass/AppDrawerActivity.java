@@ -9,7 +9,9 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.text.TextUtils;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
@@ -30,6 +32,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -37,6 +40,8 @@ import java.util.Set;
  * 应用循环替换、中心显示当前应用；松手自动对齐。优先应用排在最前。
  */
 public class AppDrawerActivity extends BaseActivity {
+
+    private static final String TAG = "AppDrawer";
 
     private static final int SLOTS = 8;
     private static final float SLOT_DEG = 45f;
@@ -55,6 +60,19 @@ public class AppDrawerActivity extends BaseActivity {
         final int[] idx = new int[SLOTS];
         int nextForward;
         int nextBackward;
+        final List<StepRecord> history = new ArrayList<>();
+    }
+
+    private static class StepRecord {
+        final int direction;
+        final int removed;
+        final int added;
+
+        StepRecord(int direction, int removed, int added) {
+            this.direction = direction;
+            this.removed = removed;
+            this.added = added;
+        }
     }
 
     private final List<App> all = new ArrayList<>();
@@ -63,51 +81,20 @@ public class AppDrawerActivity extends BaseActivity {
     private ImageView centerIcon;
     private TextView centerLabel;
     private App currentApp;
+    private String launcherStateFingerprint = "";
+    private long lastLaunchAt;
 
     private final int[] slotIdx = new int[SLOTS];
     private int nextForward = 0;
     private int nextBackward = 0;
     private int lastPreviewStep = 0;
+    private final List<StepRecord> stepHistory = new ArrayList<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         loadPinned();
-
-        PackageManager pm = getPackageManager();
-        Intent main = new Intent(Intent.ACTION_MAIN);
-        main.addCategory(Intent.CATEGORY_LAUNCHER);
-        List<ResolveInfo> list = pm.queryIntentActivities(main, 0);
-        List<App> found = new ArrayList<>();
-        List<App> rest = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        for (ResolveInfo ri : list) {
-            if (ri.activityInfo == null) continue;
-            App a = new App();
-            a.pkg = ri.activityInfo.packageName;
-            if (!seen.add(a.pkg)) continue;
-            a.label = ri.loadLabel(pm).toString();
-            a.icon = ri.loadIcon(pm);
-            Intent i = new Intent(Intent.ACTION_MAIN);
-            i.addCategory(Intent.CATEGORY_LAUNCHER);
-            i.setClassName(a.pkg, ri.activityInfo.name);
-            a.launch = i;
-            found.add(a);
-        }
-        for (String pkg : pinned) {
-            for (App a : found) {
-                if (a.pkg.equals(pkg)) {
-                    all.add(a);
-                    break;
-                }
-            }
-        }
-        for (App a : found) {
-            if (!pinned.contains(a.pkg)) rest.add(a);
-        }
-        Collections.sort(rest, Comparator.comparing(a -> a.label));
-        all.addAll(rest);
-        initSlots();
+        refreshLauncherApps(true);
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(10, 10, 10));
@@ -154,6 +141,139 @@ public class AppDrawerActivity extends BaseActivity {
         ring.post(this::renderRing);
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // The drawer can remain alive while another app is installed. Re-query when
+        // it becomes visible again instead of relying on the old onCreate snapshot.
+        refreshLauncherApps(false);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasWindowFocus) {
+        super.onWindowFocusChanged(hasWindowFocus);
+        if (hasWindowFocus) refreshLauncherApps(false);
+    }
+
+    /**
+     * Rebuilds the stable launcher list only when packages/components or pinned order changed.
+     * A label/icon update alone does not reset the carousel state.
+     */
+    private void refreshLauncherApps(boolean force) {
+        loadPinned();
+        List<App> found = scanLauncherApps();
+        String fingerprint = launcherStateFingerprint(found);
+        if (!force && fingerprint.equals(launcherStateFingerprint)) return;
+
+        all.clear();
+        appendPinnedApps(found);
+        appendOtherApps(found);
+        launcherStateFingerprint = fingerprint;
+        initSlots();
+
+        String first = firstPackages(all, 12);
+        Log.i(TAG, "launcher scan count=" + all.size() + " pinned=" + pinned.size()
+                + " first=" + first);
+        DebugLog.append(this, "apps.launcher_scan", "count=" + all.size()
+                + " pinned=" + pinned.size() + " first=" + first);
+
+        if (ring != null) ring.post(this::renderRing);
+    }
+
+    private List<App> scanLauncherApps() {
+        PackageManager pm = getPackageManager();
+        Intent main = new Intent(Intent.ACTION_MAIN);
+        main.addCategory(Intent.CATEGORY_LAUNCHER);
+        List<ResolveInfo> list = new ArrayList<>(pm.queryIntentActivities(main, 0));
+        Collections.sort(list, new Comparator<ResolveInfo>() {
+            @Override public int compare(ResolveInfo left, ResolveInfo right) {
+                String lp = left.activityInfo == null ? "" : left.activityInfo.packageName;
+                String rp = right.activityInfo == null ? "" : right.activityInfo.packageName;
+                int pkg = lp.compareTo(rp);
+                if (pkg != 0) return pkg;
+                String ln = left.activityInfo == null ? "" : left.activityInfo.name;
+                String rn = right.activityInfo == null ? "" : right.activityInfo.name;
+                return ln.compareTo(rn);
+            }
+        });
+
+        List<App> found = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (ResolveInfo ri : list) {
+            if (ri == null || ri.activityInfo == null) continue;
+            if (!ri.activityInfo.enabled || ri.activityInfo.applicationInfo == null
+                    || !ri.activityInfo.applicationInfo.enabled) continue;
+            String pkg = ri.activityInfo.packageName;
+            if (!seen.add(pkg)) continue;
+
+            App a = new App();
+            a.pkg = pkg;
+            a.label = safeLabel(ri, pm, pkg);
+            a.icon = ri.loadIcon(pm);
+            Intent launch = new Intent(Intent.ACTION_MAIN);
+            launch.addCategory(Intent.CATEGORY_LAUNCHER);
+            launch.setClassName(pkg, ri.activityInfo.name);
+            a.launch = launch;
+            found.add(a);
+        }
+        return found;
+    }
+
+    private String safeLabel(ResolveInfo ri, PackageManager pm, String fallback) {
+        CharSequence label = ri.loadLabel(pm);
+        return label == null || label.length() == 0 ? fallback : label.toString();
+    }
+
+    private void appendPinnedApps(List<App> found) {
+        for (String pkg : pinned) {
+            for (App a : found) {
+                if (a.pkg.equals(pkg)) {
+                    all.add(a);
+                    break;
+                }
+            }
+        }
+    }
+
+    private void appendOtherApps(List<App> found) {
+        List<App> rest = new ArrayList<>();
+        for (App a : found) {
+            if (!pinned.contains(a.pkg)) rest.add(a);
+        }
+        Collections.sort(rest, new Comparator<App>() {
+            @Override public int compare(App left, App right) {
+                int label = left.label.toLowerCase(Locale.US)
+                        .compareTo(right.label.toLowerCase(Locale.US));
+                return label != 0 ? label : left.pkg.compareTo(right.pkg);
+            }
+        });
+        all.addAll(rest);
+    }
+
+    private String launcherStateFingerprint(List<App> found) {
+        List<String> components = new ArrayList<>();
+        for (App a : found) {
+            String component = a.pkg + "/" + (a.launch == null ? "" : a.launch.getComponent().getClassName());
+            components.add(component);
+        }
+        Collections.sort(components);
+        StringBuilder out = new StringBuilder();
+        for (String component : components) out.append(component).append(';');
+        out.append("|pinned:");
+        for (String pkg : pinned) out.append(pkg).append(';');
+        return out.toString();
+    }
+
+    private String firstPackages(List<App> apps, int limit) {
+        StringBuilder out = new StringBuilder();
+        int count = Math.min(limit, apps.size());
+        for (int i = 0; i < count; i++) {
+            if (i > 0) out.append(',');
+            out.append(apps.get(i).pkg);
+        }
+        return out.toString();
+    }
+
     private void onDragAngle(float acc) {
         int step = dragStep(acc);
         if (step != lastPreviewStep) {
@@ -178,6 +298,8 @@ public class AppDrawerActivity extends BaseActivity {
         ring.removeAllViews();
         int n = all.size();
         if (n == 0) {
+            currentApp = null;
+            centerIcon.setImageDrawable(null);
             centerLabel.setText("没有可启动的应用");
             return;
         }
@@ -197,7 +319,8 @@ public class AppDrawerActivity extends BaseActivity {
             int cMax = Ui.dp(this, 74);
             int cMin = Ui.dp(this, 62);
             int cs = (int) Math.min(cMax, Math.max(cMin, 2 * halfR));
-            App a = all.get(wrapIndex(slots[i], n));
+            App a = appAt(slots, i, n);
+            if (a == null) continue;
             View cell = appCell(a);
             int cellW = cs, cellH = cs;
             int x = (int) (cx + r * Math.cos(angle) - cellW / 2f);
@@ -209,7 +332,13 @@ public class AppDrawerActivity extends BaseActivity {
         }
         ring.invalidate();
         int curSlot = validSlot(selectedSlot, count, slots);
-        App cur = all.get(wrapIndex(slots[curSlot], n));
+        App cur = appAt(slots, curSlot, n);
+        if (cur == null) {
+            currentApp = null;
+            centerIcon.setImageDrawable(null);
+            centerLabel.setText("没有可启动的应用");
+            return;
+        }
         currentApp = cur;
         centerIcon.setImageDrawable(cur.icon);
         RoundMask.circle(centerIcon, iconBg(cur.pkg));
@@ -218,6 +347,7 @@ public class AppDrawerActivity extends BaseActivity {
 
     private void initSlots() {
         int n = all.size();
+        stepHistory.clear();
         for (int i = 0; i < SLOTS; i++) slotIdx[i] = -1;
         if (n == 0) return;
         int count = Math.min(SLOTS, n);
@@ -230,10 +360,23 @@ public class AppDrawerActivity extends BaseActivity {
     }
 
     private void commitSteps(int step) {
+        if (step == 0 || all.isEmpty()) return;
+        String before = slotSummary(slotIdx);
         SlotState next = previewState(step);
         System.arraycopy(next.idx, 0, slotIdx, 0, SLOTS);
         nextForward = next.nextForward;
         nextBackward = next.nextBackward;
+        stepHistory.clear();
+        for (StepRecord record : next.history) {
+            stepHistory.add(new StepRecord(record.direction, record.removed, record.added));
+        }
+        String after = slotSummary(slotIdx);
+        if (!before.equals(after)) {
+            String message = "step=" + step + " before=" + before + " after=" + after
+                    + " nextForward=" + nextForward + " nextBackward=" + nextBackward;
+            Log.d(TAG, "carousel " + message);
+            DebugLog.append(this, "apps.carousel_step", message);
+        }
     }
 
     private SlotState previewState(int step) {
@@ -241,39 +384,90 @@ public class AppDrawerActivity extends BaseActivity {
         System.arraycopy(slotIdx, 0, st.idx, 0, SLOTS);
         st.nextForward = nextForward;
         st.nextBackward = nextBackward;
+        for (StepRecord record : stepHistory) {
+            st.history.add(new StepRecord(record.direction, record.removed, record.added));
+        }
         int n = all.size();
         if (n == 0 || step == 0) return st;
         int count = Math.min(SLOTS, n);
         int times = Math.min(Math.abs(step), n);
         for (int i = 0; i < times; i++) {
-            if (step > 0) commitClockwise(st, count, n);
-            else commitCounterClockwise(st, count, n);
+            if (step > 0) moveClockwise(st, count, n);
+            else moveCounterClockwise(st, count, n);
         }
         return st;
     }
 
-    private void commitClockwise(SlotState st, int count, int n) {
-        int last = st.idx[count - 1];
-        for (int i = count - 1; i > 0; i--) st.idx[i] = st.idx[i - 1];
-        st.idx[0] = last;
-        if (n <= SLOTS || count <= INCOMING_SLOT) return;
+    /** Advances the ring clockwise, or undoes the most recent counter-clockwise step. */
+    private void moveClockwise(SlotState st, int count, int n) {
+        if (n <= SLOTS || count <= INCOMING_SLOT) {
+            rotateRight(st.idx, count);
+            return;
+        }
+
+        StepRecord last = lastRecord(st);
+        if (last != null && last.direction < 0) {
+            rotateRight(st.idx, count);
+            // A reverse step inserted at 6 o'clock; after undoing the rotation it
+            // moves to the following slot and is replaced by what it removed.
+            st.idx[INCOMING_SLOT + 1] = last.removed;
+            st.nextBackward = last.added;
+            st.history.remove(st.history.size() - 1);
+            return;
+        }
+
+        rotateRight(st.idx, count);
         int removed = st.idx[INCOMING_SLOT];
         st.idx[INCOMING_SLOT] = -1;
         int incoming = takeForward(st, n);
-        st.idx[INCOMING_SLOT] = incoming >= 0 ? incoming : removed;
-        st.nextBackward = removed;
+        int added = incoming >= 0 ? incoming : removed;
+        st.idx[INCOMING_SLOT] = added;
+        st.history.add(new StepRecord(1, removed, added));
     }
 
-    private void commitCounterClockwise(SlotState st, int count, int n) {
-        int first = st.idx[0];
-        for (int i = 0; i < count - 1; i++) st.idx[i] = st.idx[i + 1];
-        st.idx[count - 1] = first;
-        if (n <= SLOTS || count <= INCOMING_SLOT) return;
+    /** Reverses the ring counter-clockwise, or undoes the most recent clockwise step. */
+    private void moveCounterClockwise(SlotState st, int count, int n) {
+        if (n <= SLOTS || count <= INCOMING_SLOT) {
+            rotateLeft(st.idx, count);
+            return;
+        }
+
+        StepRecord last = lastRecord(st);
+        if (last != null && last.direction > 0) {
+            rotateLeft(st.idx, count);
+            // The clockwise newcomer lands one slot before 6 o'clock after
+            // undoing the rotation, so restore the removed item there.
+            st.idx[INCOMING_SLOT - 1] = last.removed;
+            st.nextForward = last.added;
+            st.history.remove(st.history.size() - 1);
+            return;
+        }
+
+        rotateLeft(st.idx, count);
         int removed = st.idx[INCOMING_SLOT];
         st.idx[INCOMING_SLOT] = -1;
         int incoming = takeBackward(st, n);
-        st.idx[INCOMING_SLOT] = incoming >= 0 ? incoming : removed;
-        st.nextForward = removed;
+        int added = incoming >= 0 ? incoming : removed;
+        st.idx[INCOMING_SLOT] = added;
+        st.history.add(new StepRecord(-1, removed, added));
+    }
+
+    private StepRecord lastRecord(SlotState st) {
+        return st.history.isEmpty() ? null : st.history.get(st.history.size() - 1);
+    }
+
+    private void rotateRight(int[] slots, int count) {
+        if (count <= 1) return;
+        int last = slots[count - 1];
+        for (int i = count - 1; i > 0; i--) slots[i] = slots[i - 1];
+        slots[0] = last;
+    }
+
+    private void rotateLeft(int[] slots, int count) {
+        if (count <= 1) return;
+        int first = slots[0];
+        for (int i = 0; i < count - 1; i++) slots[i] = slots[i + 1];
+        slots[count - 1] = first;
     }
 
     private int dragStep(float deg) {
@@ -287,8 +481,28 @@ public class AppDrawerActivity extends BaseActivity {
     }
 
     private int validSlot(int slot, int count, int[] slots) {
-        if (slot >= 0 && slot < count && slots[slot] >= 0) return slot;
-        return 0;
+        if (slot >= 0 && slot < count && slots[slot] >= 0 && slots[slot] < all.size()) return slot;
+        for (int i = 0; i < count; i++) {
+            if (slots[i] >= 0 && slots[i] < all.size()) return i;
+        }
+        return -1;
+    }
+
+    private App appAt(int[] slots, int slot, int n) {
+        if (slots == null || slot < 0 || slot >= slots.length || n <= 0) return null;
+        int idx = slots[slot];
+        if (idx < 0 || idx >= n || idx >= all.size()) return null;
+        return all.get(idx);
+    }
+
+    private String slotSummary(int[] slots) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < SLOTS; i++) {
+            if (i > 0) out.append(',');
+            int idx = slots[i];
+            out.append(idx >= 0 && idx < all.size() ? all.get(idx).pkg : "-");
+        }
+        return out.toString();
     }
 
     private int takeForward(SlotState st, int n) {
@@ -323,6 +537,7 @@ public class AppDrawerActivity extends BaseActivity {
     }
 
     private int wrapIndex(int i, int n) {
+        if (n <= 0) return -1;
         return ((i % n) + n) % n;
     }
 
@@ -358,9 +573,29 @@ public class AppDrawerActivity extends BaseActivity {
 
     private void launchApp(App a) {
         if (a == null) return;
+        long now = SystemClock.uptimeMillis();
+        if (now - lastLaunchAt < 750L) {
+            Log.d(TAG, "launch throttled pkg=" + a.pkg);
+            DebugLog.append(this, "apps.launch_throttled", "pkg=" + a.pkg);
+            return;
+        }
+        lastLaunchAt = now;
         try {
-            startActivity(a.launch);
+            // Some Android 5.1 system apps enter a buggy ROM path when launched
+            // with ACTION_MAIN+CATEGORY_LAUNCHER and later receive a key event.
+            // Keep the resolved component, but launch it as a plain explicit intent.
+            Intent launch = new Intent();
+            if (a.launch == null || a.launch.getComponent() == null) {
+                throw new IllegalStateException("missing launcher component");
+            }
+            launch.setComponent(a.launch.getComponent());
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            startActivity(launch);
         } catch (Exception e) {
+            Log.w(TAG, "launch failed pkg=" + a.pkg, e);
+            DebugLog.append(this, "apps.launch_failed", "pkg=" + a.pkg
+                    + " error=" + e.getClass().getSimpleName());
             Toast.makeText(this, "无法启动", Toast.LENGTH_SHORT).show();
         }
     }

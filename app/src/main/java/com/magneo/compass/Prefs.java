@@ -84,6 +84,7 @@ public class Prefs {
     public static final String K_STREAM_BITRATE = "streamBitrate";
     public static final String K_MAIN_RENDERER = "mainRenderer";
     public static final String K_MAIN_FPS_MODE = "mainFpsMode";
+    public static final String K_SCREEN_POLICY = "screenPolicy";
     public static final String K_MAG_CAL_X = "magCalX";
     public static final String K_MAG_CAL_Y = "magCalY";
     public static final String K_MAG_CAL_Z = "magCalZ";
@@ -136,6 +137,10 @@ public class Prefs {
     public static final String MAIN_FPS_POWER = "power";
     public static final String MAIN_FPS_SMOOTH = "smooth";
     public static final String DEFAULT_MAIN_FPS_MODE = MAIN_FPS_ADAPTIVE;
+    public static final String SCREEN_POLICY_ALWAYS = "always";
+    public static final String SCREEN_POLICY_PLUGGED = "plugged";
+    public static final String SCREEN_POLICY_SLEEP = "sleep";
+    public static final String DEFAULT_SCREEN_POLICY = SCREEN_POLICY_PLUGGED;
     public static final int DEFAULT_TEXT_MAX_TOKENS = 1024;
     public static final int DEFAULT_VOICE_MAX_TOKENS = 240;
     public static final int DEFAULT_VISION_MAX_TOKENS = 512;
@@ -204,6 +209,25 @@ public class Prefs {
     /** System low-battery alert is opt-in on this dedicated device. */
     public static boolean lowBatterySoundEnabled(Context c) {
         return getB(c, K_LOW_BATTERY_SOUND, false);
+    }
+
+    public static String screenPolicy(Context c) {
+        return screenPolicyValue(get(c, K_SCREEN_POLICY, DEFAULT_SCREEN_POLICY));
+    }
+
+    public static String screenPolicyValue(String v) {
+        if (SCREEN_POLICY_ALWAYS.equalsIgnoreCase(v)) return SCREEN_POLICY_ALWAYS;
+        if (SCREEN_POLICY_SLEEP.equalsIgnoreCase(v) || "auto".equalsIgnoreCase(v)) {
+            return SCREEN_POLICY_SLEEP;
+        }
+        return SCREEN_POLICY_PLUGGED;
+    }
+
+    public static String screenPolicyLabel(Context c) {
+        String v = screenPolicy(c);
+        if (SCREEN_POLICY_ALWAYS.equals(v)) return "始终常亮";
+        if (SCREEN_POLICY_SLEEP.equals(v)) return "自动熄屏";
+        return "插电常亮";
     }
 
     public static boolean mcpEnabled(Context c) {

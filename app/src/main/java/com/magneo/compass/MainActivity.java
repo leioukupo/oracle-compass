@@ -64,7 +64,6 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         super.onCreate(savedInstanceState);
         QuitFix.apply(this);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         Prefs.restoreBackupIfPresent(this);
         configureSeamlessKeyguard();
         hideSystemUi();
@@ -95,6 +94,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
                 lastBattery[0] = hub.battery;
                 lastBatteryCharging[0] = hub.batteryCharging;
                 lastBatteryFull[0] = hub.batteryFull;
+                applyScreenPolicy();
                 if (view != null) view.onBatteryStateChanged();
             }
             boolean changed = angleChanged(hub.azimuth, lastAzimuth[0], 1.5f)
@@ -112,6 +112,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
             }
         });
         view = new CompassHostView(this, hub, this);
+        applyScreenPolicy();
         if (!startupRevealShown && savedInstanceState == null) {
             startupRevealShown = true;
             startupRevealActive = true;
@@ -155,6 +156,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         new Thread(() -> {
             com.magneo.compass.web.H264SurfaceStreamer.cleanupStale();
             com.magneo.compass.web.ScreenAwake.off();
+            StorageMaintenance.cleanup(getApplicationContext());
         }, "stream-cleanup").start();
         ConversationLog.startCleaner(this);
         Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
@@ -254,6 +256,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         view.applyRendererPrefs();
         view.onHostResume();
         hub.start();
+        applyScreenPolicy();
         FlashlightController.restoreIfRequested();
         applyLocationPrefs();
         uiTicker.removeCallbacks(uiTick);
@@ -271,6 +274,8 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     @Override
     protected void onPause() {
         if (activeMain == this) activeMain = null;
+        getWindow().getDecorView().removeCallbacks(clearIdleScreen);
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         cancelOracleAi();
         FlashlightController.releaseHardwareKeepingRequest();
         if (view != null) view.onHostPause();
@@ -283,6 +288,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     @Override
     protected void onDestroy() {
         getWindow().getDecorView().removeCallbacks(bootHandoffReadySignal);
+        getWindow().getDecorView().removeCallbacks(clearIdleScreen);
         uiTicker.removeCallbacks(uiTick);
         if (locator != null) locator.stop();
         cancelOracleAi();
@@ -297,6 +303,67 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
         a.runOnUiThread(new Runnable() {
             @Override public void run() { a.applyLocationPrefs(); }
         });
+    }
+
+    public static void applyScreenPolicyToActive() {
+        final MainActivity activity = activeMain;
+        if (activity == null) return;
+        activity.runOnUiThread(new Runnable() {
+            @Override public void run() { activity.applyScreenPolicy(); }
+        });
+    }
+
+    /** Wake the main screen briefly for a remote web operation. */
+    public static void wakeScreenForInteractionActive() {
+        final MainActivity activity = activeMain;
+        if (activity == null) return;
+        activity.runOnUiThread(new Runnable() {
+            @Override public void run() { activity.wakeScreenForInteraction(); }
+        });
+    }
+
+    private void applyScreenPolicy() {
+        String policy = Prefs.screenPolicy(this);
+        if (Prefs.SCREEN_POLICY_SLEEP.equals(policy)) {
+            getWindow().getDecorView().removeCallbacks(clearIdleScreen);
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            return;
+        }
+        boolean charging = hub != null ? hub.batteryCharging : isChargingNow();
+        boolean keep = Prefs.SCREEN_POLICY_ALWAYS.equals(policy) || charging;
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        getWindow().getDecorView().removeCallbacks(clearIdleScreen);
+        if (!keep) getWindow().getDecorView().postDelayed(clearIdleScreen, 60_000L);
+    }
+
+    private final Runnable clearIdleScreen = () -> {
+        if (Prefs.SCREEN_POLICY_PLUGGED.equals(Prefs.screenPolicy(this)) && !isChargingNow()) {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+    };
+
+    private void wakeScreenForInteraction() {
+        if (Prefs.SCREEN_POLICY_SLEEP.equals(Prefs.screenPolicy(this))) return;
+        applyScreenPolicy();
+    }
+
+    @Override
+    public void onUserInteraction() {
+        wakeScreenForInteraction();
+        super.onUserInteraction();
+    }
+
+    private boolean isChargingNow() {
+        try {
+            Intent b = registerReceiver(null, new android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            if (b == null) return false;
+            int status = b.getIntExtra(android.os.BatteryManager.EXTRA_STATUS,
+                    android.os.BatteryManager.BATTERY_STATUS_UNKNOWN);
+            return status == android.os.BatteryManager.BATTERY_STATUS_CHARGING
+                    || status == android.os.BatteryManager.BATTERY_STATUS_FULL;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     public static void applySystemLockscreenPrefToActive() {
@@ -397,6 +464,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
 
     private void setMainVoiceStatus(String status) {
         if (view == null) return;
+        if (status != null && !status.trim().isEmpty()) wakeScreenForInteraction();
         view.setStatus(filterMainVoiceStatus(status));
     }
 
