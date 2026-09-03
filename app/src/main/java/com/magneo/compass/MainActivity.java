@@ -5,6 +5,7 @@ import android.app.KeyguardManager;
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.Window;
@@ -52,6 +53,29 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     private VoiceController.StreamingSpeechSession oracleSpeechSession;
     private long oracleUiUpdateMs = 0;
     private final Handler uiTicker = new Handler();
+    private final Object voiceUiLock = new Object();
+    private String pendingVoiceStatus;
+    private boolean voiceUiDispatchPosted;
+    private final Runnable applyPendingVoiceStatus = new Runnable() {
+        @Override public void run() {
+            String next;
+            synchronized (voiceUiLock) {
+                next = pendingVoiceStatus;
+                pendingVoiceStatus = null;
+                voiceUiDispatchPosted = false;
+            }
+            if (activeMain == MainActivity.this && !isFinishing() && view != null) {
+                applyMainVoiceStatus(next);
+            }
+            synchronized (voiceUiLock) {
+                if (pendingVoiceStatus != null && !voiceUiDispatchPosted
+                        && activeMain == MainActivity.this && !isFinishing()) {
+                    voiceUiDispatchPosted = true;
+                    uiTicker.post(this);
+                }
+            }
+        }
+    };
     private final Runnable uiTick = new Runnable() {
         @Override public void run() {
             if (view != null) view.postInvalidate();   // 时钟/低频状态心跳，不依赖传感器事件
@@ -274,6 +298,11 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     @Override
     protected void onPause() {
         if (activeMain == this) activeMain = null;
+        uiTicker.removeCallbacks(applyPendingVoiceStatus);
+        synchronized (voiceUiLock) {
+            pendingVoiceStatus = null;
+            voiceUiDispatchPosted = false;
+        }
         getWindow().getDecorView().removeCallbacks(clearIdleScreen);
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         cancelOracleAi();
@@ -343,6 +372,16 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     };
 
     private void wakeScreenForInteraction() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            if (activeMain != this || isFinishing()) return;
+            uiTicker.post(() -> {
+                if (activeMain == MainActivity.this && !isFinishing()) {
+                    wakeScreenForInteraction();
+                }
+            });
+            return;
+        }
+        if (activeMain != this || isFinishing()) return;
         if (Prefs.SCREEN_POLICY_SLEEP.equals(Prefs.screenPolicy(this))) return;
         applyScreenPolicy();
     }
@@ -463,7 +502,19 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
     }
 
     private void setMainVoiceStatus(String status) {
-        if (view == null) return;
+        if (activeMain != this || isFinishing() || view == null) return;
+        synchronized (voiceUiLock) {
+            pendingVoiceStatus = status;
+            if (voiceUiDispatchPosted) return;
+            voiceUiDispatchPosted = true;
+            uiTicker.post(applyPendingVoiceStatus);
+        }
+    }
+
+    /** Applies voice status only on the Activity's UI thread. */
+    private void applyMainVoiceStatus(String status) {
+        if (Looper.myLooper() != Looper.getMainLooper()
+                || activeMain != this || isFinishing() || view == null) return;
         if (status != null && !status.trim().isEmpty()) wakeScreenForInteraction();
         view.setStatus(filterMainVoiceStatus(status));
     }
