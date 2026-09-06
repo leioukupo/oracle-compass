@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_LOCATION_EXTRA_COMMANDS" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -58,6 +59,7 @@
         <activity android:name=".PriorityAppsActivity" android:exported="false" android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden" />
         <activity android:name=".SettingsActivity" android:exported="false" android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden" />
         <activity android:name=".browser.BrowserActivity" android:exported="true" android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden" />
+        <activity android:name=".RoverControlActivity" android:exported="false" android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden" />
         <activity android:name=".vision.VisionActivity" android:exported="false" android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden" />
         <activity android:name=".netfs.FileBrowserActivity" android:exported="false" android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden" />
         <activity android:name=".netfs.MusicPlayerActivity" android:exported="false" android:screenOrientation="portrait" android:configChanges="orientation|screenSize|keyboardHidden" />

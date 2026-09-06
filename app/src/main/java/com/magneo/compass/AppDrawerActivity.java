@@ -23,6 +23,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.magneo.compass.browser.BrowserActivity;
 import com.magneo.compass.ui.Ui;
 
 import org.json.JSONArray;
@@ -48,6 +49,8 @@ public class AppDrawerActivity extends BaseActivity {
     private static final float APP_STEP_DEG = 90f;
     private static final int INCOMING_SLOT = 4;
     private static final int[] INITIAL_SLOT_REL = {0, 1, 2, 3, 7, 6, 5, 4};
+    private static final String INTERNAL_ROVER = "internal:rover";
+    private static final String INTERNAL_BROWSER = "internal:browser";
 
     private static class App {
         String label;
@@ -167,6 +170,7 @@ public class AppDrawerActivity extends BaseActivity {
 
         all.clear();
         appendPinnedApps(found);
+        appendInternalApps();
         appendOtherApps(found);
         launcherStateFingerprint = fingerprint;
         initSlots();
@@ -217,6 +221,23 @@ public class AppDrawerActivity extends BaseActivity {
             found.add(a);
         }
         return found;
+    }
+
+    /** Compass-owned pages are not launcher activities, but stay reachable in the drawer. */
+    private void appendInternalApps() {
+        App rover = new App();
+        rover.pkg = INTERNAL_ROVER;
+        rover.label = "车控";
+        rover.icon = getResources().getDrawable(R.drawable.ic_launcher);
+        rover.launch = new Intent(this, RoverControlActivity.class);
+        all.add(rover);
+
+        App browser = new App();
+        browser.pkg = INTERNAL_BROWSER;
+        browser.label = "浏览";
+        browser.icon = getResources().getDrawable(R.drawable.ic_launcher);
+        browser.launch = new Intent(this, BrowserActivity.class);
+        all.add(browser);
     }
 
     private String safeLabel(ResolveInfo ri, PackageManager pm, String fallback) {
@@ -602,6 +623,10 @@ public class AppDrawerActivity extends BaseActivity {
 
     private void showAppActions(App a) {
         if (a == null) return;
+        if (a.pkg != null && a.pkg.startsWith("internal:")) {
+            new RoundDialog(this).title(a.label).item("取消", null).show();
+            return;
+        }
         final boolean p = pinned.contains(a.pkg);
         new RoundDialog(this)
                 .title(a.label)

@@ -6,6 +6,18 @@ android {
     namespace 'com.magneo.compass'
     compileSdk 36
 
+    def releaseStorePassword = file("../keystore/.generated-password.txt").text.trim()
+
+    signingConfigs {
+        release {
+            storeFile file("../keystore/oracle-compass-release.p12")
+            storeType "PKCS12"
+            storePassword releaseStorePassword
+            keyAlias "oracle-compass"
+            keyPassword releaseStorePassword
+        }
+    }
+
     defaultConfig {
         applicationId "com.magneo.compass"
         minSdk 22
@@ -32,6 +44,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig signingConfigs.release
         }
     }
 }

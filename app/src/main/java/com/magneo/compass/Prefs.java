@@ -112,6 +112,15 @@ public class Prefs {
     public static final String K_LOW_BATTERY_SOUND = "lowBatterySound";
     /** Last working system sound path, retained so an enabled toggle can restore it. */
     public static final String K_LOW_BATTERY_SOUND_PATH = "lowBatterySoundPath";
+    /** TALOS rover virtual-controller transport preferences. */
+    public static final String K_ROVER_TARGET_HOST = "roverTargetHost";
+    public static final String K_ROVER_UDP_PORT = "roverUdpPort";
+    public static final String K_ROVER_AUTO_DISCOVERY = "roverAutoDiscovery";
+    public static final String K_ROVER_BROADCAST = "roverBroadcast";
+    public static final String K_ROVER_LEFT_Y_INVERT = "roverLeftYInvert";
+    public static final String K_ROVER_RIGHT_Y_INVERT = "roverRightYInvert";
+    public static final String K_ROVER_RTSP_PORT = "roverRtspPort";
+    public static final String K_ROVER_RTSP_PATH = "roverRtspPath";
     public static final String DEFAULT_LOC_WIFI_URL = "";
     public static final String DEFAULT_LOC_IP_URL = "http://ip-api.com/json/?fields=status,lat,lon,query,city,regionName,country,isp";
     public static final String DEFAULT_SYS_PROMPT_VOICE = "你是真理罗盘助手，回答简洁，中文回复。";
@@ -120,6 +129,12 @@ public class Prefs {
     public static final boolean DEFAULT_VAD_ENABLED = true;
     public static final boolean DEFAULT_ROOT_GRANT_NOTIFICATIONS = false;
     public static final boolean DEFAULT_SYSTEM_LOCKSCREEN_ENABLED = false;
+    public static final String DEFAULT_ROVER_TARGET_HOST = "10.1.20.36";
+    public static final int DEFAULT_ROVER_UDP_PORT = 5555;
+    public static final boolean DEFAULT_ROVER_AUTO_DISCOVERY = true;
+    public static final boolean DEFAULT_ROVER_BROADCAST = true;
+    public static final int DEFAULT_ROVER_RTSP_PORT = 8554;
+    public static final String DEFAULT_ROVER_RTSP_PATH = "/test";
     public static final String VISION_FRAME_SOURCE_HAL = "hal";
     public static final String VISION_FRAME_SOURCE_RTSP = "rtsp";
     public static final String DEFAULT_VISION_FRAME_SOURCE = VISION_FRAME_SOURCE_HAL;
@@ -209,6 +224,49 @@ public class Prefs {
     /** System low-battery alert is opt-in on this dedicated device. */
     public static boolean lowBatterySoundEnabled(Context c) {
         return getB(c, K_LOW_BATTERY_SOUND, false);
+    }
+
+    public static String roverTargetHost(Context c) {
+        String host = get(c, K_ROVER_TARGET_HOST, DEFAULT_ROVER_TARGET_HOST);
+        return host == null ? "" : host.trim();
+    }
+
+    public static int roverUdpPort(Context c) {
+        return clampInt(getI(c, K_ROVER_UDP_PORT, DEFAULT_ROVER_UDP_PORT), 1, 65535);
+    }
+
+    public static boolean roverAutoDiscovery(Context c) {
+        return getB(c, K_ROVER_AUTO_DISCOVERY, DEFAULT_ROVER_AUTO_DISCOVERY);
+    }
+
+    public static boolean roverBroadcast(Context c) {
+        return getB(c, K_ROVER_BROADCAST, DEFAULT_ROVER_BROADCAST);
+    }
+
+    public static boolean roverLeftYInverted(Context c) {
+        return getB(c, K_ROVER_LEFT_Y_INVERT, false);
+    }
+
+    public static boolean roverRightYInverted(Context c) {
+        return getB(c, K_ROVER_RIGHT_Y_INVERT, false);
+    }
+
+    public static int roverRtspPort(Context c) {
+        return clampInt(getI(c, K_ROVER_RTSP_PORT, DEFAULT_ROVER_RTSP_PORT), 1, 65535);
+    }
+
+    public static String roverRtspPath(Context c) {
+        String path = get(c, K_ROVER_RTSP_PATH, DEFAULT_ROVER_RTSP_PATH);
+        if (path == null) path = "";
+        path = path.trim();
+        if (path.isEmpty()) return DEFAULT_ROVER_RTSP_PATH;
+        return path.startsWith("/") ? path : "/" + path;
+    }
+
+    public static String roverTargetSummary(Context c) {
+        String host = roverTargetHost(c);
+        if (host.isEmpty()) host = "仅广播 / 自动发现";
+        return host + ":" + roverUdpPort(c);
     }
 
     public static String screenPolicy(Context c) {

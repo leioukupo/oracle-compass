@@ -671,7 +671,17 @@ public class SettingsWebServer {
                 .append(rowCheckbox("低电量提示音", Prefs.K_LOW_BATTERY_SOUND, "默认关闭；只控制系统低电量声音，不影响电量环和充电状态"))
                 .append("<p class='hint' id='lowBatterySoundActual'>系统声音状态：读取中</p>")
                 .append("<div class='inline'><button type='button' onclick='adbSave()'>保存自启</button><button type='button' onclick='adbStart()'>启动/重启 ADB TCP</button><button type='button' class='secondary' onclick='adbStop()'>关闭 ADB TCP</button><button type='button' class='danger' onclick='deviceReboot()'>重启设备</button><span class='state' id='adbMsg'></span></div><p class='hint'>设备侧：<span id='adbState'>未知</span><span id='adbDetail'></span></p><pre id='adbLog'></pre></div></div></section>")
-                .append("<section class='panel' id='tab-apps'><div class='sectionTitle'><h2>应用管理</h2><small>上传 APK 后设备本地安装</small></div><div class='cols'><div class='box'><h3>安装 APK</h3><div class='row'><label>APK 文件</label><input type='file' id='appApk' accept='.apk,application/vnd.android.package-archive'></div><div class='row'><label>APK 下载地址</label><input type='text' id='appFetchUrl' placeholder='https://.../app.apk 或 ftp://...'></div><div class='inline'><button type='button' onclick='appUpload()'>上传 APK</button><button type='button' class='secondary' onclick='appFetch()'>从 URL 拉取</button><button type='button' id='appInstallBtn' onclick='appInstall()' disabled>安装上传的 APK</button></div><p class='state' id='appUploadMsg'></p><p class='hint' id='appUploadInfo'></p><pre id='appTaskLog'></pre></div>")
+                .append("<section class='panel' id='tab-apps'><div class='sectionTitle'><h2>应用管理 / 车控</h2><small>车控配置与 APK 安装</small></div><div class='cols'><div class='box'><h3>车控设置</h3>")
+                .append(rowInput("K230 主机", Prefs.K_ROVER_TARGET_HOST, "text", Prefs.DEFAULT_ROVER_TARGET_HOST))
+                .append(rowInput("UDP 端口", Prefs.K_ROVER_UDP_PORT, "number", String.valueOf(Prefs.DEFAULT_ROVER_UDP_PORT)))
+                .append(rowInput("RTSP 端口", Prefs.K_ROVER_RTSP_PORT, "number", String.valueOf(Prefs.DEFAULT_ROVER_RTSP_PORT)))
+                .append(rowInput("RTSP 路径", Prefs.K_ROVER_RTSP_PATH, "text", Prefs.DEFAULT_ROVER_RTSP_PATH))
+                .append(rowCheckbox("自动发现", Prefs.K_ROVER_AUTO_DISCOVERY, "监听 UDP 7789 的 talos/k230/hello"))
+                .append(rowCheckbox("允许广播兜底", Prefs.K_ROVER_BROADCAST, "无可用单播目标时发送单个广播帧"))
+                .append(rowCheckbox("左 Y 轴反向", Prefs.K_ROVER_LEFT_Y_INVERT, "与 ESP32 摇杆方向不一致时开启"))
+                .append(rowCheckbox("右 Y 轴反向", Prefs.K_ROVER_RIGHT_Y_INVERT, "与 ESP32 摇杆方向不一致时开启"))
+                .append("<p class='hint'>视频地址为 rtsp://K230:端口/路径；车控页进入即发送 20Hz joy，中止/后台时发送中立帧。</p>")
+                .append("</div><div class='box'><h3>安装 APK</h3><div class='row'><label>APK 文件</label><input type='file' id='appApk' accept='.apk,application/vnd.android.package-archive'></div><div class='row'><label>APK 下载地址</label><input type='text' id='appFetchUrl' placeholder='https://.../app.apk 或 ftp://...'></div><div class='inline'><button type='button' onclick='appUpload()'>上传 APK</button><button type='button' class='secondary' onclick='appFetch()'>从 URL 拉取</button><button type='button' id='appInstallBtn' onclick='appInstall()' disabled>安装上传的 APK</button></div><p class='state' id='appUploadMsg'></p><p class='hint' id='appUploadInfo'></p><pre id='appTaskLog'></pre></div>")
                 .append("<div class='box'><h3>已安装应用</h3><div class='row'><label>搜索应用</label><input type='text' id='appSearch' oninput='renderApps()'></div><div class='inline'><button type='button' class='secondary' onclick='loadApps()'>刷新应用</button><span class='hint' id='appCount'></span></div><div id='appList' class='list'></div></div></div></section>")
                 .append("<section class='panel' id='tab-debug'><div class='sectionTitle'><h2>链路调试</h2><small>按时间记录 ASR / LLM / MCP / TTS</small></div><div class='cols'><div class='box'><h3>调试模式</h3>")
                 .append(rowCheckbox("开启调试", Prefs.K_DEBUG_MODE, "记录语音文本、LLM 请求摘要、工具调用和返回结果"))
@@ -1526,6 +1536,14 @@ public class SettingsWebServer {
             o.put("rtspPort", String.valueOf(Prefs.getI(app, Prefs.K_RTSP_PORT, 8554)));
             o.put("rtmpUrl", Prefs.get(app, Prefs.K_RTMP_URL, ""));
             o.put("camAutoStart", Prefs.getB(app, Prefs.K_CAM_AUTO_START, false));
+            o.put(Prefs.K_ROVER_TARGET_HOST, Prefs.roverTargetHost(app));
+            o.put(Prefs.K_ROVER_UDP_PORT, String.valueOf(Prefs.roverUdpPort(app)));
+            o.put(Prefs.K_ROVER_AUTO_DISCOVERY, Prefs.roverAutoDiscovery(app));
+            o.put(Prefs.K_ROVER_BROADCAST, Prefs.roverBroadcast(app));
+            o.put(Prefs.K_ROVER_LEFT_Y_INVERT, Prefs.roverLeftYInverted(app));
+            o.put(Prefs.K_ROVER_RIGHT_Y_INVERT, Prefs.roverRightYInverted(app));
+            o.put(Prefs.K_ROVER_RTSP_PORT, String.valueOf(Prefs.roverRtspPort(app)));
+            o.put(Prefs.K_ROVER_RTSP_PATH, Prefs.roverRtspPath(app));
             o.put("mode", H264SurfaceStreamer.isActive() ? "h264fast"
                     : (H264Streamer.isActive() ? "h264" : (ScreenStreamer.isActive() ? "mjpeg" : "idle")));
             o.put("ip", LOOPBACK_HOST);
@@ -1613,6 +1631,16 @@ public class SettingsWebServer {
                     try { Prefs.putI(app, k, Math.max(1, Math.min(2, Integer.parseInt(v)))); } catch (Exception ignored) {}
                 } else if (k.equals("streamBitrate")) {
                     try { Prefs.putI(app, k, Math.max(300, Math.min(8000, Integer.parseInt(v)))); } catch (Exception ignored) {}
+                } else if (k.equals(Prefs.K_ROVER_UDP_PORT)) {
+                    try { Prefs.putI(app, k, clamp(Integer.parseInt(v), 1, 65535)); } catch (Exception ignored) {}
+                } else if (k.equals(Prefs.K_ROVER_RTSP_PORT)) {
+                    try { Prefs.putI(app, k, clamp(Integer.parseInt(v), 1, 65535)); } catch (Exception ignored) {}
+                } else if (k.equals(Prefs.K_ROVER_RTSP_PATH)) {
+                    String path = v == null ? "" : v.trim();
+                    if (path.isEmpty()) path = Prefs.DEFAULT_ROVER_RTSP_PATH;
+                    Prefs.put(app, k, path.startsWith("/") ? path : "/" + path);
+                } else if (k.equals(Prefs.K_ROVER_TARGET_HOST)) {
+                    Prefs.put(app, k, v == null ? "" : v.trim());
                 } else if (k.equals(Prefs.K_SYSTEM_LOCKSCREEN_ENABLED)) {
                     boolean on = "true".equalsIgnoreCase(v) || "1".equals(v);
                     com.magneo.compass.SystemLockscreenManager.Snapshot state =
@@ -2123,6 +2151,10 @@ public class SettingsWebServer {
                 || k.equals(Prefs.K_MCP_SLOW_HINT_ENABLED)
                 || k.equals(Prefs.K_DEBUG_MODE)
                 || k.equals(Prefs.K_VOICE_DIAGNOSTIC_OVERLAYS)
+                || k.equals(Prefs.K_ROVER_AUTO_DISCOVERY)
+                || k.equals(Prefs.K_ROVER_BROADCAST)
+                || k.equals(Prefs.K_ROVER_LEFT_Y_INVERT)
+                || k.equals(Prefs.K_ROVER_RIGHT_Y_INVERT)
                 || k.equals(Prefs.K_ROOT_GRANT_NOTIFICATIONS)
                 || k.equals(Prefs.K_SYSTEM_LOCKSCREEN_ENABLED);
     }

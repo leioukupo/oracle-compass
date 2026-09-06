@@ -14,7 +14,6 @@ import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.Toast;
 
-import com.magneo.compass.browser.BrowserActivity;
 import com.magneo.compass.llm.LlmClient;
 import com.magneo.compass.netfs.FileBrowserActivity;
 import com.magneo.compass.netfs.MusicPlayerActivity;
@@ -545,7 +544,7 @@ public class MainActivity extends BaseActivity implements CompassView.Actions {
             case 3: startActivity(new Intent(android.provider.Settings.ACTION_SETTINGS)); break;
             case 4: startActivity(new Intent(this, MusicPlayerActivity.class)); break;
             case 5: startActivity(new Intent(this, VisionActivity.class)); break;
-            case 6: startActivity(new Intent(this, BrowserActivity.class)); break;
+            case 6: startActivity(new Intent(this, RoverControlActivity.class)); break;
             case 7: view.toggleDetail(); break;
         }
     }

@@ -437,6 +437,11 @@ public class SettingsActivity extends BaseActivity {
 
     private void buildApps(LinearLayout b) {
         summaryRow(b, "网页设置", SettingsWebServer.url(), this::showWebSettings);
+        summaryRow(b, "车控设置", Prefs.roverTargetSummary(this), () -> {
+            Intent intent = new Intent(this, RoverControlActivity.class);
+            intent.putExtra(RoverControlActivity.EXTRA_OPEN_SETTINGS, true);
+            startActivity(intent);
+        });
         actionButton(b, "优先应用 1-8", () -> startActivity(new Intent(this, PriorityAppsActivity.class)), false);
         actionButton(b, "保存并返回罗盘", () -> {
             saveCurrent();
