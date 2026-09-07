@@ -6,6 +6,7 @@ import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.Surface;
@@ -35,16 +36,26 @@ public class RoverControlActivity extends BaseActivity implements
     private RoverControlView controls;
     private RoverUdpTransport transport;
     private RoverStatusClient statusClient;
-    private MediaPlayer mediaPlayer;
+    private volatile MediaPlayer mediaPlayer;
+    private HandlerThread videoThread;
+    private Handler videoWorker;
     private Surface videoSurface;
     private String activeVideoHost = "";
-    private boolean resumed;
+    private volatile boolean resumed;
     private boolean videoStarting;
+    private volatile int videoGeneration;
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+        // MediaPlayer may perform network I/O while setting up an RTSP source.
+        // Keep all of that work off the UI thread so a slow/unavailable camera
+        // cannot trigger NetworkOnMainThreadException or stall the controls.
+        videoThread = new HandlerThread("rover-rtsp");
+        videoThread.start();
+        videoWorker = new Handler(videoThread.getLooper());
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -57,7 +68,11 @@ public class RoverControlActivity extends BaseActivity implements
         video.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             @Override public void onSurfaceTextureAvailable(SurfaceTexture surface, int w, int h) {
                 videoSurface = new Surface(surface);
-                if (resumed) startVideo(activeVideoHost);
+                if (resumed) {
+                    String host = activeVideoHost.length() == 0 && transport != null
+                            ? transport.activeHost() : activeVideoHost;
+                    startVideo(host);
+                }
             }
             @Override public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int w, int h) {}
             @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
@@ -124,6 +139,16 @@ public class RoverControlActivity extends BaseActivity implements
         super.onPause();
     }
 
+    @Override protected void onDestroy() {
+        releaseVideo();
+        videoWorker = null;
+        if (videoThread != null) {
+            videoThread.quitSafely();
+            videoThread = null;
+        }
+        super.onDestroy();
+    }
+
     @Override public void onTargetChanged(final String host) {
         ui.post(() -> {
             if (controls == null) return;
@@ -186,48 +211,94 @@ public class RoverControlActivity extends BaseActivity implements
         host = host.trim();
         if (videoStarting && host.equals(activeVideoHost)) return;
         activeVideoHost = host;
-        releaseVideo();
+        final int generation = ++videoGeneration;
         videoStarting = true;
         controls.setVideoText("视频连接中");
         final String url = Uri.parse("rtsp://" + host + ":" + Prefs.roverRtspPort(this)
                 + Prefs.roverRtspPath(this)).toString();
+        final Surface surface = videoSurface;
+        Handler worker = videoWorker;
+        if (worker == null) {
+            videoFailed(generation);
+            return;
+        }
+        worker.post(() -> prepareVideoOnWorker(generation, url, surface));
+    }
+
+    private void prepareVideoOnWorker(final int generation, String url, Surface surface) {
+        releasePlayerOnWorker();
+        if (!isVideoCurrent(generation) || surface == null) return;
         try {
             MediaPlayer mp = new MediaPlayer();
             mediaPlayer = mp;
             mp.setAudioStreamType(android.media.AudioManager.STREAM_MUSIC);
-            mp.setDataSource(this, Uri.parse(url));
-            mp.setSurface(videoSurface);
             mp.setOnPreparedListener(player -> {
-                videoStarting = false;
-                if (mediaPlayer != player || !resumed) return;
-                try { player.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT); }
-                catch (Exception ignored) {}
-                player.start();
-                controls.setVideoText("视频在线");
+                if (!isVideoCurrent(generation) || mediaPlayer != player) return;
+                try {
+                    player.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT);
+                    player.start();
+                    ui.post(() -> {
+                        if (isVideoCurrent(generation) && mediaPlayer == player) {
+                            videoStarting = false;
+                            controls.setVideoText("视频在线");
+                        }
+                    });
+                } catch (Exception e) {
+                    ui.post(() -> videoFailed(generation));
+                }
             });
             mp.setOnInfoListener((player, what, extra) -> {
-                if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) controls.setVideoText("视频缓冲");
-                else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END) controls.setVideoText("视频在线");
+                if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
+                    ui.post(() -> {
+                        if (isVideoCurrent(generation) && mediaPlayer == player)
+                            controls.setVideoText("视频缓冲");
+                    });
+                } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+                    ui.post(() -> {
+                        if (isVideoCurrent(generation) && mediaPlayer == player)
+                            controls.setVideoText("视频在线");
+                    });
+                }
                 return false;
             });
             mp.setOnErrorListener((player, what, extra) -> {
-                videoFailed();
+                ui.post(() -> videoFailed(generation));
                 return true;
             });
+            // This call can touch the network, so it deliberately runs on the
+            // rover-rtsp HandlerThread rather than the main/UI thread.
+            mp.setDataSource(this, Uri.parse(url));
+            mp.setSurface(surface);
             mp.prepareAsync();
         } catch (Exception e) {
-            videoFailed();
+            ui.post(() -> videoFailed(generation));
         }
     }
 
-    private void videoFailed() {
+    private boolean isVideoCurrent(int generation) {
+        return resumed && generation == videoGeneration;
+    }
+
+    private void videoFailed(int generation) {
+        if (generation != videoGeneration) return;
         videoStarting = false;
-        releaseVideo();
+        ++videoGeneration;
+        postReleasePlayer();
         if (controls != null) controls.setVideoText("视频不可用 · 控制仍运行");
     }
 
     private void releaseVideo() {
         videoStarting = false;
+        ++videoGeneration;
+        postReleasePlayer();
+    }
+
+    private void postReleasePlayer() {
+        Handler worker = videoWorker;
+        if (worker != null) worker.post(this::releasePlayerOnWorker);
+    }
+
+    private void releasePlayerOnWorker() {
         MediaPlayer mp = mediaPlayer;
         mediaPlayer = null;
         if (mp != null) {
