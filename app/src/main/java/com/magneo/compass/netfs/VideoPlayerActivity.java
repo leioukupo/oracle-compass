@@ -4,6 +4,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.graphics.SurfaceTexture;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
@@ -11,6 +12,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.Surface;
+import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -18,7 +21,6 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
-import android.widget.VideoView;
 
 import com.magneo.compass.ui.Ui;
 
@@ -32,7 +34,11 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     private final Runnable hideChromeTask = () -> setChromeVisible(false);
     private final Runnable progressTask = this::updateProgress;
 
-    private VideoView vv;
+    private TextureView video;
+    private MediaPlayer player;
+    private Surface videoSurface;
+    private Uri sourceUri;
+    private boolean surfaceReady;
     private TextView titleView;
     private TextView hint;
     private LinearLayout bottomBar;
@@ -64,9 +70,7 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
         failed = true;
         hint.setText(msg);
         hint.setVisibility(View.VISIBLE);
-        if (prepared) {
-            try { vv.stopPlayback(); } catch (Exception ignored) {}
-        }
+        releasePlayer();
         prepared = false;
         updatePlayButton();
         setChromeVisible(true);
@@ -110,9 +114,28 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
         videoStage.setPadding(stagePad, stagePad, stagePad, stagePad);
         FrameLayout videoArea = new FrameLayout(this);
         videoArea.setBackgroundColor(Color.BLACK);
-        vv = new VideoView(this);
-        vv.setBackgroundColor(Color.BLACK);
-        videoArea.addView(vv, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+        video = new TextureView(this);
+        video.setOpaque(true);
+        video.setBackgroundColor(Color.BLACK);
+        video.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+            @Override public void onSurfaceTextureAvailable(SurfaceTexture st, int width, int height) {
+                videoSurface = new Surface(st);
+                surfaceReady = true;
+                beginPrepare();
+            }
+            @Override public void onSurfaceTextureSizeChanged(SurfaceTexture st, int width, int height) {}
+            @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture st) {
+                surfaceReady = false;
+                releasePlayer();
+                if (videoSurface != null) {
+                    videoSurface.release();
+                    videoSurface = null;
+                }
+                return true;
+            }
+            @Override public void onSurfaceTextureUpdated(SurfaceTexture st) {}
+        });
+        videoArea.addView(video, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
         hint = new TextView(this);
         hint.setText("加载中…");
@@ -204,50 +227,10 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
                 draggingSeek = false;
                 if (prepared) {
                     int pos = seekBar.getProgress();
-                    vv.seekTo(pos);
+                    if (player != null) player.seekTo(pos);
                     updateTime(pos);
                 }
             }
-        });
-
-        vv.setOnPreparedListener(m -> {
-            failed = false;
-            prepared = true;
-            durationMs = Math.max(1, vv.getDuration());
-            seekBar.setMax(durationMs);
-            updateTitle();
-            hint.setVisibility(View.GONE);
-            buffering = false;
-            userPaused = false;
-            vv.start();
-            updatePlayButton();
-            showChromeTransient();
-            ui.removeCallbacks(progressTask);
-            ui.post(progressTask);
-        });
-        vv.setOnCompletionListener(m -> {
-            userPaused = true;
-            updatePlayButton();
-            showChromeVisible();
-        });
-        vv.setOnInfoListener((m, what, extra) -> {
-            if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
-                hint.setVisibility(View.GONE);
-                buffering = false;
-                showChromeTransient();
-            } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
-                buffering = true;
-                hint.setText("缓冲中…");
-                hint.setVisibility(View.VISIBLE);
-            } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
-                buffering = false;
-                if (prepared) hint.setVisibility(View.GONE);
-            }
-            return false;
-        });
-        vv.setOnErrorListener((m, what, extra) -> {
-            fail(mediaErrorMessage(what, extra));
-            return true;
         });
 
         updateTitle();
@@ -268,8 +251,10 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
         }
         if (connId.isEmpty() || remotePath.isEmpty()
                 || !url.toLowerCase(java.util.Locale.US).startsWith("http")) {
-            try { vv.setVideoURI(Uri.parse(url)); } catch (Exception e) { fail("视频地址无效"); }
-            hdelayedTimeout();
+            try {
+                sourceUri = Uri.parse(url);
+                beginPrepare();
+            } catch (Exception e) { fail("视频地址无效"); }
             return;
         }
 
@@ -359,10 +344,94 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
         try {
             hint.setText("正在打开视频…");
             hint.setVisibility(View.VISIBLE);
-            vv.setVideoURI(Uri.fromFile(file));
-            hdelayedTimeout();
+            sourceUri = Uri.fromFile(file);
+            beginPrepare();
         } catch (Exception e) {
             fail("视频文件无效：\n" + safeError(e));
+        }
+    }
+
+    /**
+     * TextureView keeps the decoded frames in the normal View composition
+     * tree.  Unlike VideoView's SurfaceView, it is not placed in a separate
+     * hardware layer behind the round-screen background/overlays on MT6580.
+     */
+    private void beginPrepare() {
+        if (cancelled || failed || sourceUri == null || !surfaceReady || videoSurface == null) return;
+        releasePlayer();
+        prepared = false;
+        durationMs = 0;
+        try {
+            final MediaPlayer mp = new MediaPlayer();
+            player = mp;
+            mp.setAudioStreamType(android.media.AudioManager.STREAM_MUSIC);
+            mp.setOnPreparedListener(p -> {
+                if (player != p || cancelled) return;
+                try {
+                    prepared = true;
+                    failed = false;
+                    durationMs = Math.max(1, p.getDuration());
+                    seekBar.setMax(durationMs);
+                    updateTitle();
+                    buffering = false;
+                    userPaused = false;
+                    p.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT);
+                    p.start();
+                    hint.setText("正在显示首帧…");
+                    hint.setVisibility(View.VISIBLE);
+                    updatePlayButton();
+                    showChromeTransient();
+                    ui.removeCallbacks(progressTask);
+                    ui.post(progressTask);
+                } catch (Exception e) {
+                    fail("视频启动失败：\n" + safeError(e));
+                }
+            });
+            mp.setOnCompletionListener(p -> {
+                if (player != p) return;
+                userPaused = true;
+                updatePlayButton();
+                showChromeVisible();
+            });
+            mp.setOnInfoListener((p, what, extra) -> {
+                if (player != p) return true;
+                if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
+                    hint.setVisibility(View.GONE);
+                    buffering = false;
+                    showChromeTransient();
+                } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
+                    buffering = true;
+                    hint.setText("缓冲中…");
+                    hint.setVisibility(View.VISIBLE);
+                } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+                    buffering = false;
+                    if (prepared) hint.setVisibility(View.GONE);
+                }
+                return false;
+            });
+            mp.setOnVideoSizeChangedListener((p, width, height) -> {
+                if (player == p && width > 0 && height > 0) hint.setVisibility(View.GONE);
+            });
+            mp.setOnErrorListener((p, what, extra) -> {
+                if (player == p) fail(mediaErrorMessage(what, extra));
+                return true;
+            });
+            mp.setDataSource(this, sourceUri);
+            mp.setSurface(videoSurface);
+            mp.prepareAsync();
+            hdelayedTimeout();
+        } catch (Exception e) {
+            fail("视频初始化失败：\n" + safeError(e));
+        }
+    }
+
+    private void releasePlayer() {
+        MediaPlayer p = player;
+        player = null;
+        if (p != null) {
+            try { p.stop(); } catch (Exception ignored) {}
+            try { p.reset(); } catch (Exception ignored) {}
+            try { p.release(); } catch (Exception ignored) {}
         }
     }
 
@@ -410,7 +479,7 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     }
 
     private void updatePlayButton() {
-        playBtn.setText(prepared && vv.isPlaying() ? "⏸" : "▶");
+        playBtn.setText(prepared && player != null && player.isPlaying() ? "⏸" : "▶");
     }
 
     private void updateTime(int pos) {
@@ -420,12 +489,12 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     private void updateProgress() {
         if (!prepared) return;
         if (!draggingSeek) {
-            int pos = vv.getCurrentPosition();
+            int pos = player == null ? 0 : player.getCurrentPosition();
             seekBar.setProgress(pos);
             updateTime(pos);
         }
         updatePlayButton();
-        if (chromeVisible && vv.isPlaying()) {
+        if (chromeVisible && player != null && player.isPlaying()) {
             ui.removeCallbacks(progressTask);
             ui.postDelayed(progressTask, 400);
         }
@@ -433,8 +502,9 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
 
     private void seekBy(int deltaMs) {
         if (!prepared) return;
-        int pos = Math.max(0, Math.min(durationMs, vv.getCurrentPosition() + deltaMs));
-        vv.seekTo(pos);
+        int current = player == null ? 0 : player.getCurrentPosition();
+        int pos = Math.max(0, Math.min(durationMs, current + deltaMs));
+        if (player != null) player.seekTo(pos);
         seekBar.setProgress(pos);
         updateTime(pos);
         hint.setText(deltaMs > 0 ? "快进 10 秒" : "快退 10 秒");
@@ -446,13 +516,13 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
 
     private void togglePlayPause() {
         if (!prepared) return;
-        if (vv.isPlaying()) {
-            vv.pause();
+        if (player != null && player.isPlaying()) {
+            player.pause();
             userPaused = true;
             hint.setText("已暂停");
             hint.setVisibility(View.VISIBLE);
         } else {
-            vv.start();
+            if (player != null) player.start();
             userPaused = false;
             hint.setVisibility(View.GONE);
             ui.removeCallbacks(progressTask);
@@ -477,7 +547,7 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     private void showChromeTransient() {
         setChromeVisible(true);
         ui.removeCallbacks(hideChromeTask);
-        if (prepared && vv.isPlaying()) {
+        if (prepared && player != null && player.isPlaying()) {
             ui.removeCallbacks(progressTask);
             ui.post(progressTask);
         }
@@ -543,7 +613,12 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
         downloading = false;
         if (downloadThread != null) downloadThread.interrupt();
         ui.removeCallbacksAndMessages(null);
-        try { vv.stopPlayback(); } catch (Exception ignored) {}
+        surfaceReady = false;
+        releasePlayer();
+        if (videoSurface != null) {
+            videoSurface.release();
+            videoSurface = null;
+        }
         super.onDestroy();
     }
 
