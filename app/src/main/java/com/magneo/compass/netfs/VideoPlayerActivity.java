@@ -31,6 +31,7 @@ import java.io.InputStream;
 /** 视频播放器：沉浸预览 + 自定义浮层控制 + 轻触/滑动快进。 */
 public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     private static final long VIDEO_CACHE_LIMIT = 256L * 1024L * 1024L;
+    private static final long MAX_FALLBACK_CACHE_BYTES = 128L * 1024L * 1024L;
     private static final long VIDEO_PART_MAX_AGE = 24L * 60L * 60L * 1000L;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final Runnable hideChromeTask = () -> setChromeVisible(false);
@@ -65,6 +66,9 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     private String remotePath = "";
     private volatile boolean cancelled;
     private volatile boolean downloading;
+    private boolean remoteSource;
+    private boolean fallbackStarted;
+    private boolean forceCache;
     private Thread downloadThread;
 
     private void fail(String msg) {
@@ -242,9 +246,8 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     /**
      * Android 5.1's MediaPlayer is unreliable when an MP4 is fed through a
      * WebDAV/FTP range proxy (audio may start while the video track stays
-     * black).  Downloading to the app cache first uses the same local-file
-     * path that is known to decode correctly on this device and avoids
-     * server-specific Range/Content-Range behaviour.
+     * black). The normal path now streams through the proxy; a bounded local
+     * cache is used only as a fallback when that stream fails.
      */
     private void prepareVideoSource() {
         if (url == null || url.trim().isEmpty()) {
@@ -280,6 +283,21 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
             setLocalVideo(cached);
             return;
         }
+
+        // Start from the local HTTP range proxy. Unlike the former full-file
+        // cache path, this lets a long movie start as soon as its metadata and
+        // first key frame are available.
+        if (!forceCache) {
+            remoteSource = true;
+            fallbackStarted = false;
+            sourceUri = Uri.parse(url);
+            hint.setText("正在连接视频…");
+            hint.setVisibility(View.VISIBLE);
+            beginPrepare();
+            return;
+        }
+        forceCache = false;
+        remoteSource = false;
 
         downloading = true;
         hint.setText("正在缓存视频…");
@@ -350,6 +368,7 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
         try {
             hint.setText("正在打开视频…");
             hint.setVisibility(View.VISIBLE);
+            remoteSource = false;
             sourceUri = Uri.fromFile(file);
             beginPrepare();
         } catch (Exception e) {
@@ -419,7 +438,7 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
                 if (player == p && width > 0 && height > 0) hint.setVisibility(View.GONE);
             });
             mp.setOnErrorListener((p, what, extra) -> {
-                if (player == p) fail(mediaErrorMessage(what, extra));
+                if (player == p) playbackError(mediaErrorMessage(what, extra));
                 return true;
             });
             mp.setDataSource(this, sourceUri);
@@ -439,6 +458,20 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
             try { p.reset(); } catch (Exception ignored) {}
             try { p.release(); } catch (Exception ignored) {}
         }
+    }
+
+    private void playbackError(String message) {
+        if (remoteSource && !fallbackStarted && size > 0 && size <= MAX_FALLBACK_CACHE_BYTES) {
+            fallbackStarted = true;
+            prepared = false;
+            releasePlayer();
+            hint.setText("流式播放失败，正在缓存后重试…");
+            hint.setVisibility(View.VISIBLE);
+            forceCache = true;
+            prepareVideoSource();
+            return;
+        }
+        fail(message);
     }
 
     private String safeError(Exception e) {
@@ -498,7 +531,7 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
         }, 8000);
         ui.postDelayed(() -> {
             if (!prepared && !failed) {
-                fail("视频加载超时：\n远程服务响应过慢或连接已断开");
+                playbackError("视频加载超时：\n远程服务响应过慢或连接已断开");
             }
         }, 45000);
     }
