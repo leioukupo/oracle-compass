@@ -30,6 +30,8 @@ import java.io.InputStream;
 
 /** 视频播放器：沉浸预览 + 自定义浮层控制 + 轻触/滑动快进。 */
 public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
+    private static final long VIDEO_CACHE_LIMIT = 256L * 1024L * 1024L;
+    private static final long VIDEO_PART_MAX_AGE = 24L * 60L * 60L * 1000L;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final Runnable hideChromeTask = () -> setChromeVisible(false);
     private final Runnable progressTask = this::updateProgress;
@@ -272,7 +274,9 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
         // Keep the media suffix so the legacy framework can select the right
         // extractor/decoder before it has inspected the file contents.
         final File cached = new File(cacheDir, "video-" + key + mediaSuffix());
+        cleanupVideoCache(cacheDir, cached);
         if (size > 0 && cached.isFile() && cached.length() == size) {
+            cached.setLastModified(System.currentTimeMillis());
             setLocalVideo(cached);
             return;
         }
@@ -319,11 +323,13 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
                 out = null;
                 if (cached.exists() && !cached.delete()) throw new java.io.IOException("无法更新缓存");
                 if (!part.renameTo(cached)) throw new java.io.IOException("无法保存视频缓存");
+                cleanupVideoCache(cacheDir, cached);
                 ui.post(() -> {
                     downloading = false;
                     if (!cancelled && !isFinishing()) setLocalVideo(cached);
                 });
             } catch (Exception e) {
+                if (part.exists()) part.delete();
                 if (!cancelled) ui.post(() -> {
                     downloading = false;
                     fail("视频缓存失败：\n" + safeError(e));
@@ -438,6 +444,35 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     private String safeError(Exception e) {
         String s = e == null ? "未知错误" : e.getMessage();
         return s == null || s.trim().isEmpty() ? "网络或存储异常" : s;
+    }
+
+    /** Keep the private cache bounded; Android's cache eviction is not timely
+     * enough on this old device, so enforce an app-level 256 MB LRU policy. */
+    private void cleanupVideoCache(File dir, File keep) {
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        long now = System.currentTimeMillis();
+        long total = 0;
+        java.util.ArrayList<File> videos = new java.util.ArrayList<>();
+        for (File f : files) {
+            if (!f.isFile()) continue;
+            String n = f.getName();
+            if (n.endsWith(".part")) {
+                if (now - f.lastModified() > VIDEO_PART_MAX_AGE) f.delete();
+                continue;
+            }
+            if (!n.startsWith("video-") || f.equals(keep)) continue;
+            total += Math.max(0L, f.length());
+            videos.add(f);
+        }
+        if (keep != null && keep.isFile()) total += Math.max(0L, keep.length());
+        if (total <= VIDEO_CACHE_LIMIT) return;
+        java.util.Collections.sort(videos, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+        for (File f : videos) {
+            if (total <= VIDEO_CACHE_LIMIT) break;
+            long len = Math.max(0L, f.length());
+            if (f.delete()) total -= len;
+        }
     }
 
     private String mediaSuffix() {
