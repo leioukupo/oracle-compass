@@ -6,6 +6,8 @@ import android.net.wifi.WifiManager;
 
 import com.magneo.compass.ConversationLog;
 import com.magneo.compass.DebugLog;
+import com.magneo.compass.GestureGuardManager;
+import com.magneo.compass.GestureGuardService;
 import com.magneo.compass.Prefs;
 import com.magneo.compass.ProviderConfig;
 import com.magneo.compass.llm.LlmClient;
@@ -169,6 +171,18 @@ public class SettingsWebServer {
             boolean authed = isAuthed(req);
             if (path.equals("/")) serveConsoleHtml(out);
             else if (path.equals("/status")) serveStatus(out, authed);
+            else if (path.equals("/gesture/status")) {
+                if (!requireAuth(out, authed)) return;
+                serveJson(out, GestureGuardManager.status(app).toJson());
+            }
+            else if (path.equals("/gesture/save")) {
+                if (!requireAuth(out, authed)) return;
+                serveGestureSave(out, body);
+            }
+            else if (path.equals("/gesture/repair")) {
+                if (!requireAuth(out, authed)) return;
+                serveJson(out, GestureGuardManager.repair(app).toJson());
+            }
             else if (path.equals("/conversations")) {
                 if (!requireAuth(out, authed)) return;
                 serveConversations(out);
@@ -670,6 +684,8 @@ public class SettingsWebServer {
                 .append("<p class='hint' id='lockscreenActual'>LockSettingsService：读取中</p>")
                 .append(rowCheckbox("低电量提示音", Prefs.K_LOW_BATTERY_SOUND, "默认关闭；只控制系统低电量声音，不影响电量环和充电状态"))
                 .append("<p class='hint' id='lowBatterySoundActual'>系统声音状态：读取中</p>")
+                .append(rowCheckbox("Gesture 无障碍守护", Prefs.K_GESTURE_GUARD_ENABLED, "默认开启；仅停止守护，不会关闭 Gesture 当前无障碍"))
+                .append("<p class='hint' id='gestureGuardActual'>Gesture：读取中</p><div class='inline'><button type='button' class='secondary' onclick='gestureRepair()'>立即检测并修复</button><span class='state' id='gestureGuardMsg'></span></div>")
                 .append("<div class='inline'><button type='button' onclick='adbSave()'>保存自启</button><button type='button' onclick='adbStart()'>启动/重启 ADB TCP</button><button type='button' class='secondary' onclick='adbStop()'>关闭 ADB TCP</button><button type='button' class='danger' onclick='deviceReboot()'>重启设备</button><span class='state' id='adbMsg'></span></div><p class='hint'>设备侧：<span id='adbState'>未知</span><span id='adbDetail'></span></p><pre id='adbLog'></pre></div></div></section>")
                 .append("<section class='panel' id='tab-apps'><div class='sectionTitle'><h2>应用管理 / 车控</h2><small>车控配置与 APK 安装</small></div><div class='cols'><div class='box'><h3>车控设置</h3>")
                 .append(rowInput("K230 主机", Prefs.K_ROVER_TARGET_HOST, "text", Prefs.DEFAULT_ROVER_TARGET_HOST))
@@ -720,12 +736,13 @@ public class SettingsWebServer {
                 .append("function renderHwDiag(h){var box=q('#hwDiag');if(!box)return;h=h||{};var rows=[['传感器',h.sensors||'--'],['姿态',h.pose||'--'],['磁场',h.magnetic||'--'],['GPS请求',h.gpsRequest||'--'],['GPS驱动',h.gpsDriver||'--'],['GPS动作',h.gpsAction||'--'],['卫星',h.gps||'--'],['弱项',h.untrusted||'--'],['校准',h.magCalibration||'--']];var out='';for(var i=0;i<rows.length;i++)out+='<div class=\"item\"><div class=\"main\"><b>'+esc(rows[i][0])+'</b><small>'+esc(rows[i][1])+'</small></div></div>';box.innerHTML=out}")
                 .append("function gpsReset(){if(!confirm('清理 GPS 辅助数据并重新搜星？建议在室外空旷处使用。'))return;msg('gpsResetMsg','正在触发...');api('POST','/gps/reset','',function(d){msg('gpsResetMsg',d&&d.ok?(d.msg||'已触发'):(d&&d.err?d.err:'失败'));setTimeout(systemStatus,800)},'application/x-www-form-urlencoded')}")
                 .append("function systemStatus(){api('GET','/system_status',null,renderSystem)}function renderSystem(d){if(!d)return;q('#sysTime').textContent=d.time||'--:--';q('#sysDate').textContent=d.date||'';meter('Cpu',d.cpu);meter('AppCpu',d.appCpu);meter('Ram',d.memPct);meter('Gpu',d.gpu,d.gpuText);meter('Bat',d.battery,d.batteryText);renderHwDiag(d.hardware);var bat=d.batteryText||pct(d.battery),gt=d.gpuText||pct(d.gpu),core=(d.cpuOnline&&d.cpuPossible)?(' · 核 '+d.cpuOnline+'/'+d.cpuPossible):'',appCore=(Number(d.appCpuCore)>=0?(' · 单核 '+pct(d.appCpuCore)):''),renderer=(d.mainRenderer==='canvas'?'Canvas':'OpenGL'),fps=d.mainFpsMode==='power'?'省电':(d.mainFpsMode==='smooth'?'流畅':'自适应');q('#sysCore').textContent='总 '+pct(d.cpu)+' · App '+pct(d.appCpu)+appCore+core+' · RAM '+pct(d.memPct)+' · Mali '+gt+' · 电 '+bat+' · '+renderer+'/'+fps;q('#sysGps').textContent=d.gps||'';q('#sysUpdated').textContent='更新 '+(d.time||'');var note='loadavg '+(d.loadAvg1||'--')+' / '+(d.loadAvg5||'--')+' / '+(d.loadAvg15||'--')+' · 可运行 '+(d.runnable==null?'--':d.runnable)+' · D状态 '+(d.blockedThreads==null?'--':d.blockedThreads)+' · App线程 '+(d.appThreads==null?'--':d.appThreads);if(d.streamActive)note+=' · 屏幕预览会增加 CPU/温度';if(d.wifiScanAgeMs>=0)note+=' · Wi-Fi扫描 '+Math.round(d.wifiScanAgeMs/60000)+'分钟前';if(d.conversationBytes!=null)note+=' · 日志 '+Math.round(d.conversationBytes/1024)+'KB';q('#sysLoadNote').textContent=note;var temps=d.temps||[],ring=q('#sysTempRing');if(!ring)return;ring.innerHTML='';for(var i=0;i<temps.length;i++){var el=document.createElement('div');el.className='tempdot';el.innerHTML='<span>'+esc(temps[i].name||'温度')+'</span><b>'+Number(temps[i].c||0).toFixed(0)+'°</b>';ring.appendChild(el)}if(!temps.length){var e=document.createElement('div');e.className='tempdot';e.innerHTML='<span>温度</span><b>--</b>';ring.appendChild(e)}}")
-                .append("var consoleTimer=null;function stopConsolePolling(){if(consoleTimer){clearInterval(consoleTimer);consoleTimer=null}}function startConsolePolling(){stopConsolePolling();if(document.hidden)return;consoleTimer=setInterval(function(){if(document.hidden)return;frpcRefresh();camRefresh();adbStatus();appState();systemStatus();if(activeTab('records'))loadConv();if(activeTab('debug'))loadDebugLog();},5000)}function activeTab(id){var e=q('#tab-'+id);return !!(e&&e.className.indexOf('active')>=0)}function refreshTabData(id){if(id==='records')loadConv();else if(id==='debug')loadDebugLog();else if(id==='apps')loadApps();else if(id==='files')fsList()}function initConsole(){loadStatus();lowBatterySoundStatus();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();bootAssetStatus();fsList();startConsolePolling()}")
+                .append("var consoleTimer=null;function stopConsolePolling(){if(consoleTimer){clearInterval(consoleTimer);consoleTimer=null}}function startConsolePolling(){stopConsolePolling();if(document.hidden)return;consoleTimer=setInterval(function(){if(document.hidden)return;frpcRefresh();camRefresh();adbStatus();appState();systemStatus();gestureRefresh();if(activeTab('records'))loadConv();if(activeTab('debug'))loadDebugLog();},5000)}function activeTab(id){var e=q('#tab-'+id);return !!(e&&e.className.indexOf('active')>=0)}function refreshTabData(id){if(id==='records')loadConv();else if(id==='debug')loadDebugLog();else if(id==='apps')loadApps();else if(id==='files')fsList()}function initConsole(){loadStatus();lowBatterySoundStatus();gestureRefresh();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();bootAssetStatus();fsList();startConsolePolling()}")
                 .append("function wireTabs(){var bs=qa('.tab');for(var i=0;i<bs.length;i++)bs[i].onclick=function(){var id=this.getAttribute('data-tab');var b=qa('.tab'),p=qa('.panel');for(var j=0;j<b.length;j++)b[j].classList.remove('active');for(var k=0;k<p.length;k++)p[k].classList.remove('active');this.classList.add('active');q('#tab-'+id).classList.add('active');refreshTabData(id)}}document.addEventListener('visibilitychange',function(){if(document.hidden)stopConsolePolling();else{publicStatus();if(started){startConsolePolling();refreshTabData('records')}}});")
                 .append("function wireDirty(){var f=q('#f');if(!f)return;var es=f.querySelectorAll('input,textarea,select');for(var i=0;i<es.length;i++){es[i].addEventListener('input',markDirty);es[i].addEventListener('change',markDirty)}}")
                 .append("function markDirty(){dirty=true;q('#dirtyState').textContent='有未保存修改';q('#dirtyState').style.color='var(--gold)'}function clean(){dirty=false;q('#dirtyState').textContent='已保存';q('#dirtyState').style.color='var(--ok)'}")
                 .append("function loadStatus(){api('GET','/status',null,function(d){if(!d||!d.authed){authState();return}for(var k in d){var e=q('[name=\"'+k+'\"]');if(!e)continue;var mcpTok=k.indexOf('mcpServer')===0&&k.indexOf('Token')>=0;if(e.type==='checkbox')e.checked=(d[k]===true||d[k]==='true');else if(k!=='apiKey'&&k!=='voiceApiKey'&&!mcpTok)e.value=d[k]}q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';msg('apiKeyState',d.apiKeySet?'当前 '+d.apiKeyMask:'当前未设置');msg('voiceKeyState',d.voiceApiKeySet?'当前 '+d.voiceApiKeyMask:'当前未设置');var rg=d.rootGrantStatus||{},ls=d.systemLockscreenStatus||{};msg('rootGrantActual','Magisk 数据库：'+(rg.detail||'状态未知'));msg('lockscreenActual','LockSettingsService：'+(ls.detail||'状态未知')+(ls.secureCredential?' · 检测到安全凭据':''));for(var i=1;i<=3;i++){var p='mcpServer'+i,s=q('[name='+p+'Token]');if(s)s.value='';msg(p+'TokenState',d[p+'TokenSet']?'当前 '+d[p+'TokenMask']:'当前未设置')}syncRanges();clean()})}")
                 .append("function lowBatterySoundStatus(){api('GET','/status',null,function(d){if(!d||!d.authed)return;var s=d.lowBatterySoundStatus||{};msg('lowBatterySoundActual','系统声音：'+(s.detail||'状态未知'))})}")
+                .append("function renderGesture(s){s=s||{};var a=[];a.push(s.installed?'已安装':'未安装');if(s.component)a.push(s.component);a.push(s.configured?'设置已启用':'设置未启用');a.push(s.bound?'实际已绑定':'尚未绑定');a.push(s.processRunning?'进程运行':'进程未见');if(s.moduleHeartbeat)a.push('模块心跳 '+s.moduleHeartbeat);if(s.lastRepair)a.push('最近修复 '+s.lastRepair);if(s.lastError)a.push('错误 '+s.lastError);a.push(s.detail||'');msg('gestureGuardActual',a.join(' · '))}function gestureRefresh(){api('GET','/gesture/status',null,function(d){if(d)renderGesture(d)})}function gestureRepair(){msg('gestureGuardMsg','正在检测…');api('POST','/gesture/repair','',function(d){renderGesture(d);msg('gestureGuardMsg',d&&d.detail?d.detail:(d&&d.ok?'已修复':'修复失败'))},'application/x-www-form-urlencoded')}")
                 .append("function providerChanged(){var p=q('#provider').value;if(p==='deepseek'){q('[name=baseUrl]').value='https://api.deepseek.com/v1';q('[name=textModel]').value='deepseek-chat';if(!q('[name=visionModel]').value)q('[name=visionModel]').value='deepseek-chat';q('[name=textBaseUrl]').value='';q('[name=visionBaseUrl]').value=''}else{if(q('[name=baseUrl]').value==='https://api.deepseek.com/v1')q('[name=baseUrl]').value='';if(!q('[name=textModel]').value||q('[name=textModel]').value==='deepseek-chat')q('[name=textModel]').value='gpt-4.1-mini'}}")
                 .append("function oracleShakeLabel(v){v=Math.max(0,Math.min(100,Number(v||70)));var n=v<18?'轻摇':(v<38?'稍轻':(v<62?'正常':(v<82?'较重':'用力')));return Math.round(v)+' / 100 · '+n}function syncRanges(){var e=q('[name=oracleShakeForce]'),t=q('#oracleShakeForceText');if(e&&t)t.textContent=oracleShakeLabel(e.value)}")
                 .append("function save(){var fd=new FormData(q('#f')),b=new URLSearchParams(fd),c=q('#f').querySelectorAll('input[type=checkbox]');for(var i=0;i<c.length;i++)b.set(c[i].name,c[i].checked?'true':'false');textApi('POST','/save',b.toString(),function(t){msg('msg',t);if(t.indexOf('已保存')>=0){q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';for(var j=1;j<=3;j++){var te=q('[name=mcpServer'+j+'Token]');if(te)te.value=''}q('[name=clearApiKey]').checked=false;q('[name=clearVoiceApiKey]').checked=false;clean();loadStatus()}},'application/x-www-form-urlencoded')}")
@@ -1515,12 +1532,14 @@ public class SettingsWebServer {
             o.put(Prefs.K_ROOT_GRANT_NOTIFICATIONS, Prefs.rootGrantNotifications(app));
             o.put(Prefs.K_SYSTEM_LOCKSCREEN_ENABLED, Prefs.systemLockscreenEnabled(app));
             o.put(Prefs.K_LOW_BATTERY_SOUND, Prefs.lowBatterySoundEnabled(app));
+            o.put(Prefs.K_GESTURE_GUARD_ENABLED, Prefs.gestureGuardEnabled(app));
             o.put("rootGrantStatus",
                     com.magneo.compass.RootGrantNotificationManager.status(app).toJson());
             o.put("systemLockscreenStatus",
                     com.magneo.compass.SystemLockscreenManager.status(app).toJson());
             o.put("lowBatterySoundStatus",
                     com.magneo.compass.SystemLowBatterySoundManager.status(app).toJson());
+            o.put("gestureGuardStatus", GestureGuardManager.status(app).toJson());
             o.put("locSource", Prefs.locSource(app));
             o.put("locSourceLabel", Prefs.locSourceLabel(app));
             o.put("locWifiUrl", Prefs.locWifiUrl(app));
@@ -1551,6 +1570,16 @@ public class SettingsWebServer {
         byte[] b = o.toString().getBytes("UTF-8");
         writeHead(out, "application/json; charset=utf-8", b.length);
         out.write(b);
+    }
+
+    private static void serveGestureSave(OutputStream out, String body) throws IOException {
+        try {
+            Map<String, String> fields = form(body);
+            boolean enabled = isTrue(fields.get("enabled"));
+            serveJson(out, GestureGuardManager.setGuardEnabled(app, enabled).toJson());
+        } catch (Exception e) {
+            serveJson(out, err(e.getMessage()));
+        }
     }
 
     private static void serveSave(OutputStream out, String body) throws IOException {
@@ -1653,6 +1682,12 @@ public class SettingsWebServer {
                             com.magneo.compass.SystemLowBatterySoundManager.setEnabledBlocking(
                                     app, on, true);
                     if (!state.ok) throw new IOException(state.detail);
+                } else if (k.equals(Prefs.K_GESTURE_GUARD_ENABLED)) {
+                    boolean on = "true".equalsIgnoreCase(v) || "1".equals(v);
+                    GestureGuardManager.Snapshot state = GestureGuardManager.setGuardEnabled(app, on);
+                    if (!state.installed && on) {
+                        // Not installed is an expected state: retain the opt-in policy for later install.
+                    }
                 } else if (isBoolKey(k)) {
                     boolean on = "true".equalsIgnoreCase(v) || "1".equals(v);
                     Prefs.putB(app, k, on);
@@ -2156,7 +2191,8 @@ public class SettingsWebServer {
                 || k.equals(Prefs.K_ROVER_LEFT_Y_INVERT)
                 || k.equals(Prefs.K_ROVER_RIGHT_Y_INVERT)
                 || k.equals(Prefs.K_ROOT_GRANT_NOTIFICATIONS)
-                || k.equals(Prefs.K_SYSTEM_LOCKSCREEN_ENABLED);
+                || k.equals(Prefs.K_SYSTEM_LOCKSCREEN_ENABLED)
+                || k.equals(Prefs.K_GESTURE_GUARD_ENABLED);
     }
 
     private static void syncRuntimeGpsSource() {

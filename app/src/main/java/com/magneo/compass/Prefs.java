@@ -112,6 +112,8 @@ public class Prefs {
     public static final String K_LOW_BATTERY_SOUND = "lowBatterySound";
     /** Last working system sound path, retained so an enabled toggle can restore it. */
     public static final String K_LOW_BATTERY_SOUND_PATH = "lowBatterySoundPath";
+    /** Keeps Gesture's accessibility service configured and actually bound. */
+    public static final String K_GESTURE_GUARD_ENABLED = "gestureGuardEnabled";
     /** TALOS rover virtual-controller transport preferences. */
     public static final String K_ROVER_TARGET_HOST = "roverTargetHost";
     public static final String K_ROVER_UDP_PORT = "roverUdpPort";
@@ -129,6 +131,7 @@ public class Prefs {
     public static final boolean DEFAULT_VAD_ENABLED = true;
     public static final boolean DEFAULT_ROOT_GRANT_NOTIFICATIONS = false;
     public static final boolean DEFAULT_SYSTEM_LOCKSCREEN_ENABLED = false;
+    public static final boolean DEFAULT_GESTURE_GUARD_ENABLED = true;
     public static final String DEFAULT_ROVER_TARGET_HOST = "10.1.20.36";
     public static final int DEFAULT_ROVER_UDP_PORT = 5555;
     public static final boolean DEFAULT_ROVER_AUTO_DISCOVERY = true;
@@ -219,6 +222,10 @@ public class Prefs {
 
     public static boolean systemLockscreenEnabled(Context c) {
         return getB(c, K_SYSTEM_LOCKSCREEN_ENABLED, DEFAULT_SYSTEM_LOCKSCREEN_ENABLED);
+    }
+
+    public static boolean gestureGuardEnabled(Context c) {
+        return getB(c, K_GESTURE_GUARD_ENABLED, DEFAULT_GESTURE_GUARD_ENABLED);
     }
 
     /** System low-battery alert is opt-in on this dedicated device. */

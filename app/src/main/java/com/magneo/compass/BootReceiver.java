@@ -36,5 +36,6 @@ public class BootReceiver extends BroadcastReceiver {
         } catch (Throwable t) {
             Log.w(TAG, "Unable to start remote access after boot", t);
         }
+        GestureGuardService.start(context);
     }
 }
