@@ -238,12 +238,14 @@ public final class GestureGuardManager {
     private static String lockedShell(String body) {
         return "mkdir -p " + STATE_DIR + "; chmod 700 " + STATE_DIR + "; tries=0; "
                 + "if [ -d " + STATE_DIR + "/gesture.lock ]; then lock_pid=$(cat " + STATE_DIR
-                + "/gesture.lock/pid 2>/dev/null); if [ -z \"$lock_pid\" ] || ! kill -0 $lock_pid 2>/dev/null; then rmdir "
-                + STATE_DIR + "/gesture.lock 2>/dev/null; fi; fi; "
+                + "/gesture.lock/pid 2>/dev/null); if [ -z \"$lock_pid\" ] || ! kill -0 $lock_pid 2>/dev/null; then rm -f "
+                + STATE_DIR + "/gesture.lock/pid; rmdir " + STATE_DIR + "/gesture.lock 2>/dev/null; fi; fi; "
                 + "while ! mkdir " + STATE_DIR + "/gesture.lock 2>/dev/null; do tries=$((tries+1)); "
                 + "[ \"$tries\" -ge 10 ] && exit 75; sleep 0.1; done; "
+                + "chmod 700 " + STATE_DIR + "/gesture.lock; "
                 + "echo $$ > " + STATE_DIR + "/gesture.lock/pid; "
-                + "trap 'rmdir " + STATE_DIR + "/gesture.lock 2>/dev/null' 0 1 2 3 15; " + body;
+                + "trap 'rm -f " + STATE_DIR + "/gesture.lock/pid; rmdir " + STATE_DIR
+                + "/gesture.lock 2>/dev/null' 0 1 2 3 15; " + body;
     }
 
     private static ComponentResult discover(Context context) {
