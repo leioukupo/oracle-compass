@@ -22,6 +22,10 @@ import android.widget.VideoView;
 
 import com.magneo.compass.ui.Ui;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+
 /** 视频播放器：沉浸预览 + 自定义浮层控制 + 轻触/滑动快进。 */
 public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -49,6 +53,11 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     private float downY;
     private long downAt;
     private String url = "";
+    private String connId = "";
+    private String remotePath = "";
+    private volatile boolean cancelled;
+    private volatile boolean downloading;
+    private Thread downloadThread;
 
     private void fail(String msg) {
         if (failed) return;
@@ -67,6 +76,8 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         url = getIntent().getStringExtra("url");
+        connId = safe(getIntent().getStringExtra("connId"));
+        remotePath = safe(getIntent().getStringExtra("path"));
         title = safe(getIntent().getStringExtra("title"));
         if (title.isEmpty()) title = safe(getIntent().getStringExtra("name"));
         size = getIntent().getLongExtra("size", 0);
@@ -240,8 +251,122 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
         });
 
         updateTitle();
-        vv.setVideoURI(Uri.parse(url));
-        hdelayedTimeout();
+        prepareVideoSource();
+    }
+
+    /**
+     * Android 5.1's MediaPlayer is unreliable when an MP4 is fed through a
+     * WebDAV/FTP range proxy (audio may start while the video track stays
+     * black).  Downloading to the app cache first uses the same local-file
+     * path that is known to decode correctly on this device and avoids
+     * server-specific Range/Content-Range behaviour.
+     */
+    private void prepareVideoSource() {
+        if (url == null || url.trim().isEmpty()) {
+            fail("视频地址为空");
+            return;
+        }
+        if (connId.isEmpty() || remotePath.isEmpty()
+                || !url.toLowerCase(java.util.Locale.US).startsWith("http")) {
+            try { vv.setVideoURI(Uri.parse(url)); } catch (Exception e) { fail("视频地址无效"); }
+            hdelayedTimeout();
+            return;
+        }
+
+        final FsManager.Conn cn = FsManager.byId(this, connId);
+        if (cn == null) {
+            fail("网盘连接已不存在，请返回重试");
+            return;
+        }
+        final File cacheDir = new File(getCacheDir(), "netfs-video");
+        if (!cacheDir.exists() && !cacheDir.mkdirs()) {
+            fail("无法创建视频缓存目录");
+            return;
+        }
+        final String key = Integer.toHexString((connId + "|" + remotePath + "|" + size).hashCode());
+        final File cached = new File(cacheDir, "video-" + key + ".bin");
+        if (size > 0 && cached.isFile() && cached.length() == size) {
+            setLocalVideo(cached);
+            return;
+        }
+
+        downloading = true;
+        hint.setText("正在缓存视频…");
+        hint.setVisibility(View.VISIBLE);
+        downloadThread = new Thread(() -> {
+            File part = new File(cacheDir, cached.getName() + ".part");
+            NetFs fs = null;
+            InputStream in = null;
+            FileOutputStream out = null;
+            long total = 0;
+            long lastUi = 0;
+            try {
+                if (part.exists()) part.delete();
+                fs = FsManager.connect(this, cn);
+                in = fs.open(remotePath);
+                out = new FileOutputStream(part);
+                byte[] buf = new byte[32 * 1024];
+                int n;
+                while (!cancelled && (n = in.read(buf)) > 0) {
+                    out.write(buf, 0, n);
+                    total += n;
+                    long now = android.os.SystemClock.uptimeMillis();
+                    if (now - lastUi > 400) {
+                        lastUi = now;
+                        final long done = total;
+                        ui.post(() -> {
+                            if (!downloading || failed) return;
+                            if (size > 0) {
+                                int pct = (int) Math.max(0, Math.min(99, done * 100L / size));
+                                hint.setText("正在缓存视频… " + pct + "%");
+                            } else {
+                                hint.setText("正在缓存视频… " + humanSize(done));
+                            }
+                        });
+                    }
+                }
+                if (cancelled) return;
+                if (size > 0 && total != size) throw new java.io.IOException("文件大小不完整");
+                out.flush();
+                out.close();
+                out = null;
+                if (cached.exists() && !cached.delete()) throw new java.io.IOException("无法更新缓存");
+                if (!part.renameTo(cached)) throw new java.io.IOException("无法保存视频缓存");
+                ui.post(() -> {
+                    downloading = false;
+                    if (!cancelled && !isFinishing()) setLocalVideo(cached);
+                });
+            } catch (Exception e) {
+                if (!cancelled) ui.post(() -> {
+                    downloading = false;
+                    fail("视频缓存失败：\n" + safeError(e));
+                });
+            } finally {
+                if (out != null) try { out.close(); } catch (Exception ignored) {}
+                if (in != null) try { in.close(); } catch (Exception ignored) {}
+                if (fs != null) try { fs.close(); } catch (Exception ignored) {}
+                if (cancelled && part.exists()) part.delete();
+            }
+        }, "video-cache");
+        downloadThread.setDaemon(true);
+        downloadThread.start();
+    }
+
+    private void setLocalVideo(File file) {
+        if (cancelled || file == null || !file.isFile()) return;
+        try {
+            hint.setText("正在打开视频…");
+            hint.setVisibility(View.VISIBLE);
+            vv.setVideoURI(Uri.fromFile(file));
+            hdelayedTimeout();
+        } catch (Exception e) {
+            fail("视频文件无效：\n" + safeError(e));
+        }
+    }
+
+    private String safeError(Exception e) {
+        String s = e == null ? "未知错误" : e.getMessage();
+        return s == null || s.trim().isEmpty() ? "网络或存储异常" : s;
     }
 
     private void hdelayedTimeout() {
@@ -401,7 +526,11 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     }
 
     @Override protected void onDestroy() {
+        cancelled = true;
+        downloading = false;
+        if (downloadThread != null) downloadThread.interrupt();
         ui.removeCallbacksAndMessages(null);
+        try { vv.stopPlayback(); } catch (Exception ignored) {}
         super.onDestroy();
     }
 
