@@ -7,6 +7,7 @@ import org.xmlpull.v1.XmlPullParser;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URLEncoder;
@@ -200,10 +201,51 @@ public class WebDavFs implements NetFs {
     }
 
     @Override public InputStream open(String path) throws Exception {
-        Request req = auth(new Request.Builder().url(full(path)).get()).build();
+        return openAt(path, 0L);
+    }
+
+    /**
+     * A MediaPlayer probes MP4 metadata and key frames with several HTTP Range
+     * requests. Opening from byte zero and discarding a large prefix makes a
+     * WebDAV preview appear to time out even though the same file downloads
+     * and plays locally. Forward the byte offset to a Range-capable server.
+     */
+    @Override public InputStream openAt(String path, long offset) throws Exception {
+        Request.Builder builder = new Request.Builder().url(full(path)).get();
+        if (offset > 0) builder.header("Range", "bytes=" + offset + "-");
+        Request req = auth(builder).build();
         Response resp = client.newCall(req).execute();
-        if (!resp.isSuccessful()) throw new Exception("WebDAV 打开失败 HTTP " + resp.code());
-        return resp.body().byteStream();
+        if (!resp.isSuccessful() || resp.body() == null) {
+            int code = resp.code();
+            resp.close();
+            throw new Exception("WebDAV 打开失败 HTTP " + code);
+        }
+        InputStream in = resp.body().byteStream();
+        // A non-compliant server may ignore Range and reply with 200. Fall
+        // back to sequential skipping so the proxy still returns correct data.
+        if (offset > 0 && resp.code() != 206) {
+            try {
+                skipFully(in, offset);
+            } catch (Exception e) {
+                try { in.close(); } catch (Exception ignored) {}
+                throw e;
+            }
+        }
+        return in;
+    }
+
+    private static void skipFully(InputStream in, long offset) throws IOException {
+        long left = offset;
+        byte[] scratch = new byte[8192];
+        while (left > 0) {
+            long skipped = in.skip(left);
+            if (skipped <= 0) {
+                int n = in.read(scratch, 0, (int) Math.min(scratch.length, left));
+                if (n < 0) throw new IOException("WebDAV range beyond end of file");
+                skipped = n;
+            }
+            left -= skipped;
+        }
     }
 
     @Override public void upload(String path, InputStream in, long len) throws Exception {

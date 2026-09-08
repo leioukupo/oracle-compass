@@ -246,8 +246,19 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
 
     private void hdelayedTimeout() {
         ui.postDelayed(() -> {
-            if (!prepared && !failed) fail("视频缓冲超时：\n网络较慢、远程服务断开，或格式超出本机硬解能力");
+            // A remote MP4 may need a second range request for its index or
+            // first key frame. Eight seconds is a useful slow-network signal,
+            // but it is not evidence of a format/decoder failure.
+            if (!prepared && !failed) {
+                hint.setText("网络较慢，继续缓冲中…");
+                hint.setVisibility(View.VISIBLE);
+            }
         }, 8000);
+        ui.postDelayed(() -> {
+            if (!prepared && !failed) {
+                fail("视频加载超时：\n远程服务响应过慢或连接已断开");
+            }
+        }, 45000);
     }
 
     private String mediaErrorMessage(int what, int extra) {

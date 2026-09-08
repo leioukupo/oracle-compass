@@ -106,7 +106,9 @@ public class StreamProxy {
             FsManager.Conn conn = FsManager.byId(app, connId);
             if (conn == null) { write404(s); return; }
             fs = FsManager.connect(app, conn);
-            in = fs.open(remotePath);
+            // Pass MediaPlayer's Range offset through to the backend. This is
+            // especially important for MP4 files whose index is near the end.
+            in = fs.openAt(remotePath, skip);
             if (size > 0 && partial && skip >= size) {
                 OutputStream out = s.getOutputStream();
                 out.write(("HTTP/1.1 416 Range Not Satisfiable\r\n"
@@ -116,7 +118,6 @@ public class StreamProxy {
                 out.flush();
                 return;
             }
-            if (skip > 0) skipFully(in, skip);
             OutputStream out = s.getOutputStream();
             StringBuilder resp = new StringBuilder();
             long sendLen = -1;
@@ -172,20 +173,6 @@ public class StreamProxy {
         try {
             s.getOutputStream().write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".getBytes());
         } catch (IOException ignored) {}
-    }
-
-    private static void skipFully(InputStream in, long skip) throws IOException {
-        long left = skip;
-        byte[] buf = new byte[8192];
-        while (left > 0) {
-            long s = in.skip(left);
-            if (s <= 0) {
-                int n = in.read(buf, 0, (int) Math.min(buf.length, left));
-                if (n < 0) break;
-                s = n;
-            }
-            left -= s;
-        }
     }
 
     private static String param(String query, String key) {
