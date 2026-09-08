@@ -103,21 +103,29 @@ public final class RoverUdpTransport {
     /** Immediately neutralizes the next frame and sends a small neutral burst. */
     public void requestStop() {
         setInput(0, 0, 0, 0, false, false);
-        for (int i = 0; i < 3; i++) sendFrame(0, 0, 0, 0, false, false);
+        sendNeutralBurstAsync(socket);
     }
 
     public void stop() {
         if (!running && socket == null && discoverySocket == null) return;
         setInput(0, 0, 0, 0, false, false);
-        // Keep the socket open while the final neutral packets leave the device.
-        for (int i = 0; i < 3; i++) sendFrame(0, 0, 0, 0, false, false);
         running = false;
         DatagramSocket ds = discoverySocket;
         discoverySocket = null;
         if (ds != null) ds.close();
         DatagramSocket s = socket;
         socket = null;
-        if (s != null) s.close();
+        // The final neutral burst must not run on the Activity/UI thread. A
+        // slow route or DNS lookup here used to surface NetworkOnMainThreadException
+        // exactly while leaving the rover page.
+        if (s != null) {
+            Thread neutral = new Thread(() -> {
+                sendNeutralBurst(s);
+                try { s.close(); } catch (Exception ignored) {}
+            }, "rover-neutral-stop");
+            neutral.setDaemon(true);
+            neutral.start();
+        }
         interrupt(sendThread);
         interrupt(discoveryThread);
         sendThread = null;
@@ -142,7 +150,7 @@ public final class RoverUdpTransport {
             }
             next += PERIOD_MS;
             if (next < now - PERIOD_MS * 4L) next = now + PERIOD_MS;
-            sendFrame(lx, ly, rx, ry, swL, swR);
+            sendFrame(socket, lx, ly, rx, ry, swL, swR);
             if (now - rateWindowAt >= 1000L) {
                 rate = rateWindowSent * 1000f / Math.max(1L, now - rateWindowAt);
                 rateWindowSent = 0;
@@ -152,9 +160,8 @@ public final class RoverUdpTransport {
         }
     }
 
-    private void sendFrame(int leftX, int leftY, int rightX, int rightY,
+    private void sendFrame(DatagramSocket s, int leftX, int leftY, int rightX, int rightY,
                             boolean leftButton, boolean rightButton) {
-        DatagramSocket s = socket;
         if (s == null) return;
         String target = activeHost();
         try {
@@ -196,6 +203,17 @@ public final class RoverUdpTransport {
             errors++;
             recordError(e);
         }
+    }
+
+    private void sendNeutralBurstAsync(final DatagramSocket s) {
+        if (s == null) return;
+        Thread neutral = new Thread(() -> sendNeutralBurst(s), "rover-neutral-request");
+        neutral.setDaemon(true);
+        neutral.start();
+    }
+
+    private void sendNeutralBurst(DatagramSocket s) {
+        for (int i = 0; i < 3; i++) sendFrame(s, 0, 0, 0, 0, false, false);
     }
 
     private void sendTo(DatagramSocket s, byte[] data, String host, int destinationPort)

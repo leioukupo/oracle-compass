@@ -125,7 +125,6 @@ public class RoverControlActivity extends BaseActivity implements
         // Neutralize before closing sockets so K230 sees a safe frame even when
         // Android is backgrounded or the screen is locked.
         if (transport != null) {
-            transport.requestStop();
             transport.stop();
         }
         if (statusClient != null) statusClient.stop();
