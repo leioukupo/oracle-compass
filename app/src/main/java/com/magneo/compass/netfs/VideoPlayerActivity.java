@@ -284,7 +284,9 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
             return;
         }
         final String key = Integer.toHexString((connId + "|" + remotePath + "|" + size).hashCode());
-        final File cached = new File(cacheDir, "video-" + key + ".bin");
+        // Keep the media suffix so the legacy framework can select the right
+        // extractor/decoder before it has inspected the file contents.
+        final File cached = new File(cacheDir, "video-" + key + mediaSuffix());
         if (size > 0 && cached.isFile() && cached.length() == size) {
             setLocalVideo(cached);
             return;
@@ -367,6 +369,17 @@ public class VideoPlayerActivity extends com.magneo.compass.BaseActivity {
     private String safeError(Exception e) {
         String s = e == null ? "未知错误" : e.getMessage();
         return s == null || s.trim().isEmpty() ? "网络或存储异常" : s;
+    }
+
+    private String mediaSuffix() {
+        String n = title;
+        if (n == null || n.trim().isEmpty()) n = remotePath;
+        int dot = n == null ? -1 : n.lastIndexOf('.');
+        if (dot >= 0 && dot < n.length() - 1) {
+            String ext = n.substring(dot).toLowerCase(java.util.Locale.US);
+            if (ext.matches("\\.[a-z0-9]{1,8}")) return ext;
+        }
+        return ".mp4";
     }
 
     private void hdelayedTimeout() {
