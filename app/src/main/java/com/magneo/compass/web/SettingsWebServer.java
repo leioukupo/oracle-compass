@@ -16,6 +16,7 @@ import com.magneo.compass.mcp.McpManager;
 import com.magneo.compass.mcp.McpServerConfig;
 import com.magneo.compass.netfs.FsManager;
 import com.magneo.compass.netfs.NetFs;
+import com.magneo.compass.netfs.NeteaseMusicApi;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -171,6 +172,14 @@ public class SettingsWebServer {
             boolean authed = isAuthed(req);
             if (path.equals("/")) serveConsoleHtml(out);
             else if (path.equals("/status")) serveStatus(out, authed);
+            else if (path.equals("/netease/status")) {
+                if (!requireAuth(out, authed)) return;
+                serveNeteaseStatus(out);
+            }
+            else if (path.equals("/netease/logout")) {
+                if (!requireAuth(out, authed)) return;
+                serveNeteaseLogout(out);
+            }
             else if (path.equals("/gesture/status")) {
                 if (!requireAuth(out, authed)) return;
                 serveJson(out, GestureGuardManager.status(app).toJson());
@@ -559,6 +568,7 @@ public class SettingsWebServer {
                 .append("<button type='button' class='tab' data-tab='mcp'>MCP 工具</button>")
                 .append("<button type='button' class='tab' data-tab='vision'>视觉/摄像头</button>")
                 .append("<button type='button' class='tab' data-tab='browser'>浏览器/网盘</button>")
+                .append("<button type='button' class='tab' data-tab='music'>音乐</button>")
                 .append("<button type='button' class='tab' data-tab='remote'>FRP/ADB</button>")
                 .append("<button type='button' class='tab' data-tab='apps'>应用管理</button>")
                 .append("<button type='button' class='tab' data-tab='debug'>链路调试</button>")
@@ -676,6 +686,19 @@ public class SettingsWebServer {
                 .append(fsRow("SMB 域", "fsDomain", "可留空"))
                 .append("<div class='inline'><button type='button' onclick='fsSave()'>保存连接</button><button type='button' class='secondary' onclick='fsTest()'>测试连接</button><button type='button' class='secondary' onclick='fsNew()'>新建</button><span class='state' id='fsMsg'></span></div>")
                 .append("</div></div></section>")
+                .append("<section class='panel' id='tab-music'><div class='sectionTitle'><h2>网易云音乐</h2><small>自建兼容 API、二维码登录和在线播放</small></div><div class='cols'><div class='box'><h3>服务</h3>")
+                .append(rowInput("API Base URL", Prefs.K_NETEASE_API_URL, "text", "http://你的服务器:3000"))
+                .append(rowSelect("播放音质", Prefs.K_NETEASE_QUALITY, null,
+                        "<option value='standard'>标准</option><option value='higher'>较高</option><option value='exhigh'>极高</option><option value='lossless'>无损</option><option value='hires'>Hi-Res</option>",
+                        null))
+                .append("<p class='hint'>留空表示不请求网易云接口；地址保存时会自动去掉末尾斜杠。</p>")
+                .append("</div><div class='box'><h3>登录态</h3>")
+                .append(rowInput("Cookie", Prefs.K_NETEASE_COOKIE, "password", "留空=保持当前 Cookie"))
+                .append("<div class='row'><label></label><div class='inline'><span class='state' id='neteaseCookieState'>未知</span><label class='checkrow'><input type='checkbox' name='clearNeteaseCookie'>清除 Cookie</label></div></div>")
+                .append("<p class='hint' id='neteaseLoginState'>登录状态：读取中</p>")
+                .append("<div class='inline'><button type='button' onclick='neteaseStatus()'>刷新登录状态</button><button type='button' class='secondary' onclick='neteaseLogout()'>退出登录</button><span class='state' id='neteaseMsg'></span></div>")
+                .append("<p class='hint'>设备音乐页支持二维码登录；这里也可以粘贴兼容服务需要的 Cookie。Cookie 留空不会覆盖已有值，勾选清除才会删除。</p>")
+                .append("</div></div></section>")
                 .append("<section class='panel' id='tab-remote'><div class='sectionTitle'><h2>FRP / ADB</h2><small>远程访问与安装通道</small></div><div class='cols'><div class='box'><h3>frpc.toml</h3><textarea name='frpcConfig' style='min-height:260px'></textarea><p class='hint'>保存后点启动 frpc。APK 安装优先走应用管理上传，不走 adb install 传文件。</p><div class='inline'><button type='button' onclick='frpcStart()'>启动 frpc</button><button type='button' class='secondary' onclick='frpcStop()'>停止 frpc</button><span class='state' id='frpcMsg'></span></div><p class='hint'>状态：<span id='frpcState'>未知</span><span id='frpcStateDetail'></span></p><pre id='frpcLog'></pre></div>")
                 .append("<div class='box'><h3>ADB TCP</h3><div class='row'><label>ADB 端口</label><input type='text' id='adbPort' value='5555'></div><label class='checkrow'><input type='checkbox' id='adbAuto'>开机自启 ADB TCP</label>")
                 .append(rowCheckbox("Root 授权提示", Prefs.K_ROOT_GRANT_NOTIFICATIONS, "关闭后隐藏 Magisk 的“应用已授予超级权限”提示（全局）"))
@@ -736,16 +759,17 @@ public class SettingsWebServer {
                 .append("function renderHwDiag(h){var box=q('#hwDiag');if(!box)return;h=h||{};var rows=[['传感器',h.sensors||'--'],['姿态',h.pose||'--'],['磁场',h.magnetic||'--'],['GPS请求',h.gpsRequest||'--'],['GPS驱动',h.gpsDriver||'--'],['GPS动作',h.gpsAction||'--'],['卫星',h.gps||'--'],['弱项',h.untrusted||'--'],['校准',h.magCalibration||'--']];var out='';for(var i=0;i<rows.length;i++)out+='<div class=\"item\"><div class=\"main\"><b>'+esc(rows[i][0])+'</b><small>'+esc(rows[i][1])+'</small></div></div>';box.innerHTML=out}")
                 .append("function gpsReset(){if(!confirm('清理 GPS 辅助数据并重新搜星？建议在室外空旷处使用。'))return;msg('gpsResetMsg','正在触发...');api('POST','/gps/reset','',function(d){msg('gpsResetMsg',d&&d.ok?(d.msg||'已触发'):(d&&d.err?d.err:'失败'));setTimeout(systemStatus,800)},'application/x-www-form-urlencoded')}")
                 .append("function systemStatus(){api('GET','/system_status',null,renderSystem)}function renderSystem(d){if(!d)return;q('#sysTime').textContent=d.time||'--:--';q('#sysDate').textContent=d.date||'';meter('Cpu',d.cpu);meter('AppCpu',d.appCpu);meter('Ram',d.memPct);meter('Gpu',d.gpu,d.gpuText);meter('Bat',d.battery,d.batteryText);renderHwDiag(d.hardware);var bat=d.batteryText||pct(d.battery),gt=d.gpuText||pct(d.gpu),core=(d.cpuOnline&&d.cpuPossible)?(' · 核 '+d.cpuOnline+'/'+d.cpuPossible):'',appCore=(Number(d.appCpuCore)>=0?(' · 单核 '+pct(d.appCpuCore)):''),renderer=(d.mainRenderer==='canvas'?'Canvas':'OpenGL'),fps=d.mainFpsMode==='power'?'省电':(d.mainFpsMode==='smooth'?'流畅':'自适应');q('#sysCore').textContent='总 '+pct(d.cpu)+' · App '+pct(d.appCpu)+appCore+core+' · RAM '+pct(d.memPct)+' · Mali '+gt+' · 电 '+bat+' · '+renderer+'/'+fps;q('#sysGps').textContent=d.gps||'';q('#sysUpdated').textContent='更新 '+(d.time||'');var note='loadavg '+(d.loadAvg1||'--')+' / '+(d.loadAvg5||'--')+' / '+(d.loadAvg15||'--')+' · 可运行 '+(d.runnable==null?'--':d.runnable)+' · D状态 '+(d.blockedThreads==null?'--':d.blockedThreads)+' · App线程 '+(d.appThreads==null?'--':d.appThreads);if(d.streamActive)note+=' · 屏幕预览会增加 CPU/温度';if(d.wifiScanAgeMs>=0)note+=' · Wi-Fi扫描 '+Math.round(d.wifiScanAgeMs/60000)+'分钟前';if(d.conversationBytes!=null)note+=' · 日志 '+Math.round(d.conversationBytes/1024)+'KB';q('#sysLoadNote').textContent=note;var temps=d.temps||[],ring=q('#sysTempRing');if(!ring)return;ring.innerHTML='';for(var i=0;i<temps.length;i++){var el=document.createElement('div');el.className='tempdot';el.innerHTML='<span>'+esc(temps[i].name||'温度')+'</span><b>'+Number(temps[i].c||0).toFixed(0)+'°</b>';ring.appendChild(el)}if(!temps.length){var e=document.createElement('div');e.className='tempdot';e.innerHTML='<span>温度</span><b>--</b>';ring.appendChild(e)}}")
-                .append("var consoleTimer=null;function stopConsolePolling(){if(consoleTimer){clearInterval(consoleTimer);consoleTimer=null}}function startConsolePolling(){stopConsolePolling();if(document.hidden)return;consoleTimer=setInterval(function(){if(document.hidden)return;frpcRefresh();camRefresh();adbStatus();appState();systemStatus();gestureRefresh();if(activeTab('records'))loadConv();if(activeTab('debug'))loadDebugLog();},5000)}function activeTab(id){var e=q('#tab-'+id);return !!(e&&e.className.indexOf('active')>=0)}function refreshTabData(id){if(id==='records')loadConv();else if(id==='debug')loadDebugLog();else if(id==='apps')loadApps();else if(id==='files')fsList()}function initConsole(){loadStatus();lowBatterySoundStatus();gestureRefresh();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();bootAssetStatus();fsList();startConsolePolling()}")
+                .append("function neteaseStatus(){msg('neteaseMsg','检查中...');api('GET','/netease/status',null,function(d){if(!d){msg('neteaseMsg','无返回');return}msg('neteaseCookieState',d.cookieSet?'Cookie 已保存':'未设置 Cookie');msg('neteaseLoginState','登录状态：'+(d.loggedIn?('已登录'+(d.nickname?' · '+d.nickname:'')):(d.msg||'未登录')));msg('neteaseMsg',d.msg||'检查完成')})}function neteaseLogout(){if(!confirm('清除网易云登录态？'))return;api('GET','/netease/logout',null,function(d){msg('neteaseMsg',d&&d.ok?'已退出':(d&&d.err?d.err:'退出失败'));loadStatus()})}")
+                .append("var consoleTimer=null;function stopConsolePolling(){if(consoleTimer){clearInterval(consoleTimer);consoleTimer=null}}function startConsolePolling(){stopConsolePolling();if(document.hidden)return;consoleTimer=setInterval(function(){if(document.hidden)return;frpcRefresh();camRefresh();adbStatus();appState();systemStatus();gestureRefresh();if(activeTab('records'))loadConv();if(activeTab('debug'))loadDebugLog();},5000)}function activeTab(id){var e=q('#tab-'+id);return !!(e&&e.className.indexOf('active')>=0)}function refreshTabData(id){if(id==='records')loadConv();else if(id==='debug')loadDebugLog();else if(id==='apps')loadApps();else if(id==='files')fsList();else if(id==='music')neteaseStatus()}function initConsole(){loadStatus();neteaseStatus();lowBatterySoundStatus();gestureRefresh();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();bootAssetStatus();fsList();startConsolePolling()}")
                 .append("function wireTabs(){var bs=qa('.tab');for(var i=0;i<bs.length;i++)bs[i].onclick=function(){var id=this.getAttribute('data-tab');var b=qa('.tab'),p=qa('.panel');for(var j=0;j<b.length;j++)b[j].classList.remove('active');for(var k=0;k<p.length;k++)p[k].classList.remove('active');this.classList.add('active');q('#tab-'+id).classList.add('active');refreshTabData(id)}}document.addEventListener('visibilitychange',function(){if(document.hidden)stopConsolePolling();else{publicStatus();if(started){startConsolePolling();refreshTabData('records')}}});")
                 .append("function wireDirty(){var f=q('#f');if(!f)return;var es=f.querySelectorAll('input,textarea,select');for(var i=0;i<es.length;i++){es[i].addEventListener('input',markDirty);es[i].addEventListener('change',markDirty)}}")
                 .append("function markDirty(){dirty=true;q('#dirtyState').textContent='有未保存修改';q('#dirtyState').style.color='var(--gold)'}function clean(){dirty=false;q('#dirtyState').textContent='已保存';q('#dirtyState').style.color='var(--ok)'}")
-                .append("function loadStatus(){api('GET','/status',null,function(d){if(!d||!d.authed){authState();return}for(var k in d){var e=q('[name=\"'+k+'\"]');if(!e)continue;var mcpTok=k.indexOf('mcpServer')===0&&k.indexOf('Token')>=0;if(e.type==='checkbox')e.checked=(d[k]===true||d[k]==='true');else if(k!=='apiKey'&&k!=='voiceApiKey'&&!mcpTok)e.value=d[k]}q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';msg('apiKeyState',d.apiKeySet?'当前 '+d.apiKeyMask:'当前未设置');msg('voiceKeyState',d.voiceApiKeySet?'当前 '+d.voiceApiKeyMask:'当前未设置');var rg=d.rootGrantStatus||{},ls=d.systemLockscreenStatus||{};msg('rootGrantActual','Magisk 数据库：'+(rg.detail||'状态未知'));msg('lockscreenActual','LockSettingsService：'+(ls.detail||'状态未知')+(ls.secureCredential?' · 检测到安全凭据':''));for(var i=1;i<=3;i++){var p='mcpServer'+i,s=q('[name='+p+'Token]');if(s)s.value='';msg(p+'TokenState',d[p+'TokenSet']?'当前 '+d[p+'TokenMask']:'当前未设置')}syncRanges();clean()})}")
+                .append("function loadStatus(){api('GET','/status',null,function(d){if(!d||!d.authed){authState();return}for(var k in d){var e=q('[name=\"'+k+'\"]');if(!e)continue;var mcpTok=k.indexOf('mcpServer')===0&&k.indexOf('Token')>=0;if(e.type==='checkbox')e.checked=(d[k]===true||d[k]==='true');else if(k!=='apiKey'&&k!=='voiceApiKey'&&k!=='neteaseCookie'&&!mcpTok)e.value=d[k]}q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';q('[name=neteaseCookie]').value='';msg('apiKeyState',d.apiKeySet?'当前 '+d.apiKeyMask:'当前未设置');msg('voiceKeyState',d.voiceApiKeySet?'当前 '+d.voiceApiKeyMask:'当前未设置');msg('neteaseCookieState',d.neteaseCookieSet?'Cookie 已保存':'未设置 Cookie');msg('neteaseLoginState','登录状态：'+(d.neteaseLoggedIn?('已登录'+(d.neteaseNickname?' · '+d.neteaseNickname:'')):'未登录'));var rg=d.rootGrantStatus||{},ls=d.systemLockscreenStatus||{};msg('rootGrantActual','Magisk 数据库：'+(rg.detail||'状态未知'));msg('lockscreenActual','LockSettingsService：'+(ls.detail||'状态未知')+(ls.secureCredential?' · 检测到安全凭据':''));for(var i=1;i<=3;i++){var p='mcpServer'+i,s=q('[name='+p+'Token]');if(s)s.value='';msg(p+'TokenState',d[p+'TokenSet']?'当前 '+d[p+'TokenMask']:'当前未设置')}syncRanges();clean()})}")
                 .append("function lowBatterySoundStatus(){api('GET','/status',null,function(d){if(!d||!d.authed)return;var s=d.lowBatterySoundStatus||{};msg('lowBatterySoundActual','系统声音：'+(s.detail||'状态未知'))})}")
                 .append("function renderGesture(s){s=s||{};var a=[];a.push(s.installed?'已安装':'未安装');if(s.component)a.push(s.component);a.push(s.configured?'设置已启用':'设置未启用');a.push(s.bound?'实际已绑定':'尚未绑定');a.push(s.processRunning?'进程运行':'进程未见');if(s.moduleHeartbeat)a.push('模块心跳 '+s.moduleHeartbeat);if(s.lastRepair)a.push('最近修复 '+s.lastRepair);if(s.lastError)a.push('错误 '+s.lastError);a.push(s.detail||'');msg('gestureGuardActual',a.join(' · '))}function gestureRefresh(){api('GET','/gesture/status',null,function(d){if(d)renderGesture(d)})}function gestureRepair(){msg('gestureGuardMsg','正在检测…');api('POST','/gesture/repair','',function(d){renderGesture(d);msg('gestureGuardMsg',d&&d.detail?d.detail:(d&&d.ok?'已修复':'修复失败'))},'application/x-www-form-urlencoded')}")
                 .append("function providerChanged(){var p=q('#provider').value;if(p==='deepseek'){q('[name=baseUrl]').value='https://api.deepseek.com/v1';q('[name=textModel]').value='deepseek-chat';if(!q('[name=visionModel]').value)q('[name=visionModel]').value='deepseek-chat';q('[name=textBaseUrl]').value='';q('[name=visionBaseUrl]').value=''}else{if(q('[name=baseUrl]').value==='https://api.deepseek.com/v1')q('[name=baseUrl]').value='';if(!q('[name=textModel]').value||q('[name=textModel]').value==='deepseek-chat')q('[name=textModel]').value='gpt-4.1-mini'}}")
                 .append("function oracleShakeLabel(v){v=Math.max(0,Math.min(100,Number(v||70)));var n=v<18?'轻摇':(v<38?'稍轻':(v<62?'正常':(v<82?'较重':'用力')));return Math.round(v)+' / 100 · '+n}function syncRanges(){var e=q('[name=oracleShakeForce]'),t=q('#oracleShakeForceText');if(e&&t)t.textContent=oracleShakeLabel(e.value)}")
-                .append("function save(){var fd=new FormData(q('#f')),b=new URLSearchParams(fd),c=q('#f').querySelectorAll('input[type=checkbox]');for(var i=0;i<c.length;i++)b.set(c[i].name,c[i].checked?'true':'false');textApi('POST','/save',b.toString(),function(t){msg('msg',t);if(t.indexOf('已保存')>=0){q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';for(var j=1;j<=3;j++){var te=q('[name=mcpServer'+j+'Token]');if(te)te.value=''}q('[name=clearApiKey]').checked=false;q('[name=clearVoiceApiKey]').checked=false;clean();loadStatus()}},'application/x-www-form-urlencoded')}")
+                .append("function save(){var fd=new FormData(q('#f')),b=new URLSearchParams(fd),c=q('#f').querySelectorAll('input[type=checkbox]');for(var i=0;i<c.length;i++)b.set(c[i].name,c[i].checked?'true':'false');textApi('POST','/save',b.toString(),function(t){msg('msg',t);if(t.indexOf('已保存')>=0){q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';q('[name=neteaseCookie]').value='';for(var j=1;j<=3;j++){var te=q('[name=mcpServer'+j+'Token]');if(te)te.value=''}q('[name=clearApiKey]').checked=false;q('[name=clearVoiceApiKey]').checked=false;q('[name=clearNeteaseCookie]').checked=false;clean();loadStatus()}},'application/x-www-form-urlencoded')}")
                 .append("function runTest(kind){var map={llm:['/test/llm','testLlm'],asr:['/test/asr_final','testAsr'],tts:['/test/tts','testTts'],voices:['/test/tts_voices','testTts']},m=map[kind];if(!m)return;msg(m[1],'测试中...');api('GET',m[0],null,function(d){if(kind==='voices'&&d&&d.ok){var dl=q('#ttsVoiceList');dl.innerHTML='';for(var i=0;i<(d.voices||[]).length;i++){var op=document.createElement('option');op.value=d.voices[i];dl.appendChild(op)}msg(m[1],'音色 '+(d.voices||[]).length+' 个 · '+d.ms+'ms');return}msg(m[1],d&&d.ok?('成功 '+(d.ms||0)+'ms '+(d.text||d.contentType||'')+(d.bytes?(' · '+fmtBytes(d.bytes)):'')+(d.retry?' · 已重试':'')+(d.note?' · '+d.note:'')):('失败 '+(d&&d.err?d.err:'未知错误')))})}")
                 .append("function runMcp(kind){var u=kind==='refresh'?'/mcp/refresh':'/mcp/test';msg('mcpState',kind==='refresh'?'刷新中...':'测试中...');api('POST',u,'',function(d){if(!d){msg('mcpState','无返回');return}var ts=d.tools||[],ss=d.servers||[],lines=[];for(var i=0;i<ss.length;i++){lines.push((ss[i].ok===false?'! ':'✓ ')+(ss[i].name||ss[i].id)+' · '+(ss[i].url||'')+' · 工具 '+(ss[i].toolCount||0)+(ss[i].err?(' · '+ss[i].err):''))}for(var j=0;j<ts.length;j++){lines.push('  - '+ts[j].name+' · '+(ts[j].description||''))}if(d.errors&&d.errors.length)lines.push('错误: '+d.errors.join('；'));q('#mcpTools').textContent=lines.join('\\n')||'未发现工具';msg('mcpState',d.ok?('完成 · '+ts.length+' 个工具 · '+(d.ms||0)+'ms'):(d.err||'失败'))},'application/x-www-form-urlencoded')}")
                 .append("function runMcpCall(){var n=(q('#mcpToolName').value||'').trim(),a=(q('#mcpToolArgs').value||'{}').trim();if(!n){msg('mcpCallState','请先刷新并填写工具名');return}try{JSON.parse(a)}catch(e){msg('mcpCallState','参数不是合法 JSON');return}msg('mcpCallState','调用中...');api('POST','/mcp/call',enc({toolName:n,toolArgs:a}),function(d){if(!d){msg('mcpCallState','无返回');return}q('#mcpCallResult').textContent=d.text||d.err||'';msg('mcpCallState',d.ok?('成功 · '+(d.ms||0)+'ms'):('失败 · '+(d.ms||0)+'ms'))},'application/x-www-form-urlencoded')}")
@@ -1452,6 +1476,15 @@ public class SettingsWebServer {
             o.put("asrUrlSet", !Prefs.get(app, Prefs.K_ASR_URL, "").trim().isEmpty());
             o.put("asrFinalUrlSet", !Prefs.get(app, Prefs.K_ASR_FINAL_URL, "").trim().isEmpty());
             o.put("ttsUrlSet", !Prefs.get(app, Prefs.K_TTS_URL, "").trim().isEmpty());
+            String neteaseCookie = Prefs.neteaseCookie(app);
+            o.put("neteaseApiUrl", Prefs.neteaseApiUrl(app));
+            o.put("neteaseQuality", Prefs.neteaseQuality(app));
+            o.put("neteaseCookie", "");
+            o.put("neteaseCookieSet", !neteaseCookie.isEmpty());
+            o.put("neteaseUid", Prefs.get(app, Prefs.K_NETEASE_UID, ""));
+            o.put("neteaseNickname", Prefs.get(app, Prefs.K_NETEASE_NICKNAME, ""));
+            o.put("neteaseLoggedIn", !neteaseCookie.isEmpty()
+                    && !Prefs.get(app, Prefs.K_NETEASE_UID, "").trim().isEmpty());
             o.put("fsCount", FsManager.list(app).size());
             if (!authed) {
                 o.put("locked", true);
@@ -1572,6 +1605,49 @@ public class SettingsWebServer {
         out.write(b);
     }
 
+    private static void serveNeteaseStatus(OutputStream out) throws IOException {
+        JSONObject o = new JSONObject();
+        try {
+            String cookie = Prefs.neteaseCookie(app);
+            o.put("configured", !Prefs.neteaseApiUrl(app).isEmpty());
+            o.put("cookieSet", !cookie.isEmpty());
+            if (cookie.isEmpty()) {
+                o.put("loggedIn", false);
+                o.put("uid", "");
+                o.put("nickname", "");
+                o.put("msg", "未设置网易云 Cookie");
+                serveJson(out, o);
+                return;
+            }
+            NeteaseMusicApi.LoginStatus status = new NeteaseMusicApi(app).loginStatus();
+            o.put("loggedIn", status.loggedIn);
+            o.put("uid", status.uid > 0 ? String.valueOf(status.uid) : "");
+            o.put("nickname", status.nickname);
+            o.put("msg", status.loggedIn ? "登录状态有效" : "登录状态已失效");
+            Prefs.put(app, Prefs.K_NETEASE_UID, status.uid > 0
+                    ? String.valueOf(status.uid) : "");
+            Prefs.put(app, Prefs.K_NETEASE_NICKNAME, status.nickname);
+        } catch (Exception e) {
+            try {
+                o.put("loggedIn", false);
+                o.put("msg", e.getMessage() == null ? "登录状态检查失败" : e.getMessage());
+            } catch (Exception ignored) {}
+        }
+        serveJson(out, o);
+    }
+
+    private static void serveNeteaseLogout(OutputStream out) throws IOException {
+        Prefs.put(app, Prefs.K_NETEASE_COOKIE, "");
+        Prefs.put(app, Prefs.K_NETEASE_UID, "");
+        Prefs.put(app, Prefs.K_NETEASE_NICKNAME, "");
+        JSONObject o = new JSONObject();
+        try {
+            o.put("ok", true);
+            o.put("msg", "已退出网易云登录");
+        } catch (Exception ignored) {}
+        serveJson(out, o);
+    }
+
     private static void serveGestureSave(OutputStream out, String body) throws IOException {
         try {
             Map<String, String> fields = form(body);
@@ -1588,18 +1664,30 @@ public class SettingsWebServer {
             saveMcpServers(fields);
             if (isTrue(fields.get("clearApiKey"))) Prefs.put(app, Prefs.K_API_KEY, "");
             if (isTrue(fields.get("clearVoiceApiKey"))) Prefs.put(app, Prefs.K_VOICE_API_KEY, "");
+            if (isTrue(fields.get("clearNeteaseCookie"))) {
+                Prefs.put(app, Prefs.K_NETEASE_COOKIE, "");
+                Prefs.put(app, Prefs.K_NETEASE_UID, "");
+                Prefs.put(app, Prefs.K_NETEASE_NICKNAME, "");
+            }
             for (Map.Entry<String, String> entry : fields.entrySet()) {
                 String k = entry.getKey();
                 String v = entry.getValue();
                 if (k == null) continue;
-                if (k.equals("clearApiKey") || k.equals("clearVoiceApiKey")) continue;
+                if (k.equals("clearApiKey") || k.equals("clearVoiceApiKey")
+                        || k.equals("clearNeteaseCookie")) continue;
                 if (k.startsWith("mcpServer")) continue;
                 if (k.equals(Prefs.K_API_KEY) || k.equals(Prefs.K_VOICE_API_KEY)) {
                     if (v == null || v.trim().isEmpty()) continue;
                     Prefs.put(app, k, v.trim());
                     continue;
                 }
-                if (k.equals("visionInterval") || k.equals("vadSensitivity")) {
+                if (k.equals(Prefs.K_NETEASE_COOKIE)) {
+                    if (v != null && !v.trim().isEmpty()) Prefs.put(app, k, v.trim());
+                } else if (k.equals(Prefs.K_NETEASE_API_URL)) {
+                    Prefs.put(app, k, NeteaseMusicApi.normalizeBaseUrl(v));
+                } else if (k.equals(Prefs.K_NETEASE_QUALITY)) {
+                    Prefs.put(app, k, Prefs.normalizeNeteaseQuality(v));
+                } else if (k.equals("visionInterval") || k.equals("vadSensitivity")) {
                     try { Prefs.putI(app, k, Integer.parseInt(v)); } catch (Exception ignored) {}
                 } else if (k.equals(Prefs.K_ORACLE_SHAKE_FORCE)) {
                     try { Prefs.putI(app, k, clamp(Integer.parseInt(v), 0, 100)); } catch (Exception ignored) {}

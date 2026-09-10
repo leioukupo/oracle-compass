@@ -14,16 +14,25 @@ import android.graphics.RectF;
 import android.graphics.Shader;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.MediaStore;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.Spinner;
+import android.widget.TextView;
 import android.widget.Toast;
 
+import com.magneo.compass.Prefs;
 import com.magneo.compass.RoundDialog;
 import com.magneo.compass.ui.RoundScreen;
 import com.magneo.compass.ui.Ui;
@@ -33,6 +42,7 @@ import java.io.File;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import android.util.Base64;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -53,8 +63,14 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
 
     private PieceView piece;
     private ArrayList<String> currentUrls = new ArrayList<>();
+    private ArrayList<MusicTrack> currentTracks = new ArrayList<>();
     private boolean playingState = false;
     private final ExecutorService artExec = Executors.newSingleThreadExecutor();
+    private final ExecutorService cloudExec = Executors.newSingleThreadExecutor();
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private int cloudRequestSerial = 0;
+    private int qrLoginSerial = 0;
+    private TextView qrStatusView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -110,8 +126,12 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         ArrayList<String> urls = getIntent().getStringArrayListExtra("urls");
         if (urls == null || urls.isEmpty()) {
             MusicService svc = MusicService.get();
-            if (svc != null && !svc.playlist().isEmpty()) restoreServicePlaylist(svc);
-            else reloadLocalPlaylist(false);
+            if (svc != null && !svc.tracks().isEmpty()) restoreServicePlaylist(svc);
+            else if (Prefs.MUSIC_SOURCE_NETEASE.equals(Prefs.musicSource(this))) {
+                loadCloudHome(false);
+            } else {
+                reloadLocalPlaylist(false);
+            }
         } else {
             startPlaylist(urls);
         }
@@ -147,19 +167,36 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
             return;
         }
         currentUrls = new ArrayList<>(urls);
+        currentTracks = new ArrayList<>();
+        for (String url : urls) currentTracks.add(MusicTrack.local(url, displayName(url)));
+        Prefs.put(this, Prefs.K_MUSIC_SOURCE, Prefs.MUSIC_SOURCE_LOCAL);
         piece.setTrackCount(urls.size());
         piece.setEmptyText("");
-        piece.update(displayName(urls.get(0)), false, 0, 1, 0);
-        MusicService.startPlaylist(this, urls);
+        piece.update(trackTitle(currentTracks.get(0)), false, 0,
+                (int) Math.max(1L, currentTracks.get(0).durationMs), 0);
+        MusicService.startTracks(this, currentTracks);
         piece.postDelayed(() -> {
             if (MusicService.get() != null) MusicService.get().setListener(this);
         }, 250);
     }
 
     private void restoreServicePlaylist(MusicService svc) {
-        currentUrls = new ArrayList<>(svc.playlist());
-        piece.setTrackCount(currentUrls.size());
+        currentTracks = new ArrayList<>(svc.tracks());
+        if (currentTracks.isEmpty()) {
+            currentUrls = new ArrayList<>(svc.playlist());
+            for (String url : currentUrls) currentTracks.add(MusicTrack.local(url, displayName(url)));
+        } else {
+            currentUrls = new ArrayList<>();
+            for (MusicTrack track : currentTracks) currentUrls.add(track.url);
+        }
+        boolean cloud = !currentTracks.isEmpty() && currentTracks.get(0).isNetease();
+        Prefs.put(this, Prefs.K_MUSIC_SOURCE,
+                cloud ? Prefs.MUSIC_SOURCE_NETEASE : Prefs.MUSIC_SOURCE_LOCAL);
+        piece.setTrackCount(currentTracks.size());
         piece.setEmptyText("");
+        MusicTrack current = svc.currentTrack();
+        if (current != null) piece.update(trackTitle(current), svc.isPlaying(), 0,
+                (int) Math.max(1L, current.durationMs), svc.currentIndex());
         svc.setListener(this);
     }
 
@@ -176,6 +213,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
 
     private void setEmptyState(String text) {
         currentUrls.clear();
+        currentTracks.clear();
         piece.setTrackCount(0);
         piece.setEmptyText(text);
         piece.update("", false, 0, 1, 0);
@@ -187,20 +225,25 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
             svc.toggle();
             return;
         }
-        if (currentUrls.isEmpty()) showPlaylistMenu();
+        if (currentTracks.isEmpty()) showPlaylistMenu();
         else playTrackFromUi(piece.currentIndex);
     }
 
     private void playTrackFromUi(int idx) {
-        if (currentUrls.isEmpty()) {
+        MusicService svc = MusicService.get();
+        List<MusicTrack> serviceTracks = svc == null ? new ArrayList<>() : svc.tracks();
+        List<MusicTrack> tracks = serviceTracks.isEmpty() ? currentTracks : serviceTracks;
+        if (tracks.isEmpty()) {
             showPlaylistMenu();
             return;
         }
-        int startIndex = Math.max(0, Math.min(currentUrls.size() - 1, idx));
+        int startIndex = Math.max(0, Math.min(tracks.size() - 1, idx));
         playingState = true;
-        piece.update(displayName(currentUrls.get(startIndex)), true, 0, 1, startIndex);
+        MusicTrack track = tracks.get(startIndex);
+        piece.update(trackTitle(track), track.artist, true, 0,
+                (int) Math.max(1L, track.durationMs), startIndex);
         piece.postInvalidate();
-        MusicService.startPlaylist(this, currentUrls, true, startIndex);
+        MusicService.startTracks(this, tracks, true, startIndex);
         piece.postDelayed(() -> {
             if (MusicService.get() != null) MusicService.get().setListener(this);
         }, 250);
@@ -210,31 +253,32 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         MusicService svc = MusicService.get();
         if (svc != null) {
             svc.seekRelative(dir * SIDE_SEEK_MS);
-        } else if (currentUrls.isEmpty()) {
+        } else if (currentTracks.isEmpty()) {
             showPlaylistMenu();
         }
     }
 
     private void skipTrack(int dir) {
         MusicService svc = MusicService.get();
-        List<String> serviceUrls = svc == null ? new ArrayList<>() : svc.playlist();
-        List<String> urls = serviceUrls.isEmpty() ? currentUrls : serviceUrls;
-        if (urls.isEmpty()) {
+        List<MusicTrack> serviceTracks = svc == null ? new ArrayList<>() : svc.tracks();
+        List<MusicTrack> tracks = serviceTracks.isEmpty() ? currentTracks : serviceTracks;
+        if (tracks.isEmpty()) {
             showPlaylistMenu();
             return;
         }
-        if (urls.size() < 2) return;
+        if (tracks.size() < 2) return;
 
         int cur = svc == null ? piece.currentIndex : svc.currentIndex();
-        int next = ((cur + dir) % urls.size() + urls.size()) % urls.size();
-        if (serviceUrls.isEmpty()) currentUrls = new ArrayList<>(urls);
+        int next = ((cur + dir) % tracks.size() + tracks.size()) % tracks.size();
+        if (serviceTracks.isEmpty()) currentTracks = new ArrayList<>(tracks);
         if (playingState && svc != null) {
             if (dir < 0) svc.prev();
             else svc.next();
         } else {
-            piece.update(displayName(urls.get(next)), false, 0, 1, next);
+            piece.update(trackTitle(tracks.get(next)), false, 0,
+                    (int) Math.max(1L, tracks.get(next).durationMs), next);
             piece.postInvalidate();
-            MusicService.startPlaylist(this, urls, false, next);
+            MusicService.startTracks(this, tracks, false, next);
             piece.postDelayed(() -> {
                 if (MusicService.get() != null) MusicService.get().setListener(this);
             }, 250);
@@ -243,35 +287,488 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
 
     private void showPlaylistMenu() {
         MusicService svc = MusicService.get();
-        List<String> serviceUrls = svc == null ? new ArrayList<>() : svc.playlist();
-        List<String> urls = serviceUrls.isEmpty() ? new ArrayList<>(currentUrls) : serviceUrls;
-        RoundDialog d = new RoundDialog(this).title("歌单");
-        if (urls.isEmpty()) {
-            d.text("未找到本地音乐")
-                    .item("重新扫描本地", () -> reloadLocalPlaylist(true))
-                    .item("打开网盘", () -> startActivity(new Intent(this, FileBrowserActivity.class)))
+        List<MusicTrack> serviceTracks = svc == null ? new ArrayList<>() : svc.tracks();
+        List<MusicTrack> tracks = serviceTracks.isEmpty() ? currentTracks : serviceTracks;
+        RoundDialog d = new RoundDialog(this).title("音乐");
+        String source = tracks.isEmpty()
+                ? Prefs.musicSource(this)
+                : (tracks.get(0).isNetease() ? Prefs.MUSIC_SOURCE_NETEASE : Prefs.MUSIC_SOURCE_LOCAL);
+        d.text(Prefs.MUSIC_SOURCE_NETEASE.equals(source) ? "网易云音乐" : "本地 / 网盘音乐");
+
+        if (!tracks.isEmpty()) {
+            int cur = svc == null ? piece.currentIndex : svc.currentIndex();
+            d.text((cur + 1) + " / " + tracks.size());
+            int n = Math.min(tracks.size(), MAX_DIALOG_TRACKS);
+            for (int i = 0; i < n; i++) {
+                final int trackIndex = i;
+                MusicTrack track = tracks.get(i);
+                String label = compact((i == cur ? "♪ " : "") + trackTitle(track), 22);
+                d.item(label, () -> playTrackFromUi(trackIndex));
+            }
+            if (tracks.size() > MAX_DIALOG_TRACKS) d.text("仅显示前 " + MAX_DIALOG_TRACKS + " 首");
+            if (tracks.size() > 1) {
+                d.item("上一首", () -> { if (MusicService.get() != null) MusicService.get().prev(); });
+                d.item("下一首", () -> { if (MusicService.get() != null) MusicService.get().next(); });
+            }
+            d.item("停止播放", () -> { if (MusicService.get() != null) MusicService.get().stopPlayback(); });
+        }
+
+        d.item(Prefs.MUSIC_SOURCE_NETEASE.equals(source) ? "切换到本地 / 网盘" : "切换到网易云",
+                () -> {
+                    if (Prefs.MUSIC_SOURCE_NETEASE.equals(source)) {
+                        switchToLocal();
+                    } else {
+                        switchToCloud();
+                    }
+                });
+        if (Prefs.MUSIC_SOURCE_NETEASE.equals(source)) {
+            d.item("网易云功能", this::showCloudMenu);
+        } else {
+            d.item("重新扫描本地", () -> reloadLocalPlaylist(true));
+            d.item("打开网盘", () -> startActivity(new Intent(this, FileBrowserActivity.class)));
+        }
+        d.cancel().show();
+    }
+
+    private void showCloudMenu() {
+        if (!new NeteaseMusicApi(this).isConfigured()) {
+            new RoundDialog(this)
+                    .title("网易云音乐")
+                    .text("未配置网易云 API 地址")
+                    .item("配置服务", this::showCloudSettings)
+                    .item("切换到本地 / 网盘", this::switchToLocal)
                     .cancel()
                     .show();
             return;
         }
 
-        int cur = svc == null ? piece.currentIndex : svc.currentIndex();
-        d.text((cur + 1) + " / " + urls.size());
-        int n = Math.min(urls.size(), MAX_DIALOG_TRACKS);
-        for (int i = 0; i < n; i++) {
-            final int idx = i;
-            String label = compact((i == cur ? "♪ " : "") + displayName(urls.get(i)), 22);
-            d.item(label, () -> playTrackFromUi(idx));
+        final boolean cookieSet = !Prefs.neteaseCookie(this).isEmpty();
+        final boolean loggedIn = cookieSet
+                && !Prefs.get(this, Prefs.K_NETEASE_UID, "").trim().isEmpty();
+        RoundDialog d = new RoundDialog(this).title("网易云音乐");
+        String nickname = Prefs.get(this, Prefs.K_NETEASE_NICKNAME, "").trim();
+        d.text(loggedIn ? "已登录" + (nickname.isEmpty() ? "" : " · " + compact(nickname, 14))
+                : cookieSet ? "已保存 Cookie · 登录状态未校验" : "未登录 · 匿名访问");
+        d.item("搜索歌曲", this::searchCloudSongs);
+        d.item("搜索歌单", this::searchCloudPlaylists);
+        d.item("推荐歌单", this::loadPersonalizedPlaylists);
+        if (loggedIn) {
+            d.item("每日推荐", this::loadRecommendedSongs);
+            d.item("我的歌单", this::loadMyPlaylists);
+            d.item("刷新登录状态", this::refreshCloudLogin);
+            d.item("退出登录", this::logoutCloud);
+        } else {
+            d.item("二维码登录", this::startQrLogin);
+            if (cookieSet) {
+                d.item("刷新登录状态", this::refreshCloudLogin);
+                d.item("退出登录", this::logoutCloud);
+            }
         }
-        if (urls.size() > MAX_DIALOG_TRACKS) d.text("仅显示前 " + MAX_DIALOG_TRACKS + " 首");
-        if (urls.size() > 1) {
-            d.item("上一首", () -> { if (MusicService.get() != null) MusicService.get().prev(); });
-            d.item("下一首", () -> { if (MusicService.get() != null) MusicService.get().next(); });
-        }
-        d.item("停止播放", () -> { if (MusicService.get() != null) MusicService.get().stopPlayback(); });
-        d.item("重新扫描本地", () -> reloadLocalPlaylist(true));
-        d.item("打开网盘", () -> startActivity(new Intent(this, FileBrowserActivity.class)));
+        d.item("网易云设置", this::showCloudSettings);
+        d.item("切换到本地 / 网盘", this::switchToLocal);
         d.cancel().show();
+    }
+
+    private void switchToLocal() {
+        Prefs.put(this, Prefs.K_MUSIC_SOURCE, Prefs.MUSIC_SOURCE_LOCAL);
+        MusicService svc = MusicService.get();
+        if (svc != null) svc.clearPlaylist();
+        reloadLocalPlaylist(false);
+    }
+
+    private void switchToCloud() {
+        Prefs.put(this, Prefs.K_MUSIC_SOURCE, Prefs.MUSIC_SOURCE_NETEASE);
+        MusicService svc = MusicService.get();
+        if (svc != null) svc.clearPlaylist();
+        loadCloudHome(true);
+    }
+
+    private void showCloudSettings() {
+        EditText url = new EditText(this);
+        url.setHint("http://你的服务器:3000");
+        url.setText(Prefs.neteaseApiUrl(this));
+        EditText cookie = new EditText(this);
+        cookie.setHint("可选 Cookie，留空保持当前");
+        cookie.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+
+        Spinner quality = new Spinner(this);
+        String[] values = {"standard", "higher", "exhigh", "lossless", "hires"};
+        String[] labels = {"标准", "较高", "极高", "无损", "Hi-Res"};
+        quality.setAdapter(new ArrayAdapter<String>(this,
+                android.R.layout.simple_spinner_item, labels));
+        quality.setPrompt("播放音质");
+        String currentQuality = Prefs.neteaseQuality(this);
+        int selected = 0;
+        for (int i = 0; i < values.length; i++) {
+            if (values[i].equals(currentQuality)) {
+                selected = i;
+                break;
+            }
+        }
+        quality.setSelection(selected);
+
+        RoundDialog d = new RoundDialog(this).title("网易云设置")
+                .text("API 地址默认留空；Cookie 只用于网易云请求。");
+        d.field(url);
+        d.field(cookie);
+        d.view(quality);
+        d.item("保存", () -> {
+            Prefs.put(this, Prefs.K_NETEASE_API_URL,
+                    NeteaseMusicApi.normalizeBaseUrl(url.getText().toString()));
+            String cookieValue = cookie.getText().toString().trim();
+            if (!cookieValue.isEmpty()) {
+                Prefs.put(this, Prefs.K_NETEASE_COOKIE, cookieValue);
+            }
+            Prefs.put(this, Prefs.K_NETEASE_QUALITY, values[Math.max(0,
+                    Math.min(values.length - 1, quality.getSelectedItemPosition()))]);
+            Toast.makeText(this, "网易云设置已保存", Toast.LENGTH_SHORT).show();
+            showCloudMenu();
+        });
+        d.cancel().show();
+    }
+
+    private void searchCloudSongs() {
+        EditText input = new EditText(this);
+        input.setHint("歌曲名、歌手或关键词");
+        RoundDialog d = new RoundDialog(this)
+                .title("搜索歌曲")
+                .field(input)
+                .item("搜索", () -> {
+                    String q = input.getText().toString().trim();
+                    if (q.isEmpty()) {
+                        Toast.makeText(this, "请输入搜索内容", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    runCloudRequest("正在搜索歌曲…", () -> new NeteaseMusicApi(this)
+                                    .searchSongs(q, 30),
+                            songs -> showSongResults("歌曲搜索 · " + compact(q, 12), songs));
+                })
+                .cancel();
+        d.show();
+    }
+
+    private void searchCloudPlaylists() {
+        EditText input = new EditText(this);
+        input.setHint("歌单名或关键词");
+        RoundDialog d = new RoundDialog(this)
+                .title("搜索歌单")
+                .field(input)
+                .item("搜索", () -> {
+                    String q = input.getText().toString().trim();
+                    if (q.isEmpty()) {
+                        Toast.makeText(this, "请输入搜索内容", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    runCloudRequest("正在搜索歌单…", () -> new NeteaseMusicApi(this)
+                                    .searchPlaylists(q, 20),
+                            playlists -> showPlaylistResults("歌单搜索 · " + compact(q, 12), playlists));
+                })
+                .cancel();
+        d.show();
+    }
+
+    private void loadCloudHome(boolean fromSwitch) {
+        if (!new NeteaseMusicApi(this).isConfigured()) {
+            if (fromSwitch) showCloudSettings();
+            else setEmptyState("未配置网易云 API");
+            return;
+        }
+        if (fromSwitch) {
+            showCloudMenu();
+        } else {
+            loadPersonalizedPlaylists();
+        }
+    }
+
+    private void loadPersonalizedPlaylists() {
+        runCloudRequest("正在加载推荐歌单…",
+                () -> new NeteaseMusicApi(this).personalizedPlaylists(20),
+                playlists -> showPlaylistResults("推荐歌单", playlists));
+    }
+
+    private void loadRecommendedSongs() {
+        runCloudRequest("正在加载每日推荐…",
+                () -> new NeteaseMusicApi(this).recommendSongs(30),
+                songs -> showSongResults("每日推荐", songs));
+    }
+
+    private void loadMyPlaylists() {
+        runCloudRequest("正在加载我的歌单…",
+                () -> new NeteaseMusicApi(this).userPlaylists(),
+                playlists -> showPlaylistResults("我的歌单", playlists));
+    }
+
+    private void showSongResults(String title, List<MusicTrack> songs) {
+        if (songs == null || songs.isEmpty()) {
+            Toast.makeText(this, "没有找到歌曲", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final ArrayList<MusicTrack> queue = new ArrayList<>(songs);
+        RoundDialog d = new RoundDialog(this).title(title)
+                .text("共 " + queue.size() + " 首，点击曲目开始播放");
+        int n = Math.min(queue.size(), MAX_DIALOG_TRACKS);
+        for (int i = 0; i < n; i++) {
+            final int index = i;
+            MusicTrack track = queue.get(i);
+            String label = trackTitle(track);
+            if (!track.artist.trim().isEmpty()) label += " · " + track.artist;
+            d.item(compact(label, 26), () -> {
+                Prefs.put(this, Prefs.K_MUSIC_SOURCE, Prefs.MUSIC_SOURCE_NETEASE);
+                startCloudTracks(queue, true, index);
+            });
+        }
+        if (queue.size() > n) d.text("仅显示前 " + n + " 首");
+        d.cancel().show();
+    }
+
+    private void showPlaylistResults(String title, List<NeteaseMusicApi.Playlist> playlists) {
+        if (playlists == null || playlists.isEmpty()) {
+            Toast.makeText(this, "没有找到歌单", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        RoundDialog d = new RoundDialog(this).title(title)
+                .text("选择歌单查看曲目");
+        int n = Math.min(playlists.size(), 20);
+        for (int i = 0; i < n; i++) {
+            final NeteaseMusicApi.Playlist playlist = playlists.get(i);
+            String count = playlist.trackCount > 0 ? " · " + playlist.trackCount + " 首" : "";
+            d.item(compact(playlist.name + count, 25),
+                    () -> loadPlaylistTracks(playlist));
+        }
+        if (playlists.size() > n) d.text("仅显示前 " + n + " 个");
+        d.cancel().show();
+    }
+
+    private void loadPlaylistTracks(NeteaseMusicApi.Playlist playlist) {
+        runCloudRequest("正在加载歌单…",
+                () -> new NeteaseMusicApi(this).playlistTracks(playlist.id),
+                songs -> {
+                    if (songs == null || songs.isEmpty()) {
+                        Toast.makeText(this, "歌单没有可用歌曲", Toast.LENGTH_SHORT).show();
+                    } else {
+                        showSongResults(compact(playlist.name, 16), songs);
+                    }
+                });
+    }
+
+    private interface CloudCall<T> {
+        T run() throws Exception;
+    }
+
+    private interface CloudResult<T> {
+        void onResult(T value);
+    }
+
+    private <T> void runCloudRequest(String loading, CloudCall<T> call,
+                                     CloudResult<T> result) {
+        final int serial = ++cloudRequestSerial;
+        Toast.makeText(this, loading, Toast.LENGTH_SHORT).show();
+        cloudExec.execute(() -> {
+            try {
+                T value = call.run();
+                ui.post(() -> {
+                    if (serial != cloudRequestSerial || isFinishing()) return;
+                    result.onResult(value);
+                });
+            } catch (Exception e) {
+                final String message = e.getMessage() == null || e.getMessage().trim().isEmpty()
+                        ? "网易云请求失败" : e.getMessage();
+                ui.post(() -> {
+                    if (serial != cloudRequestSerial || isFinishing()) return;
+                    Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+                });
+            }
+        });
+    }
+
+    private void startCloudTracks(List<MusicTrack> songs, boolean autoplay, int startIndex) {
+        if (songs == null || songs.isEmpty()) {
+            setEmptyState("没有可播放歌曲");
+            return;
+        }
+        currentTracks = new ArrayList<>(songs);
+        currentUrls.clear();
+        for (MusicTrack track : currentTracks) currentUrls.add(track.url);
+        Prefs.put(this, Prefs.K_MUSIC_SOURCE, Prefs.MUSIC_SOURCE_NETEASE);
+        int index = Math.max(0, Math.min(currentTracks.size() - 1, startIndex));
+        piece.setTrackCount(currentTracks.size());
+        piece.setEmptyText("");
+        MusicTrack selected = currentTracks.get(index);
+        piece.update(trackTitle(selected), selected.artist, autoplay, 0,
+                (int) Math.max(1L, currentTracks.get(index).durationMs), index);
+        MusicService.startTracks(this, currentTracks, autoplay, index);
+        piece.postDelayed(() -> {
+            if (MusicService.get() != null) MusicService.get().setListener(this);
+        }, 250);
+    }
+
+    private void startQrLogin() {
+        if (!new NeteaseMusicApi(this).isConfigured()) {
+            showCloudSettings();
+            return;
+        }
+        final int serial = ++qrLoginSerial;
+        Toast.makeText(this, "正在生成登录二维码…", Toast.LENGTH_SHORT).show();
+        cloudExec.execute(() -> {
+            try {
+                NeteaseMusicApi.QrCode qr = new NeteaseMusicApi(this).createQrCode();
+                ui.post(() -> {
+                    if (serial != qrLoginSerial || isFinishing()) return;
+                    showQrLoginDialog(qr, serial);
+                });
+            } catch (Exception e) {
+                final String message = e.getMessage() == null ? "二维码生成失败" : e.getMessage();
+                ui.post(() -> {
+                    if (serial != qrLoginSerial || isFinishing()) return;
+                    Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+                });
+            }
+        });
+    }
+
+    private void showQrLoginDialog(NeteaseMusicApi.QrCode qr, int serial) {
+        byte[] bytes = decodeImageData(qr.imageData);
+        Bitmap bitmap = bytes == null ? null
+                : BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+        if (bitmap == null) {
+            Toast.makeText(this, "二维码图片无效", Toast.LENGTH_LONG).show();
+            return;
+        }
+        ImageView image = new ImageView(this);
+        image.setImageBitmap(bitmap);
+        image.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        image.setBackgroundResource(com.magneo.compass.R.drawable.bg_rect_gold);
+        image.setPadding(Ui.dp(this, 8), Ui.dp(this, 8), Ui.dp(this, 8), Ui.dp(this, 8));
+        LinearLayout.LayoutParams imageLp = new LinearLayout.LayoutParams(
+                Ui.dp(this, 190), Ui.dp(this, 190));
+        image.setLayoutParams(imageLp);
+
+        TextView status = subtleText("请使用网易云音乐扫码，等待确认");
+        status.setGravity(Gravity.CENTER);
+        qrStatusView = status;
+        RoundDialog d = new RoundDialog(this)
+                .title("网易云登录")
+                .view(image)
+                .view(status)
+                .onDismiss(() -> {
+                    if (serial == qrLoginSerial) qrLoginSerial++;
+                    qrStatusView = null;
+                })
+                .item("取消", () -> {
+                });
+        d.show();
+        pollQrLogin(qr, serial, d);
+    }
+
+    private void pollQrLogin(NeteaseMusicApi.QrCode qr, int serial, RoundDialog dialog) {
+        if (serial != qrLoginSerial || isFinishing()) return;
+        cloudExec.execute(() -> {
+            NeteaseMusicApi.QrStatus status;
+            try {
+                status = new NeteaseMusicApi(this).checkQrCode(qr.key);
+            } catch (Exception e) {
+                status = new NeteaseMusicApi.QrStatus(-1,
+                        e.getMessage() == null ? "检查登录状态失败" : e.getMessage(), "");
+            }
+            NeteaseMusicApi.QrStatus result = status;
+            ui.post(() -> {
+                if (serial != qrLoginSerial || isFinishing()) return;
+                if (result.code == 803) {
+                    finishQrLogin(dialog, result.cookie);
+                } else if (result.code == 800) {
+                    if (qrStatusView != null) qrStatusView.setText("二维码已过期，请重新生成");
+                } else {
+                    if (qrStatusView != null) {
+                        qrStatusView.setText(result.code == 802 ? "已扫码，请在手机上确认"
+                                : result.code == 801 ? "等待扫码…" : result.message);
+                    }
+                    ui.postDelayed(() -> pollQrLogin(qr, serial, dialog), 1800L);
+                }
+            });
+        });
+    }
+
+    private void finishQrLogin(RoundDialog dialog, String cookie) {
+        if (cookie == null || cookie.trim().isEmpty()) {
+            Toast.makeText(this, "登录成功但未取得 Cookie", Toast.LENGTH_LONG).show();
+            dialog.dismiss();
+            return;
+        }
+        final int loginSerial = qrLoginSerial;
+        cloudExec.execute(() -> {
+            try {
+                NeteaseMusicApi api = new NeteaseMusicApi(this, Prefs.neteaseApiUrl(this), cookie);
+                NeteaseMusicApi.LoginStatus status = api.loginStatus(cookie);
+                Prefs.put(this, Prefs.K_NETEASE_COOKIE, cookie);
+                Prefs.put(this, Prefs.K_NETEASE_UID, status.uid > 0
+                        ? String.valueOf(status.uid) : "");
+                Prefs.put(this, Prefs.K_NETEASE_NICKNAME, status.nickname);
+                ui.post(() -> {
+                    if (loginSerial != qrLoginSerial || isFinishing()) return;
+                    dialog.dismiss();
+                    qrLoginSerial++;
+                    qrStatusView = null;
+                    Toast.makeText(this, status.nickname.isEmpty() ? "网易云登录成功"
+                            : "已登录 · " + status.nickname, Toast.LENGTH_SHORT).show();
+                    showCloudMenu();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    if (loginSerial != qrLoginSerial || isFinishing()) return;
+                    if (qrStatusView != null) qrStatusView.setText("登录状态读取失败，请稍后重试");
+                    Toast.makeText(this, e.getMessage() == null ? "登录状态读取失败"
+                            : e.getMessage(), Toast.LENGTH_LONG).show();
+                });
+            }
+        });
+    }
+
+    private void refreshCloudLogin() {
+        runCloudRequest("正在刷新登录状态…",
+                () -> new NeteaseMusicApi(this).loginStatus(),
+                status -> {
+                    if (status.loggedIn) {
+                        Prefs.put(this, Prefs.K_NETEASE_UID,
+                                status.uid > 0 ? String.valueOf(status.uid) : "");
+                        Prefs.put(this, Prefs.K_NETEASE_NICKNAME, status.nickname);
+                        Toast.makeText(this, "登录状态有效", Toast.LENGTH_SHORT).show();
+                    } else {
+                        Prefs.put(this, Prefs.K_NETEASE_UID, "");
+                        Prefs.put(this, Prefs.K_NETEASE_NICKNAME, "");
+                        Toast.makeText(this, "登录状态已失效", Toast.LENGTH_SHORT).show();
+                    }
+                    showCloudMenu();
+                });
+    }
+
+    private void logoutCloud() {
+        qrLoginSerial++;
+        Prefs.put(this, Prefs.K_NETEASE_COOKIE, "");
+        Prefs.put(this, Prefs.K_NETEASE_UID, "");
+        Prefs.put(this, Prefs.K_NETEASE_NICKNAME, "");
+        Toast.makeText(this, "已退出网易云登录", Toast.LENGTH_SHORT).show();
+        showCloudMenu();
+    }
+
+    private byte[] decodeImageData(String value) {
+        if (value == null || value.trim().isEmpty()) return null;
+        String raw = value.trim();
+        int comma = raw.indexOf(',');
+        if (comma >= 0) raw = raw.substring(comma + 1);
+        try {
+            return Base64.decode(raw, Base64.DEFAULT);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private TextView subtleText(String value) {
+        TextView tv = new TextView(this);
+        tv.setText(value);
+        Ui.styleSubtle(tv);
+        tv.setTextSize(12);
+        return tv;
     }
 
     /** 优先媒体库；为空时扫描常见目录，避免只扫 /sdcard 根目录漏掉 bluetooth。 */
@@ -389,27 +886,58 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
     }
 
     @Override protected void onDestroy() {
+        cloudRequestSerial++;
+        qrLoginSerial++;
+        qrStatusView = null;
         artExec.shutdownNow();
+        cloudExec.shutdownNow();
         if (MusicService.get() != null) MusicService.get().setListener(null);
         super.onDestroy();
     }
 
     @Override public void onState(String t, boolean playing, int p, int d, int idx) {
         playingState = playing;
-        piece.update(displayName(t), playing, p, d, idx);
+        MusicService svc = MusicService.get();
+        MusicTrack current = svc == null ? null : svc.currentTrack();
+        String shown = current == null ? displayName(t) : trackTitle(current);
+        piece.update(shown, current == null ? "" : current.artist, playing, p, d, idx);
         piece.postInvalidate();
-        if (!t.equals(piece.lastTitleForArt)) {
-            piece.lastTitleForArt = t;
-            tryFetchArt(t, idx);
+        String artKey = current != null && current.isNetease()
+                ? "netease:" + current.neteaseId : t;
+        if (!artKey.equals(piece.lastTitleForArt)) {
+            piece.lastTitleForArt = artKey;
+            tryFetchArt(current, t, idx);
         }
     }
 
-    private void tryFetchArt(final String title, final int idx) {
+    @Override public void onTrackError(String title, String message, int idx) {
+        if (message == null || message.trim().isEmpty()) message = "播放失败";
+        Toast.makeText(this, compact(title, 14) + " · " + message,
+                Toast.LENGTH_LONG).show();
+    }
+
+    private void tryFetchArt(final MusicTrack track, final String title, final int idx) {
         MusicService svc = MusicService.get();
         if (svc == null) return;
-        List<String> urls = svc.playlist();
-        if (idx < 0 || idx >= urls.size()) return;
-        String cur = urls.get(idx);
+        List<MusicTrack> serviceTracks = svc.tracks();
+        if (idx < 0 || idx >= serviceTracks.size()) return;
+        MusicTrack current = track == null ? serviceTracks.get(idx) : track;
+        if (current.isNetease() && !current.coverUrl.trim().isEmpty()) {
+            final String key = "netease:" + current.neteaseId;
+            final String cover = current.coverUrl;
+            artExec.execute(() -> {
+                try {
+                    Bitmap b = fetchBitmap(cover);
+                    runOnUiThread(() -> {
+                        if (key.equals(piece.lastTitleForArt)) piece.setArt(b);
+                    });
+                    return;
+                } catch (Exception ignored) {}
+            });
+            return;
+        }
+        String cur = current.url;
+        if (cur == null || cur.trim().isEmpty()) return;
         String dir = parentUrl(cur);
         String tn = stripExt(displayName(title));
         String[] candidates = {dir + "cover.jpg", dir + "folder.jpg", dir + tn + ".jpg"};
@@ -418,12 +946,16 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
                 try {
                     Bitmap b = fetchBitmap(cand);
                     if (b != null) {
-                        runOnUiThread(() -> piece.setArt(b));
+                        runOnUiThread(() -> {
+                            if (title.equals(piece.title)) piece.setArt(b);
+                        });
                         return;
                     }
                 } catch (Exception ignored) {}
             }
-            runOnUiThread(() -> piece.setArt(null));
+            runOnUiThread(() -> {
+                if (title.equals(piece.title)) piece.setArt(null);
+            });
         });
     }
 
@@ -486,6 +1018,12 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         return s.substring(0, Math.max(1, max - 6)) + "..." + s.substring(s.length() - 3);
     }
 
+    private String trackTitle(MusicTrack track) {
+        if (track == null) return "";
+        String title = track.displayTitle();
+        return title == null || title.trim().isEmpty() ? "未命名歌曲" : title;
+    }
+
     private static class Track {
         final String path;
         final String title;
@@ -500,6 +1038,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
     /** 全屏自绘唱片机：背景、唱片、进度和信息区都在圆屏安全区内。 */
     private class PieceView extends View {
         private String title = "";
+        private String artist = "";
         private String emptyText = "";
         private boolean playing = false;
         private int pos = 0;
@@ -525,7 +1064,12 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         }
 
         void update(String t, boolean pl, int p, int d, int idx) {
+            update(t, "", pl, p, d, idx);
+        }
+
+        void update(String t, String a, boolean pl, int p, int d, int idx) {
             title = t == null ? "" : t;
+            artist = a == null ? "" : a;
             playing = pl;
             pos = Math.max(0, p);
             dur = Math.max(d, 1);
@@ -787,11 +1331,14 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
             pText.setColor(Ui.COLOR_TEXT_DIM);
             String sub;
             if (!emptyText.isEmpty()) {
-                sub = "歌单中可重扫本地或打开网盘";
+                sub = "请在歌单菜单选择来源或配置服务";
             } else if (trackCount > 0 && !playing && pos == 0 && dur <= 1) {
-                sub = (currentIndex + 1) + "/" + trackCount + "  ·  点击唱片播放";
+                sub = (artist.isEmpty() ? "" : compact(artist, 16) + "  ·  ")
+                        + (currentIndex + 1) + "/" + trackCount + "  ·  点击唱片播放";
             } else if (trackCount > 0) {
-                sub = (currentIndex + 1) + "/" + trackCount + "  ·  " + fmt(pos) + " / " + fmt(dur);
+                sub = (artist.isEmpty() ? "" : compact(artist, 16) + "  ·  ")
+                        + (currentIndex + 1) + "/" + trackCount + "  ·  "
+                        + fmt(pos) + " / " + fmt(dur);
             } else {
                 sub = "00:00 / 00:00";
             }

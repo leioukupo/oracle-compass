@@ -123,6 +123,12 @@ public class Prefs {
     public static final String K_ROVER_RIGHT_Y_INVERT = "roverRightYInvert";
     public static final String K_ROVER_RTSP_PORT = "roverRtspPort";
     public static final String K_ROVER_RTSP_PATH = "roverRtspPath";
+    public static final String K_NETEASE_API_URL = "neteaseApiUrl";
+    public static final String K_NETEASE_COOKIE = "neteaseCookie";
+    public static final String K_NETEASE_UID = "neteaseUid";
+    public static final String K_NETEASE_NICKNAME = "neteaseNickname";
+    public static final String K_NETEASE_QUALITY = "neteaseQuality";
+    public static final String K_MUSIC_SOURCE = "musicSource";
     public static final String DEFAULT_LOC_WIFI_URL = "";
     public static final String DEFAULT_LOC_IP_URL = "http://ip-api.com/json/?fields=status,lat,lon,query,city,regionName,country,isp";
     public static final String DEFAULT_SYS_PROMPT_VOICE = "你是真理罗盘助手，回答简洁，中文回复。";
@@ -138,6 +144,9 @@ public class Prefs {
     public static final boolean DEFAULT_ROVER_BROADCAST = true;
     public static final int DEFAULT_ROVER_RTSP_PORT = 8554;
     public static final String DEFAULT_ROVER_RTSP_PATH = "/test";
+    public static final String DEFAULT_NETEASE_QUALITY = "standard";
+    public static final String MUSIC_SOURCE_LOCAL = "local";
+    public static final String MUSIC_SOURCE_NETEASE = "netease";
     public static final String VISION_FRAME_SOURCE_HAL = "hal";
     public static final String VISION_FRAME_SOURCE_RTSP = "rtsp";
     public static final String DEFAULT_VISION_FRAME_SOURCE = VISION_FRAME_SOURCE_HAL;
@@ -274,6 +283,41 @@ public class Prefs {
         String host = roverTargetHost(c);
         if (host.isEmpty()) host = "仅广播 / 自动发现";
         return host + ":" + roverUdpPort(c);
+    }
+
+    public static String neteaseApiUrl(Context c) {
+        String raw = get(c, K_NETEASE_API_URL, "");
+        if (raw == null) return "";
+        String value = raw.trim();
+        while (value.endsWith("/") && value.length() > 0) {
+            value = value.substring(0, value.length() - 1);
+        }
+        return value;
+    }
+
+    public static String neteaseCookie(Context c) {
+        String value = get(c, K_NETEASE_COOKIE, "");
+        return value == null ? "" : value.trim();
+    }
+
+    public static String neteaseQuality(Context c) {
+        return normalizeNeteaseQuality(get(c, K_NETEASE_QUALITY, DEFAULT_NETEASE_QUALITY));
+    }
+
+    public static String normalizeNeteaseQuality(String value) {
+        String s = value == null ? "" : value.trim().toLowerCase(java.util.Locale.US);
+        if ("higher".equals(s) || "exhigh".equals(s) || "lossless".equals(s)
+                || "hires".equals(s) || "jyeffect".equals(s) || "sky".equals(s)
+                || "dolby".equals(s) || "jymaster".equals(s)) {
+            return s;
+        }
+        return DEFAULT_NETEASE_QUALITY;
+    }
+
+    public static String musicSource(Context c) {
+        String value = get(c, K_MUSIC_SOURCE, MUSIC_SOURCE_LOCAL);
+        return MUSIC_SOURCE_NETEASE.equalsIgnoreCase(value)
+                ? MUSIC_SOURCE_NETEASE : MUSIC_SOURCE_LOCAL;
     }
 
     public static String screenPolicy(Context c) {

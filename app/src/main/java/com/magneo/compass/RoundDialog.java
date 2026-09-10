@@ -132,6 +132,13 @@ public class RoundDialog {
         return item("取消", null);
     }
 
+    public RoundDialog onDismiss(final Runnable action) {
+        dialog.setOnDismissListener(d -> {
+            if (action != null) action.run();
+        });
+        return this;
+    }
+
     public void show() {
         dialog.show();
         if (dialog.getWindow() != null) {
