@@ -1406,6 +1406,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         private void drawAudioVisualizer(Canvas c, float cx, float cy, float r, float s) {
             float[] levels = visualizerLevels;
             float phase = SystemClock.uptimeMillis() / 170f;
+            float inner = r + 7f * s;
             pStroke.setStyle(Paint.Style.STROKE);
             pStroke.setStrokeCap(Paint.Cap.BUTT);
             for (int i = 0; i < VISUALIZER_BARS; i++) {
@@ -1415,12 +1416,13 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
                     float fallback = 0.16f + 0.26f
                             * (0.5f + 0.5f * (float) Math.sin(phase + i * 0.63f));
                     live = Math.max(live, fallback);
+                } else {
+                    live = Math.max(live, 0.12f);
                 }
-                float inner = r + 8f * s;
-                float outer = inner + (3f + live * 25f) * s;
-                float width = (i % 4 == 0 ? 3.2f : 1.8f) * s;
+                float outer = inner + (8f + live * 57f) * s;
+                float width = (i % 4 == 0 ? 3.4f : 2.1f) * s;
                 pStroke.setStrokeWidth(width);
-                int alpha = playing ? (i % 3 == 0 ? 225 : 170) : 62;
+                int alpha = playing ? (i % 3 == 0 ? 232 : 184) : 105;
                 pStroke.setColor(i % 3 == 0 ? Color.argb(alpha, 236, 223, 203)
                         : i % 3 == 1 ? Color.argb(alpha, 212, 175, 55)
                         : Color.argb(alpha, 78, 202, 208));
