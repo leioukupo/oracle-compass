@@ -22,9 +22,10 @@ import okhttp3.Request;
 import okhttp3.Response;
 
 /**
- * NeteaseCloudMusicApi 兼容客户端。
+ * NeteaseCloudMusicApi Enhanced 客户端。
  *
- * 这里只依赖少量稳定的 JSON 接口，服务地址由设备配置提供，不绑定任何公共实例。
+ * 只依赖 Enhanced 保持兼容的公开 HTTP 路径，服务地址由设备配置提供，
+ * 不绑定任何公共实例。
  */
 public final class NeteaseMusicApi {
     public static final String USER_AGENT =
@@ -75,7 +76,7 @@ public final class NeteaseMusicApi {
         if (q.isEmpty()) throw new IOException("请输入搜索内容");
         Map<String, String> params = new HashMap<>();
         params.put("keywords", q);
-        params.put("limit", String.valueOf(clamp(limit, 1, 100)));
+        params.put("limit", String.valueOf(clamp(limit, 1, 30)));
         params.put("type", "1");
         JSONObject root = request("/cloudsearch", params);
         JSONObject result = root.optJSONObject("result");
@@ -87,7 +88,7 @@ public final class NeteaseMusicApi {
         if (q.isEmpty()) throw new IOException("请输入搜索内容");
         Map<String, String> params = new HashMap<>();
         params.put("keywords", q);
-        params.put("limit", String.valueOf(clamp(limit, 1, 100)));
+        params.put("limit", String.valueOf(clamp(limit, 1, 20)));
         params.put("type", "1000");
         JSONObject root = request("/cloudsearch", params);
         JSONObject result = root.optJSONObject("result");
@@ -97,6 +98,14 @@ public final class NeteaseMusicApi {
     public List<Playlist> personalizedPlaylists(int limit) throws IOException {
         Map<String, String> params = new HashMap<>();
         params.put("limit", String.valueOf(clamp(limit, 1, 100)));
+        if (!cookie.isEmpty()) {
+            try {
+                JSONObject root = request("/recommend/resource", params);
+                List<Playlist> recommended = parsePlaylists(firstArray(root,
+                        "recommend", "result", "playlist"));
+                if (!recommended.isEmpty()) return recommended;
+            } catch (IOException ignored) {}
+        }
         JSONObject root = request("/personalized", params);
         return parsePlaylists(root.optJSONArray("result"));
     }
@@ -124,6 +133,16 @@ public final class NeteaseMusicApi {
 
     public List<MusicTrack> playlistTracks(long playlistId) throws IOException {
         if (playlistId <= 0L) throw new IOException("歌单 ID 无效");
+        Map<String, String> allParams = new HashMap<>();
+        allParams.put("id", String.valueOf(playlistId));
+        allParams.put("limit", "1000");
+        allParams.put("offset", "0");
+        try {
+            // Enhanced 专门提供此接口，直接返回完整歌曲详情。
+            List<MusicTrack> all = parseSongsFromRoot(request("/playlist/track/all", allParams));
+            if (!all.isEmpty()) return all;
+        } catch (IOException ignored) {}
+
         Map<String, String> params = new HashMap<>();
         params.put("id", String.valueOf(playlistId));
         JSONObject root = request("/playlist/detail", params);
@@ -132,10 +151,9 @@ public final class NeteaseMusicApi {
         if (playlist == null) throw new IOException("歌单数据为空");
 
         List<MusicTrack> tracks = parseSongs(playlist.optJSONArray("tracks"));
-        if (!tracks.isEmpty()) return tracks;
-
         JSONArray ids = playlist.optJSONArray("trackIds");
         if (ids == null || ids.length() == 0) return tracks;
+        if (tracks.size() >= ids.length()) return tracks;
         ArrayList<MusicTrack> out = new ArrayList<>();
         for (int start = 0; start < ids.length(); start += 200) {
             JSONArray batch = new JSONArray();
@@ -178,7 +196,10 @@ public final class NeteaseMusicApi {
                     }
                 }
             }
-            return item == null ? "" : item.optString("url", "").trim();
+            if (item == null) return "";
+            String url = item.optString("url", "").trim();
+            if (url.isEmpty()) url = item.optString("proxyUrl", "").trim();
+            return url;
         } catch (IOException e) {
             return "";
         }
@@ -206,12 +227,21 @@ public final class NeteaseMusicApi {
         Map<String, String> params = new HashMap<>();
         params.put("key", key == null ? "" : key);
         params.put("timestamp", now());
-        ApiResponse response = requestResponse("/login/qr/check", params);
+        ApiResponse response;
+        try {
+            response = requestResponse("/login/qr/check", params);
+        } catch (IOException first) {
+            // Enhanced 文档说明扫码后偶发 502，需要带 noCookie 重试。
+            params.put("noCookie", "true");
+            response = requestResponse("/login/qr/check", params);
+        }
         JSONObject root = response.body;
         JSONObject data = root.optJSONObject("data");
         int code = root.optInt("code", data == null ? 0 : data.optInt("code", 0));
-        String message = root.optString("message", "");
-        if (data != null && message.isEmpty()) message = data.optString("message", "");
+        String message = root.optString("message", root.optString("msg", ""));
+        if (data != null && message.isEmpty()) {
+            message = data.optString("message", data.optString("msg", ""));
+        }
         String loginCookie = data == null ? "" : data.optString("cookie", "");
         if (loginCookie.isEmpty()) loginCookie = root.optString("cookie", "");
         if (loginCookie.isEmpty()) loginCookie = cookieFromHeaders(response.headers);
@@ -229,6 +259,10 @@ public final class NeteaseMusicApi {
                 singleton("timestamp", now()));
         JSONObject root = response.body;
         JSONObject data = root.optJSONObject("data");
+        if (data != null && data.optJSONObject("account") == null
+                && data.optJSONObject("data") != null) {
+            data = data.optJSONObject("data");
+        }
         JSONObject account = data == null ? null : data.optJSONObject("account");
         JSONObject profile = data == null ? null : data.optJSONObject("profile");
         long uid = account == null ? 0L : account.optLong("id", 0L);
@@ -243,7 +277,7 @@ public final class NeteaseMusicApi {
     }
 
     private ApiResponse requestResponse(String path, Map<String, String> params) throws IOException {
-        if (!isConfigured()) throw new IOException("未配置网易云 API 地址");
+        if (!isConfigured()) throw new IOException("未配置网易云 Enhanced API 地址");
         HttpUrl base = HttpUrl.parse(baseUrl + (path.startsWith("/") ? path : "/" + path));
         if (base == null) throw new IOException("网易云 API 地址无效");
         HttpUrl.Builder ub = base.newBuilder();
@@ -269,7 +303,7 @@ public final class NeteaseMusicApi {
             if (!(parsed instanceof JSONObject)) throw new IOException("网易云 API 返回不是 JSON");
             JSONObject root = (JSONObject) parsed;
             int code = root.optInt("code", 200);
-            if (code >= 400 && code != 801 && code != 802 && code != 803) {
+            if (code >= 400 && code != 800 && code != 801 && code != 802 && code != 803) {
                 throw new IOException(root.optString("message",
                         root.optString("msg", "网易云 API 返回错误 " + code)));
             }
@@ -302,6 +336,25 @@ public final class NeteaseMusicApi {
                     albumName, cover, duration));
         }
         return out;
+    }
+
+    private List<MusicTrack> parseSongsFromRoot(JSONObject root) {
+        if (root == null) return new ArrayList<>();
+        JSONArray songs = root.optJSONArray("songs");
+        if (songs == null) {
+            JSONObject data = root.optJSONObject("data");
+            if (data != null) songs = data.optJSONArray("songs");
+        }
+        return parseSongs(songs);
+    }
+
+    private static JSONArray firstArray(JSONObject root, String... keys) {
+        if (root == null || keys == null) return null;
+        for (String key : keys) {
+            JSONArray values = root.optJSONArray(key);
+            if (values != null) return values;
+        }
+        return null;
     }
 
     private List<Playlist> parsePlaylists(JSONArray values) {

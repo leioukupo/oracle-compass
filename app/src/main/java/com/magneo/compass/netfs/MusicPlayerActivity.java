@@ -334,7 +334,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         if (!new NeteaseMusicApi(this).isConfigured()) {
             new RoundDialog(this)
                     .title("网易云音乐")
-                    .text("未配置网易云 API 地址")
+                    .text("未配置网易云 Enhanced API 地址")
                     .item("配置服务", this::showCloudSettings)
                     .item("切换到本地 / 网盘", this::switchToLocal)
                     .cancel()
@@ -409,7 +409,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         quality.setSelection(selected);
 
         RoundDialog d = new RoundDialog(this).title("网易云设置")
-                .text("API 地址默认留空；Cookie 只用于网易云请求。");
+                .text("填写 NeteaseCloudMusicApi Enhanced 地址；Cookie 只用于网易云请求。");
         d.field(url);
         d.field(cookie);
         d.view(quality);
@@ -471,7 +471,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
     private void loadCloudHome(boolean fromSwitch) {
         if (!new NeteaseMusicApi(this).isConfigured()) {
             if (fromSwitch) showCloudSettings();
-            else setEmptyState("未配置网易云 API");
+            else setEmptyState("未配置网易云 Enhanced API");
             return;
         }
         if (fromSwitch) {

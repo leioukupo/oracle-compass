@@ -686,12 +686,12 @@ public class SettingsWebServer {
                 .append(fsRow("SMB 域", "fsDomain", "可留空"))
                 .append("<div class='inline'><button type='button' onclick='fsSave()'>保存连接</button><button type='button' class='secondary' onclick='fsTest()'>测试连接</button><button type='button' class='secondary' onclick='fsNew()'>新建</button><span class='state' id='fsMsg'></span></div>")
                 .append("</div></div></section>")
-                .append("<section class='panel' id='tab-music'><div class='sectionTitle'><h2>网易云音乐</h2><small>自建兼容 API、二维码登录和在线播放</small></div><div class='cols'><div class='box'><h3>服务</h3>")
-                .append(rowInput("API Base URL", Prefs.K_NETEASE_API_URL, "text", "http://你的服务器:3000"))
+                .append("<section class='panel' id='tab-music'><div class='sectionTitle'><h2>网易云音乐</h2><small>NeteaseCloudMusicApi Enhanced、自建服务和在线播放</small></div><div class='cols'><div class='box'><h3>服务</h3>")
+                .append(rowInput("Enhanced API Base URL", Prefs.K_NETEASE_API_URL, "text", "http://你的服务器:3000"))
                 .append(rowSelect("播放音质", Prefs.K_NETEASE_QUALITY, null,
                         "<option value='standard'>标准</option><option value='higher'>较高</option><option value='exhigh'>极高</option><option value='lossless'>无损</option><option value='hires'>Hi-Res</option>",
                         null))
-                .append("<p class='hint'>留空表示不请求网易云接口；地址保存时会自动去掉末尾斜杠。</p>")
+                .append("<p class='hint'>填写 api-enhanced 服务地址；留空表示不请求网易云接口，地址保存时会自动去掉末尾斜杠。</p>")
                 .append("</div><div class='box'><h3>登录态</h3>")
                 .append(rowInput("Cookie", Prefs.K_NETEASE_COOKIE, "password", "留空=保持当前 Cookie"))
                 .append("<div class='row'><label></label><div class='inline'><span class='state' id='neteaseCookieState'>未知</span><label class='checkrow'><input type='checkbox' name='clearNeteaseCookie'>清除 Cookie</label></div></div>")

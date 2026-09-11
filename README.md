@@ -63,6 +63,46 @@ git clone --depth 1 https://github.com/espeak-ng/espeak-ng.git third_party/espea
 
 Action 会使用 `zipalign` 和 `apksigner` 签名，并显式启用 v1 签名以兼容 Android 5.1。
 
+## 网易云音乐 API 服务
+
+音乐页使用 [NeteaseCloudMusicApiEnhanced](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced)
+提供的兼容 HTTP API。服务地址不会内置在 App 中，需要自行部署后在音乐页或远程控制台填写。
+
+Enhanced 项目要求 Node.js 22 及以上。服务器上可以直接使用 Docker：
+
+```bash
+docker pull moefurina/ncm-api:latest
+docker run -d \
+  --name ncm-api \
+  --restart unless-stopped \
+  -p 3000:3000 \
+  -e http_proxy= \
+  -e https_proxy= \
+  -e HTTP_PROXY= \
+  -e HTTPS_PROXY= \
+  -e no_proxy= \
+  -e NO_PROXY= \
+  moefurina/ncm-api:latest
+```
+
+或者用源码启动：
+
+```bash
+git clone https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced.git
+cd api-enhanced
+pnpm install
+PORT=3000 node app.js
+```
+
+启动后在 App 中填写：
+
+```text
+http://服务器局域网IP:3000
+```
+
+Enhanced API 的歌单加载优先使用 `/playlist/track/all`，播放地址使用 `/song/url/v1`；
+二维码登录、搜索、推荐、每日推荐和我的歌单仍使用其兼容路径。
+
 ## 金色机械开机动画
 
 Release 中的 `oracle-compass-bootanimation-v*.zip` 是为 C110001 / Android 5.1 制作的 Magisk 模块。它以 systemless 方式覆盖 `/system/media/bootanimation.zip`，覆盖该 ROM 的 `curlockscreen=1` 厂商属性，并在开机动画仍覆盖屏幕时预加载真理罗盘 HOME。为避免系统 HOME 选择器打断衔接，模块只禁用 KISS 和原厂 Launcher3 的 HOME Activity，不卸载对应应用；卸载模块时会自动恢复这些 Activity 和滑动锁。
