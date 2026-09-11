@@ -36,7 +36,7 @@ git clone --depth 1 https://github.com/espeak-ng/espeak-ng.git third_party/espea
 ./gradlew assembleRelease
 ```
 
-生成的 APK 位于 `app/build/outputs/apk/release/`。更多历史构建步骤、圆屏 UI 规范和设备限制已移到 [docs/original-readme.md](docs/original-readme.md)。
+生成的 unsigned APK 位于 `app/build/outputs/apk/release/`。本地 Gradle 构建不读取或依赖仓库外的 keystore；正式 release 签名由下面的 GitHub Actions 使用仓库 Secrets 完成。更多历史构建步骤、圆屏 UI 规范和设备限制已移到 [docs/original-readme.md](docs/original-readme.md)。
 
 ## GitHub Release 构建
 
