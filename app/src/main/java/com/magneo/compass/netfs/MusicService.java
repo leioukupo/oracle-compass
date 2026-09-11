@@ -255,6 +255,11 @@ public class MusicService extends Service {
         return idx >= 0 && idx < tracks.size() ? tracks.get(idx) : null;
     }
 
+    public int audioSessionId() {
+        if (mp == null) return 0;
+        try { return mp.getAudioSessionId(); } catch (Exception ignored) { return 0; }
+    }
+
     public void toggle() {
         if (mp == null) { if (!tracks.isEmpty()) playItem(idx); return; }
         if (mp.isPlaying()) {

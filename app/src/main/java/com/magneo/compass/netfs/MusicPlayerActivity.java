@@ -12,15 +12,18 @@ import android.graphics.Path;
 import android.graphics.RadialGradient;
 import android.graphics.RectF;
 import android.graphics.Shader;
+import android.media.audiofx.Visualizer;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -60,6 +63,9 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
     private static final long LIKELY_SONG_SIZE = 512L * 1024L;
     private static final long LIKELY_SONG_MS = 15_000L;
     private static final int SIDE_SEEK_MS = 15_000;
+    private static final int HOLD_SEEK_STEP_MS = 2_000;
+    private static final long HOLD_SEEK_INTERVAL_MS = 110L;
+    private static final int VISUALIZER_BARS = 64;
 
     private PieceView piece;
     private ArrayList<String> currentUrls = new ArrayList<>();
@@ -71,6 +77,9 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
     private int cloudRequestSerial = 0;
     private int qrLoginSerial = 0;
     private TextView qrStatusView;
+    private Visualizer musicVisualizer;
+    private int visualizerSession = 0;
+    private volatile float[] visualizerLevels = new float[VISUALIZER_BARS];
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -86,22 +95,14 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
                 ViewGroup.LayoutParams.MATCH_PARENT));
 
         Button prev = sideButton("‹");
-        prev.setOnClickListener(v -> skipTrack(-1));
-        prev.setOnLongClickListener(v -> {
-            seekSide(-1);
-            return true;
-        });
+        bindSideButton(prev, -1);
         FrameLayout.LayoutParams prevLp = new FrameLayout.LayoutParams(Ui.dp(this, 54),
                 Ui.dp(this, 54), Gravity.LEFT | Gravity.CENTER_VERTICAL);
         prevLp.leftMargin = Ui.dp(this, 34);
         root.addView(prev, prevLp);
 
         Button next = sideButton("›");
-        next.setOnClickListener(v -> skipTrack(1));
-        next.setOnLongClickListener(v -> {
-            seekSide(1);
-            return true;
-        });
+        bindSideButton(next, 1);
         FrameLayout.LayoutParams nextLp = new FrameLayout.LayoutParams(Ui.dp(this, 54),
                 Ui.dp(this, 54), Gravity.RIGHT | Gravity.CENTER_VERTICAL);
         nextLp.rightMargin = Ui.dp(this, 34);
@@ -159,6 +160,55 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         b.setIncludeFontPadding(false);
         b.setPadding(0, 0, 0, Ui.dp(this, 3));
         return b;
+    }
+
+    private void bindSideButton(Button button, final int dir) {
+        button.setOnTouchListener(new View.OnTouchListener() {
+            private boolean holding;
+            private boolean longSeeking;
+            private final Runnable repeatSeek = new Runnable() {
+                @Override public void run() {
+                    if (!longSeeking) return;
+                    seekSide(dir, HOLD_SEEK_STEP_MS);
+                    ui.postDelayed(this, HOLD_SEEK_INTERVAL_MS);
+                }
+            };
+            private final Runnable beginSeek = new Runnable() {
+                @Override public void run() {
+                    if (!holding) return;
+                    longSeeking = true;
+                    button.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                    seekSide(dir, HOLD_SEEK_STEP_MS);
+                    ui.postDelayed(repeatSeek, HOLD_SEEK_INTERVAL_MS);
+                }
+            };
+
+            @Override public boolean onTouch(View v, MotionEvent event) {
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        holding = true;
+                        longSeeking = false;
+                        ui.postDelayed(beginSeek, ViewConfiguration.getLongPressTimeout());
+                        return true;
+                    case MotionEvent.ACTION_UP:
+                        ui.removeCallbacks(beginSeek);
+                        ui.removeCallbacks(repeatSeek);
+                        boolean wasLongSeeking = longSeeking;
+                        holding = false;
+                        longSeeking = false;
+                        if (!wasLongSeeking) skipTrack(dir);
+                        return true;
+                    case MotionEvent.ACTION_CANCEL:
+                        holding = false;
+                        longSeeking = false;
+                        ui.removeCallbacks(beginSeek);
+                        ui.removeCallbacks(repeatSeek);
+                        return true;
+                    default:
+                        return true;
+                }
+            }
+        });
     }
 
     private void startPlaylist(List<String> urls) {
@@ -250,9 +300,13 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
     }
 
     private void seekSide(int dir) {
+        seekSide(dir, SIDE_SEEK_MS);
+    }
+
+    private void seekSide(int dir, int deltaMs) {
         MusicService svc = MusicService.get();
         if (svc != null) {
-            svc.seekRelative(dir * SIDE_SEEK_MS);
+            svc.seekRelative(dir * deltaMs);
         } else if (currentTracks.isEmpty()) {
             showPlaylistMenu();
         }
@@ -882,6 +936,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
 
     @Override protected void onPause() {
         super.onPause();
+        releaseMusicVisualizer();
         if (MusicService.get() != null) MusicService.get().setListener(null);
     }
 
@@ -889,6 +944,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         cloudRequestSerial++;
         qrLoginSerial++;
         qrStatusView = null;
+        releaseMusicVisualizer();
         artExec.shutdownNow();
         cloudExec.shutdownNow();
         if (MusicService.get() != null) MusicService.get().setListener(null);
@@ -902,6 +958,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         String shown = current == null ? displayName(t) : trackTitle(current);
         piece.update(shown, current == null ? "" : current.artist, playing, p, d, idx);
         piece.postInvalidate();
+        syncMusicVisualizer(playing);
         String artKey = current != null && current.isNetease()
                 ? "netease:" + current.neteaseId : t;
         if (!artKey.equals(piece.lastTitleForArt)) {
@@ -957,6 +1014,72 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
                 if (title.equals(piece.title)) piece.setArt(null);
             });
         });
+    }
+
+    private void syncMusicVisualizer(boolean playing) {
+        MusicService svc = MusicService.get();
+        int session = svc == null ? 0 : svc.audioSessionId();
+        if (!playing || session <= 0) {
+            releaseMusicVisualizer();
+            return;
+        }
+        if (musicVisualizer != null && visualizerSession == session) return;
+        releaseMusicVisualizer();
+        try {
+            final Visualizer capture = new Visualizer(session);
+            int[] range = Visualizer.getCaptureSizeRange();
+            int captureSize = range != null && range.length > 0 ? range[0] : 128;
+            capture.setCaptureSize(captureSize);
+            capture.setScalingMode(Visualizer.SCALING_MODE_AS_PLAYED);
+            int rate = Math.max(1_000, Math.min(Visualizer.getMaxCaptureRate(), 12_000));
+            capture.setDataCaptureListener(new Visualizer.OnDataCaptureListener() {
+                @Override public void onWaveFormDataCapture(Visualizer visualizer,
+                                                              byte[] waveform,
+                                                              int samplingRate) {}
+
+                @Override public void onFftDataCapture(Visualizer visualizer, byte[] fft,
+                                                       int samplingRate) {
+                    if (capture != musicVisualizer || fft == null || fft.length < 4) return;
+                    float[] previous = visualizerLevels;
+                    float[] next = new float[VISUALIZER_BARS];
+                    int bins = fft.length / 2;
+                    for (int i = 0; i < VISUALIZER_BARS; i++) {
+                        int from = Math.max(1,
+                                (int) Math.pow(bins, i / (double) VISUALIZER_BARS));
+                        int to = Math.max(from + 1,
+                                (int) Math.pow(bins, (i + 1) / (double) VISUALIZER_BARS));
+                        to = Math.min(bins, to);
+                        float peak = 0f;
+                        for (int bin = from; bin < to; bin++) {
+                            int off = bin * 2;
+                            if (off + 1 >= fft.length) break;
+                            float re = fft[off];
+                            float im = fft[off + 1];
+                            peak = Math.max(peak, (float) Math.sqrt(re * re + im * im) / 180f);
+                        }
+                        next[i] = Math.max(0f, Math.min(1f,
+                                previous[i] * 0.68f + peak * 0.32f));
+                    }
+                    visualizerLevels = next;
+                    if (piece != null) piece.postInvalidate();
+                }
+            }, rate, false, true);
+            capture.setEnabled(true);
+            musicVisualizer = capture;
+            visualizerSession = session;
+        } catch (Throwable ignored) {
+            releaseMusicVisualizer();
+        }
+    }
+
+    private void releaseMusicVisualizer() {
+        Visualizer old = musicVisualizer;
+        musicVisualizer = null;
+        visualizerSession = 0;
+        visualizerLevels = new float[VISUALIZER_BARS];
+        if (old == null) return;
+        try { old.setEnabled(false); } catch (Throwable ignored) {}
+        try { old.release(); } catch (Throwable ignored) {}
     }
 
     private Bitmap fetchBitmap(String u) throws Exception {
@@ -1047,6 +1170,13 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         private int trackCount = 0;
         private Bitmap art;
         private String lastTitleForArt = "";
+        private boolean playIconVisible = true;
+        private final Runnable hidePlayIcon = new Runnable() {
+            @Override public void run() {
+                playIconVisible = false;
+                postInvalidate();
+            }
+        };
         private float downX, downY;
         private boolean downInDeck = false;
 
@@ -1061,6 +1191,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
             setFocusable(true);
             pStroke.setStyle(Paint.Style.STROKE);
             pText.setSubpixelText(true);
+            postDelayed(hidePlayIcon, 3_000L);
         }
 
         void update(String t, boolean pl, int p, int d, int idx) {
@@ -1068,12 +1199,22 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         }
 
         void update(String t, String a, boolean pl, int p, int d, int idx) {
+            boolean stateChanged = !title.equals(t == null ? "" : t)
+                    || playing != pl || currentIndex != Math.max(0, idx);
             title = t == null ? "" : t;
             artist = a == null ? "" : a;
             playing = pl;
             pos = Math.max(0, p);
             dur = Math.max(d, 1);
             currentIndex = Math.max(0, idx);
+            if (stateChanged) showPlayIcon();
+        }
+
+        private void showPlayIcon() {
+            playIconVisible = true;
+            removeCallbacks(hidePlayIcon);
+            postDelayed(hidePlayIcon, 3_000L);
+            postInvalidate();
         }
 
         void setTrackCount(int count) {
@@ -1101,6 +1242,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
                     downX = ev.getX();
                     downY = ev.getY();
                     downInDeck = pointInDeck(downX, downY);
+                    if (pointInCenter(downX, downY)) showPlayIcon();
                     return downInDeck;
                 case MotionEvent.ACTION_UP:
                     if (!downInDeck) return false;
@@ -1141,10 +1283,11 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
             float R = RoundScreen.R(w, h);
             float s = RoundScreen.scale800(w, h);
             float discR = Math.min(R * 0.43f, h * 0.22f);
-            float ringR = discR + 24f * s;
+            float ringR = discR + 42f * s;
 
             drawDeckBackground(c, w, h, cx, cy, R, s);
             drawRecord(c, cx, cy, discR, s);
+            drawAudioVisualizer(c, cx, cy, discR, s);
             drawProgress(c, cx, cy, ringR, s);
             drawPlayButton(c, cx, cy, discR * 0.29f, s);
             drawInfo(c, cx, cy + ringR + 39f * s, R, s);
@@ -1260,6 +1403,36 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
             pStroke.setStrokeCap(Paint.Cap.BUTT);
         }
 
+        private void drawAudioVisualizer(Canvas c, float cx, float cy, float r, float s) {
+            float[] levels = visualizerLevels;
+            float phase = SystemClock.uptimeMillis() / 170f;
+            pStroke.setStyle(Paint.Style.STROKE);
+            pStroke.setStrokeCap(Paint.Cap.BUTT);
+            for (int i = 0; i < VISUALIZER_BARS; i++) {
+                float angle = (float) Math.toRadians(i * 360f / VISUALIZER_BARS - 90f);
+                float live = levels == null || i >= levels.length ? 0f : levels[i];
+                if (playing) {
+                    float fallback = 0.16f + 0.26f
+                            * (0.5f + 0.5f * (float) Math.sin(phase + i * 0.63f));
+                    live = Math.max(live, fallback);
+                }
+                float inner = r + 8f * s;
+                float outer = inner + (3f + live * 25f) * s;
+                float width = (i % 4 == 0 ? 3.2f : 1.8f) * s;
+                pStroke.setStrokeWidth(width);
+                int alpha = playing ? (i % 3 == 0 ? 225 : 170) : 62;
+                pStroke.setColor(i % 3 == 0 ? Color.argb(alpha, 236, 223, 203)
+                        : i % 3 == 1 ? Color.argb(alpha, 212, 175, 55)
+                        : Color.argb(alpha, 78, 202, 208));
+                c.drawLine(cx + (float) Math.cos(angle) * inner,
+                        cy + (float) Math.sin(angle) * inner,
+                        cx + (float) Math.cos(angle) * outer,
+                        cy + (float) Math.sin(angle) * outer, pStroke);
+            }
+            pStroke.setStrokeCap(Paint.Cap.ROUND);
+            if (playing) postInvalidateDelayed(55L);
+        }
+
         private boolean pointInDeck(float x, float y) {
             float w = getWidth();
             float h = getHeight();
@@ -1289,14 +1462,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         }
 
         private void drawPlayButton(Canvas c, float cx, float cy, float btnR, float s) {
-            pFill.setStyle(Paint.Style.FILL);
-            pFill.setColor(Color.argb(205, 11, 8, 6));
-            c.drawCircle(cx, cy, btnR, pFill);
-            pStroke.setStyle(Paint.Style.STROKE);
-            pStroke.setStrokeWidth(2.2f * s);
-            pStroke.setColor(Ui.COLOR_GOLD);
-            c.drawCircle(cx, cy, btnR, pStroke);
-
+            if (!playIconVisible) return;
             pFill.setStyle(Paint.Style.FILL);
             pFill.setColor(Ui.COLOR_GOLD);
             if (playing) {
