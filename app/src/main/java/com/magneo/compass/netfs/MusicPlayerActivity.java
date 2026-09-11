@@ -1383,9 +1383,6 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
             pStroke.setStrokeWidth(2.6f * s);
             pStroke.setColor(Ui.COLOR_GOLD);
             c.drawCircle(cx, cy, r, pStroke);
-            pStroke.setStrokeWidth(1f * s);
-            pStroke.setColor(Color.argb(110, 70, 210, 214));
-            c.drawCircle(cx, cy, r * 0.43f, pStroke);
         }
 
         private void drawProgress(Canvas c, float cx, float cy, float ringR, float s) {
