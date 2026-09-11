@@ -86,9 +86,9 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
                 ViewGroup.LayoutParams.MATCH_PARENT));
 
         Button prev = sideButton("‹");
-        prev.setOnClickListener(v -> seekSide(-1));
+        prev.setOnClickListener(v -> skipTrack(-1));
         prev.setOnLongClickListener(v -> {
-            skipTrack(-1);
+            seekSide(-1);
             return true;
         });
         FrameLayout.LayoutParams prevLp = new FrameLayout.LayoutParams(Ui.dp(this, 54),
@@ -97,9 +97,9 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         root.addView(prev, prevLp);
 
         Button next = sideButton("›");
-        next.setOnClickListener(v -> seekSide(1));
+        next.setOnClickListener(v -> skipTrack(1));
         next.setOnLongClickListener(v -> {
-            skipTrack(1);
+            seekSide(1);
             return true;
         });
         FrameLayout.LayoutParams nextLp = new FrameLayout.LayoutParams(Ui.dp(this, 54),
