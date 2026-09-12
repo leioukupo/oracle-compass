@@ -128,6 +128,9 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         if (urls == null || urls.isEmpty()) {
             MusicService svc = MusicService.get();
             if (svc != null && !svc.tracks().isEmpty()) restoreServicePlaylist(svc);
+            else if (restoreSavedPlaylist()) {
+                // The service may have been reclaimed while the saved queue remained.
+            }
             else if (Prefs.MUSIC_SOURCE_NETEASE.equals(Prefs.musicSource(this))) {
                 loadCloudHome(false);
             } else {
@@ -220,6 +223,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         currentTracks = new ArrayList<>();
         for (String url : urls) currentTracks.add(MusicTrack.local(url, displayName(url)));
         Prefs.put(this, Prefs.K_MUSIC_SOURCE, Prefs.MUSIC_SOURCE_LOCAL);
+        MusicQueueStore.save(this, currentTracks, 0);
         piece.setTrackCount(urls.size());
         piece.setEmptyText("");
         piece.update(trackTitle(currentTracks.get(0)), false, 0,
@@ -242,6 +246,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         boolean cloud = !currentTracks.isEmpty() && currentTracks.get(0).isNetease();
         Prefs.put(this, Prefs.K_MUSIC_SOURCE,
                 cloud ? Prefs.MUSIC_SOURCE_NETEASE : Prefs.MUSIC_SOURCE_LOCAL);
+        MusicQueueStore.save(this, currentTracks, svc.currentIndex());
         piece.setTrackCount(currentTracks.size());
         piece.setEmptyText("");
         MusicTrack current = svc.currentTrack();
@@ -267,6 +272,28 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         piece.setTrackCount(0);
         piece.setEmptyText(text);
         piece.update("", false, 0, 1, 0);
+    }
+
+    private boolean restoreSavedPlaylist() {
+        MusicQueueStore.Snapshot saved = MusicQueueStore.load(this);
+        if (saved.tracks.isEmpty()) return false;
+        currentTracks = new ArrayList<>(saved.tracks);
+        currentUrls = new ArrayList<>();
+        for (MusicTrack track : currentTracks) currentUrls.add(track.url);
+        boolean cloud = currentTracks.get(0).isNetease();
+        Prefs.put(this, Prefs.K_MUSIC_SOURCE,
+                cloud ? Prefs.MUSIC_SOURCE_NETEASE : Prefs.MUSIC_SOURCE_LOCAL);
+        int index = Math.max(0, Math.min(currentTracks.size() - 1, saved.index));
+        MusicTrack selected = currentTracks.get(index);
+        piece.setTrackCount(currentTracks.size());
+        piece.setEmptyText("");
+        piece.update(trackTitle(selected), selected.artist, false, 0,
+                (int) Math.max(1L, selected.durationMs), index);
+        MusicService.startTracks(this, currentTracks, false, index);
+        piece.postDelayed(() -> {
+            if (MusicService.get() != null) MusicService.get().setListener(this);
+        }, 250);
+        return true;
     }
 
     private void togglePlaybackFromUi() {
@@ -646,6 +673,7 @@ public class MusicPlayerActivity extends com.magneo.compass.BaseActivity impleme
         for (MusicTrack track : currentTracks) currentUrls.add(track.url);
         Prefs.put(this, Prefs.K_MUSIC_SOURCE, Prefs.MUSIC_SOURCE_NETEASE);
         int index = Math.max(0, Math.min(currentTracks.size() - 1, startIndex));
+        MusicQueueStore.save(this, currentTracks, index);
         piece.setTrackCount(currentTracks.size());
         piece.setEmptyText("");
         MusicTrack selected = currentTracks.get(index);

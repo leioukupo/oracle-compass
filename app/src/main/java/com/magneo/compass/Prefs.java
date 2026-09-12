@@ -129,6 +129,7 @@ public class Prefs {
     public static final String K_NETEASE_NICKNAME = "neteaseNickname";
     public static final String K_NETEASE_QUALITY = "neteaseQuality";
     public static final String K_MUSIC_SOURCE = "musicSource";
+    public static final String K_MUSIC_QUEUE = "musicQueue";
     public static final String DEFAULT_LOC_WIFI_URL = "";
     public static final String DEFAULT_LOC_IP_URL = "http://ip-api.com/json/?fields=status,lat,lon,query,city,regionName,country,isp";
     public static final String DEFAULT_SYS_PROMPT_VOICE = "你是真理罗盘助手，回答简洁，中文回复。";

@@ -58,6 +58,12 @@ public class MusicService extends Service {
     @Override public void onCreate() {
         super.onCreate();
         inst = this;
+        MusicQueueStore.Snapshot saved = MusicQueueStore.load(this);
+        if (!saved.tracks.isEmpty()) {
+            tracks = new ArrayList<>(saved.tracks);
+            syncUrls();
+            idx = saved.index;
+        }
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "bagua:music");
         h.post(tick);
@@ -127,6 +133,7 @@ public class MusicService extends Service {
         tracks = incoming == null ? new ArrayList<>() : new ArrayList<>(incoming);
         syncUrls();
         idx = tracks.isEmpty() ? 0 : Math.max(0, Math.min(tracks.size() - 1, startIndex));
+        persistQueue();
         if (tracks.isEmpty()) notifyState();
         else if (autoplay) playItem(idx, 0, false);
         else notifyState();
@@ -156,6 +163,7 @@ public class MusicService extends Service {
             return;
         }
         idx = ((i % tracks.size()) + tracks.size()) % tracks.size();
+        persistQueue();
         final int nextAttempts = attempts + 1;
         final MusicTrack track = tracks.get(idx);
         releasePlayer();
@@ -186,6 +194,7 @@ public class MusicService extends Service {
                     MusicTrack updated = track.withUrl(result);
                     tracks.set(targetIndex, updated);
                     syncUrls();
+                    persistQueue();
                     prepareMedia(updated, targetIndex, nextAttempts - 1,
                             generation, forceResolve);
                 });
@@ -228,6 +237,7 @@ public class MusicService extends Service {
                 if (track.isNetease() && !forceResolve) {
                     tracks.set(targetIndex, track.withUrl(""));
                     syncUrls();
+                    persistQueue();
                     playItem(targetIndex, attempts, true);
                 } else {
                     playItem(targetIndex + 1, attempts + 1, false);
@@ -240,6 +250,7 @@ public class MusicService extends Service {
             if (track.isNetease() && !forceResolve) {
                 tracks.set(targetIndex, track.withUrl(""));
                 syncUrls();
+                persistQueue();
                 playItem(targetIndex, attempts, true);
             } else {
                 playItem(targetIndex + 1, attempts + 1, false);
@@ -283,6 +294,7 @@ public class MusicService extends Service {
 
     public void clearPlaylist() {
         setTrackPlaylist(new ArrayList<MusicTrack>(), false, 0);
+        MusicQueueStore.clear(this);
     }
 
     private void releasePlayer() {
@@ -366,9 +378,14 @@ public class MusicService extends Service {
         for (MusicTrack track : tracks) urls.add(track == null ? "" : track.url);
     }
 
+    private void persistQueue() {
+        MusicQueueStore.save(this, tracks, idx);
+    }
+
     @Override public void onDestroy() {
         h.removeCallbacks(tick);
         playbackGeneration++;
+        persistQueue();
         resolveExec.shutdownNow();
         if (mp != null) { mp.release(); mp = null; }
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
