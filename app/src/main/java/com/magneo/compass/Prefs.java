@@ -2,18 +2,22 @@ package com.magneo.compass;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Environment;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Map;
 
 /** 统一的设置存取（SharedPreferences），含大模型/语音/视觉/浏览器/网盘配置。 */
@@ -556,10 +560,47 @@ public class Prefs {
     }
 
     public static boolean restoreBackupIfPresent(Context c) {
-        File f = backupFile();
-        if (!f.exists() || f.length() <= 0) return false;
+        return restoreBackupFile(c, backupFile());
+    }
+
+    /** Restores a JSON backup from the app's dedicated external backup directory. */
+    public static boolean restoreBackupFile(Context c, File f) {
+        if (!isBackupFile(f) || !f.exists() || f.length() <= 0 || f.length() > 1024 * 1024) {
+            return false;
+        }
         try {
-            JSONObject o = new JSONObject(readAll(f));
+            return restoreBackupJson(c, readAll(f));
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    public static boolean restoreBackupFromUri(Context c, Uri uri) {
+        if (c == null || uri == null) return false;
+        try (InputStream in = c.getContentResolver().openInputStream(uri)) {
+            if (in == null) return false;
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int total = 0;
+            int n;
+            while ((n = in.read(buf)) >= 0) {
+                if (n == 0) continue;
+                total += n;
+                if (total > 1024 * 1024) return false;
+                out.write(buf, 0, n);
+            }
+            return restoreBackupJson(c, new String(out.toByteArray(), "UTF-8"));
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    public static boolean restoreBackupJson(Context c, String content) {
+        if (content == null || content.trim().isEmpty() || content.length() > 1024 * 1024) {
+            return false;
+        }
+        try {
+            JSONObject o = new JSONObject(content);
             SharedPreferences.Editor e = sp(c).edit();
             java.util.Iterator<String> it = o.keys();
             while (it.hasNext()) {
@@ -573,6 +614,7 @@ public class Prefs {
                 else e.putString(k, String.valueOf(v));
             }
             e.apply();
+            exportBackup(c);
             return true;
         } catch (Exception ignored) {
             return false;
@@ -595,12 +637,46 @@ public class Prefs {
         } catch (Exception ignored) {}
     }
 
+    public static File backupDirectory() {
+        return backupDir();
+    }
+
+    /** Returns a backup file by basename only; null is returned for paths outside the backup dir. */
+    public static File backupFileForName(String name) {
+        if (name == null) return null;
+        String n = name.trim();
+        if (n.isEmpty() || n.contains("/") || n.contains("\\") || !n.endsWith(".json")) {
+            return null;
+        }
+        File f = new File(backupDir(), n);
+        return isBackupFile(f) ? f : null;
+    }
+
+    public static File[] listBackupFiles() {
+        File dir = backupDir();
+        File[] files = dir.listFiles((d, name) -> name != null && name.endsWith(".json"));
+        if (files == null) return new File[0];
+        Arrays.sort(files, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        return files;
+    }
+
     private static File backupDir() {
         return new File(Environment.getExternalStorageDirectory(), BACKUP_DIR);
     }
 
     private static File backupFile() {
         return new File(backupDir(), BACKUP_FILE);
+    }
+
+    private static boolean isBackupFile(File f) {
+        if (f == null) return false;
+        try {
+            File dir = backupDir().getCanonicalFile();
+            File file = f.getCanonicalFile();
+            return dir.equals(file.getParentFile()) && file.getName().endsWith(".json");
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private static String readAll(File f) throws Exception {

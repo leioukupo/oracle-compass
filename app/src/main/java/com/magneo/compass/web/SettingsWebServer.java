@@ -362,9 +362,17 @@ public class SettingsWebServer {
                 if (!requireAuth(out, authed)) return;
                 serveBackupExport(out);
             }
+            else if (path.equals("/backup/list")) {
+                if (!requireAuth(out, authed)) return;
+                serveBackupList(out);
+            }
             else if (path.equals("/backup/restore")) {
                 if (!requireAuth(out, authed)) return;
                 serveBackupRestore(out, body);
+            }
+            else if (path.equals("/backup/restore-file")) {
+                if (!requireAuth(out, authed)) return;
+                serveBackupRestoreFile(out, body);
             }
             else if (path.equals("/test/llm")) {
                 if (!requireAuth(out, authed)) return;
@@ -606,6 +614,7 @@ public class SettingsWebServer {
                 .append(rowInput("VAD 灵敏度", "vadSensitivity", "text", "600"))
                 .append(rowSelect("打断模式", "bargeMode", null, "<option value='steady'>稳健</option><option value='sensitive'>灵敏</option><option value='off'>关闭</option>", null))
                 .append("<p class='hint'>自然/积极模式会在闲聊中判断是否接话；安静模式更像传统语音助手。</p>")
+                .append("<div class='inline'><span class='state' id='voiceConfigState'>语音配置检查中...</span></div>")
                 .append("<div class='inline'><button type='button' onclick=\"runTest('asr')\">测试 Final ASR</button><span class='state' id='testAsr'></span></div>")
                 .append("</div><div class='box'><h3>TTS</h3>")
                 .append(rowInput("TTS 地址", "ttsUrl", "text", "http://host:port/"))
@@ -733,7 +742,7 @@ public class SettingsWebServer {
                 .append(rowInput("大小上限(KB)", "convMaxKb", "text", "4096"))
                 .append(rowInput("清理间隔(分钟)", "convCleanMin", "text", "60"))
                 .append("<div class='row'><label>过滤角色</label><select id='convFilter' onchange='loadConv()'><option value='all'>全部</option><option value='user'>用户</option><option value='assistant'>AI</option><option value='heard'>听见</option><option value='error'>错误</option></select></div><div class='inline'><button type='button' class='danger' onclick='clearConv()'>清空记录</button><span class='state' id='convMsg'></span></div><div id='conv' class='log'></div></div>")
-                .append("<div class='box'><h3>配置备份</h3><div class='inline'><button type='button' onclick='backupExport()'>导出当前配置</button><button type='button' class='secondary' onclick='backupRestore()'>从下面内容恢复</button><span class='state' id='backupMsg'></span></div><textarea id='backupContent' placeholder='导出后会显示 JSON；也可以粘贴旧 prefs.json 后恢复。' style='min-height:260px'></textarea></div>")
+                .append("<div class='box'><h3>配置备份</h3><div class='inline'><button type='button' onclick='backupExport()'>导出当前配置</button><button type='button' class='secondary' onclick='backupList()'>读取设备备份</button><span class='state' id='backupMsg'></span></div><div class='inline'><select id='backupFileSelect' style='min-width:260px'><option value=''>暂无设备备份</option></select><button type='button' class='secondary' onclick='backupRestoreFile()'>恢复选中文件</button></div><p class='hint'>设备备份目录：<span id='backupDir'>读取中...</span>。也可以粘贴外部 prefs.json，恢复时只合并备份中已有的项目，不删除其他配置。</p><button type='button' class='secondary' onclick='backupRestore()'>从下面内容恢复</button><textarea id='backupContent' placeholder='导出后会显示 JSON；也可以粘贴旧 prefs.json 后恢复。' style='min-height:260px'></textarea></div>")
                 .append("<div class='box'><h3>启动资源</h3><p class='hint'>只允许备份、下载、上传和校验 MTK logo 分区；不会开放任意 Root 命令。刷写前必须有原厂备份、电量达标并输入确认短语。</p><div id='bootAssetState' class='log'>尚未读取</div><div class='inline'><button type='button' onclick='bootAssetBackup()'>创建原厂备份</button><button type='button' class='secondary' onclick='bootAssetDownload(\"logo\")'>下载 logo 备份</button><button type='button' class='secondary' onclick='bootAssetDownload(\"bootanimation\")'>下载原厂开机动画</button><button type='button' class='secondary' onclick='bootAssetDownload(\"shutanimation\")'>下载原厂关机动画</button><button type='button' class='secondary' onclick='bootAssetDownload(\"manifest\")'>下载清单</button><button type='button' class='secondary' onclick='bootLogLoad()'>启动日志</button></div><pre id='bootLog' style='display:none'></pre><div class='row'><label>新 logo.bin</label><input type='file' id='bootLogoFile' accept='.bin,application/octet-stream'></div><div class='inline'><button type='button' class='secondary' onclick='bootLogoUpload()'>上传并校验</button><button type='button' class='danger' onclick='bootLogoFlash()'>刷写新首屏</button><button type='button' class='secondary' onclick='bootLogoRestore()'>恢复原厂首屏</button><span class='state' id='bootAssetMsg'></span></div></div></div></section>")
                 .append("</form></div></div>")
                 .append("<div class='savebar hidden' id='savebar'><div class='inner'><div><b id='dirtyState'>未修改</b><div class='hint'>保存前自动导出备份；Key 留空不会覆盖旧值。</div></div><div><button type='button' onclick='save()'>保存设置</button><span class='state' id='msg'></span></div></div></div>")
@@ -754,22 +763,22 @@ public class SettingsWebServer {
                 .append("function appSetup(){api('POST','/appmgr/setup',enc({password:q('#appPwd').value,oldPassword:q('#appOldPwd').value}),function(d){if(d&&d.ok){token=d.token;sessionStorage.setItem('appmgrToken',token);q('#appPwd').value='';q('#appOldPwd').value='';msg('appAuth','管理密码已保存');authState()}else msg('appAuth',d&&d.err?d.err:'设置失败')},'application/x-www-form-urlencoded')}")
                 .append("function wireAuthKeys(){var p=q('#appPwd'),o=q('#appOldPwd');if(p)p.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();appLogin()}});if(o)o.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();appSetup()}})}")
                 .append("function msg(id,t){var e=q('#'+id);if(e)e.textContent=t||''}")
-                .append("function publicStatus(){api('GET','/status',null,function(d){if(d){chip('ovVad',d.vadEnabled?'开启':'关闭',!!d.vadEnabled,!d.vadEnabled);chip('ovAsr',d.asrUrlSet?'已配置':'未配置',!!d.asrUrlSet,!d.asrUrlSet);chip('ovAsrFinal',d.asrFinalUrlSet?'已配置':'未配置',!!d.asrFinalUrlSet,false);chip('ovLlm',d.apiKeySet?d.apiKeyMask:'未设置',!!d.apiKeySet,!d.apiKeySet);chip('ovTts',d.ttsUrlSet?'已配置':'未配置',!!d.ttsUrlSet,!d.ttsUrlSet)}});if(!started){api('GET','/frpc/status',null,function(d){if(d)chip('ovFrpc',d.status==='running'?'运行中':(d.status==='error'?'异常':'停止'),d.status==='running',d.status==='error')});api('GET','/adb/status',null,function(d){if(!d)return;var h=d.health||'checking',t=h==='healthy'?'服务正常':(h==='degraded'?'连接积压':(h==='down'?'未监听':'检测中'));chip('ovAdb',t,h==='healthy',h==='degraded'||h==='down')})}}")
+                .append("function publicStatus(){api('GET','/status',null,function(d){if(d){chip('ovVad',d.vadEnabled?'开启':'关闭',!!d.vadEnabled,!d.vadEnabled);chip('ovAsr',d.asrUrlSet?'已配置':'未配置',!!d.asrUrlSet,!d.asrUrlSet);chip('ovAsrFinal',d.asrFinalUrlSet?'已配置':'未配置',!!d.asrFinalUrlSet,false);chip('ovLlm',d.apiKeySet?d.apiKeyMask:'未设置',!!d.apiKeySet,!d.apiKeySet);chip('ovTts',d.ttsUrlSet?'已配置':'未配置',!!d.ttsUrlSet,!d.ttsUrlSet);msg('voiceConfigState',d.voiceConfigMessage||'') }});if(!started){api('GET','/frpc/status',null,function(d){if(d)chip('ovFrpc',d.status==='running'?'运行中':(d.status==='error'?'异常':'停止'),d.status==='running',d.status==='error')});api('GET','/adb/status',null,function(d){if(!d)return;var h=d.health||'checking',t=h==='healthy'?'服务正常':(h==='degraded'?'连接积压':(h==='down'?'未监听':'检测中'));chip('ovAdb',t,h==='healthy',h==='degraded'||h==='down')})}}")
                 .append("function pct(v){v=Number(v);return v>=0?(Math.round(v)+'%'):'--'}function metric(v,t){return t?t:pct(v)}function meter(n,v,t){var e=q('#sys'+n),b=q('#sys'+n+'Bar');if(e)e.textContent=metric(v,t);if(b)b.style.width=(Number(v)>=0?Math.max(0,Math.min(100,Number(v))):0)+'%'}")
                 .append("function renderHwDiag(h){var box=q('#hwDiag');if(!box)return;h=h||{};var rows=[['传感器',h.sensors||'--'],['姿态',h.pose||'--'],['磁场',h.magnetic||'--'],['GPS请求',h.gpsRequest||'--'],['GPS驱动',h.gpsDriver||'--'],['GPS动作',h.gpsAction||'--'],['卫星',h.gps||'--'],['弱项',h.untrusted||'--'],['校准',h.magCalibration||'--']];var out='';for(var i=0;i<rows.length;i++)out+='<div class=\"item\"><div class=\"main\"><b>'+esc(rows[i][0])+'</b><small>'+esc(rows[i][1])+'</small></div></div>';box.innerHTML=out}")
                 .append("function gpsReset(){if(!confirm('清理 GPS 辅助数据并重新搜星？建议在室外空旷处使用。'))return;msg('gpsResetMsg','正在触发...');api('POST','/gps/reset','',function(d){msg('gpsResetMsg',d&&d.ok?(d.msg||'已触发'):(d&&d.err?d.err:'失败'));setTimeout(systemStatus,800)},'application/x-www-form-urlencoded')}")
                 .append("function systemStatus(){api('GET','/system_status',null,renderSystem)}function renderSystem(d){if(!d)return;q('#sysTime').textContent=d.time||'--:--';q('#sysDate').textContent=d.date||'';meter('Cpu',d.cpu);meter('AppCpu',d.appCpu);meter('Ram',d.memPct);meter('Gpu',d.gpu,d.gpuText);meter('Bat',d.battery,d.batteryText);renderHwDiag(d.hardware);var bat=d.batteryText||pct(d.battery),gt=d.gpuText||pct(d.gpu),core=(d.cpuOnline&&d.cpuPossible)?(' · 核 '+d.cpuOnline+'/'+d.cpuPossible):'',appCore=(Number(d.appCpuCore)>=0?(' · 单核 '+pct(d.appCpuCore)):''),renderer=(d.mainRenderer==='canvas'?'Canvas':'OpenGL'),fps=d.mainFpsMode==='power'?'省电':(d.mainFpsMode==='smooth'?'流畅':'自适应');q('#sysCore').textContent='总 '+pct(d.cpu)+' · App '+pct(d.appCpu)+appCore+core+' · RAM '+pct(d.memPct)+' · Mali '+gt+' · 电 '+bat+' · '+renderer+'/'+fps;q('#sysGps').textContent=d.gps||'';q('#sysUpdated').textContent='更新 '+(d.time||'');var note='loadavg '+(d.loadAvg1||'--')+' / '+(d.loadAvg5||'--')+' / '+(d.loadAvg15||'--')+' · 可运行 '+(d.runnable==null?'--':d.runnable)+' · D状态 '+(d.blockedThreads==null?'--':d.blockedThreads)+' · App线程 '+(d.appThreads==null?'--':d.appThreads);if(d.streamActive)note+=' · 屏幕预览会增加 CPU/温度';if(d.wifiScanAgeMs>=0)note+=' · Wi-Fi扫描 '+Math.round(d.wifiScanAgeMs/60000)+'分钟前';if(d.conversationBytes!=null)note+=' · 日志 '+Math.round(d.conversationBytes/1024)+'KB';q('#sysLoadNote').textContent=note;var temps=d.temps||[],ring=q('#sysTempRing');if(!ring)return;ring.innerHTML='';for(var i=0;i<temps.length;i++){var el=document.createElement('div');el.className='tempdot';el.innerHTML='<span>'+esc(temps[i].name||'温度')+'</span><b>'+Number(temps[i].c||0).toFixed(0)+'°</b>';ring.appendChild(el)}if(!temps.length){var e=document.createElement('div');e.className='tempdot';e.innerHTML='<span>温度</span><b>--</b>';ring.appendChild(e)}}")
                 .append("function neteaseStatus(){msg('neteaseMsg','检查中...');api('GET','/netease/status',null,function(d){if(!d){msg('neteaseMsg','无返回');return}msg('neteaseCookieState',d.cookieSet?'Cookie 已保存':'未设置 Cookie');msg('neteaseLoginState','登录状态：'+(d.loggedIn?('已登录'+(d.nickname?' · '+d.nickname:'')):(d.msg||'未登录')));msg('neteaseMsg',d.msg||'检查完成')})}function neteaseLogout(){if(!confirm('清除网易云登录态？'))return;api('GET','/netease/logout',null,function(d){msg('neteaseMsg',d&&d.ok?'已退出':(d&&d.err?d.err:'退出失败'));loadStatus()})}")
-                .append("var consoleTimer=null;function stopConsolePolling(){if(consoleTimer){clearInterval(consoleTimer);consoleTimer=null}}function startConsolePolling(){stopConsolePolling();if(document.hidden)return;consoleTimer=setInterval(function(){if(document.hidden)return;frpcRefresh();camRefresh();adbStatus();appState();systemStatus();gestureRefresh();if(activeTab('records'))loadConv();if(activeTab('debug'))loadDebugLog();},5000)}function activeTab(id){var e=q('#tab-'+id);return !!(e&&e.className.indexOf('active')>=0)}function refreshTabData(id){if(id==='records')loadConv();else if(id==='debug')loadDebugLog();else if(id==='apps')loadApps();else if(id==='files')fsList();else if(id==='music')neteaseStatus()}function initConsole(){loadStatus();neteaseStatus();lowBatterySoundStatus();gestureRefresh();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();bootAssetStatus();fsList();startConsolePolling()}")
+                .append("var consoleTimer=null;function stopConsolePolling(){if(consoleTimer){clearInterval(consoleTimer);consoleTimer=null}}function startConsolePolling(){stopConsolePolling();if(document.hidden)return;consoleTimer=setInterval(function(){if(document.hidden)return;frpcRefresh();camRefresh();adbStatus();appState();systemStatus();gestureRefresh();if(activeTab('records'))loadConv();if(activeTab('debug'))loadDebugLog();},5000)}function activeTab(id){var e=q('#tab-'+id);return !!(e&&e.className.indexOf('active')>=0)}function refreshTabData(id){if(id==='records'){loadConv();backupList()}else if(id==='debug')loadDebugLog();else if(id==='apps')loadApps();else if(id==='files')fsList();else if(id==='music')neteaseStatus()}function initConsole(){loadStatus();neteaseStatus();lowBatterySoundStatus();gestureRefresh();systemStatus();frpcRefresh();camRefresh();adbStatus();appState();bootAssetStatus();fsList();backupList();startConsolePolling()}")
                 .append("function wireTabs(){var bs=qa('.tab');for(var i=0;i<bs.length;i++)bs[i].onclick=function(){var id=this.getAttribute('data-tab');var b=qa('.tab'),p=qa('.panel');for(var j=0;j<b.length;j++)b[j].classList.remove('active');for(var k=0;k<p.length;k++)p[k].classList.remove('active');this.classList.add('active');q('#tab-'+id).classList.add('active');refreshTabData(id)}}document.addEventListener('visibilitychange',function(){if(document.hidden)stopConsolePolling();else{publicStatus();if(started){startConsolePolling();refreshTabData('records')}}});")
-                .append("function wireDirty(){var f=q('#f');if(!f)return;var es=f.querySelectorAll('input,textarea,select');for(var i=0;i<es.length;i++){es[i].addEventListener('input',markDirty);es[i].addEventListener('change',markDirty)}}")
-                .append("function markDirty(){dirty=true;q('#dirtyState').textContent='有未保存修改';q('#dirtyState').style.color='var(--gold)'}function clean(){dirty=false;q('#dirtyState').textContent='已保存';q('#dirtyState').style.color='var(--ok)'}")
-                .append("function loadStatus(){api('GET','/status',null,function(d){if(!d||!d.authed){authState();return}for(var k in d){var e=q('[name=\"'+k+'\"]');if(!e)continue;var mcpTok=k.indexOf('mcpServer')===0&&k.indexOf('Token')>=0;if(e.type==='checkbox')e.checked=(d[k]===true||d[k]==='true');else if(k!=='apiKey'&&k!=='voiceApiKey'&&k!=='neteaseCookie'&&!mcpTok)e.value=d[k]}q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';q('[name=neteaseCookie]').value='';msg('apiKeyState',d.apiKeySet?'当前 '+d.apiKeyMask:'当前未设置');msg('voiceKeyState',d.voiceApiKeySet?'当前 '+d.voiceApiKeyMask:'当前未设置');msg('neteaseCookieState',d.neteaseCookieSet?'Cookie 已保存':'未设置 Cookie');msg('neteaseLoginState','登录状态：'+(d.neteaseLoggedIn?('已登录'+(d.neteaseNickname?' · '+d.neteaseNickname:'')):'未登录'));var rg=d.rootGrantStatus||{},ls=d.systemLockscreenStatus||{};msg('rootGrantActual','Magisk 数据库：'+(rg.detail||'状态未知'));msg('lockscreenActual','LockSettingsService：'+(ls.detail||'状态未知')+(ls.secureCredential?' · 检测到安全凭据':''));for(var i=1;i<=3;i++){var p='mcpServer'+i,s=q('[name='+p+'Token]');if(s)s.value='';msg(p+'TokenState',d[p+'TokenSet']?'当前 '+d[p+'TokenMask']:'当前未设置')}syncRanges();clean()})}")
+                .append("function wireDirty(){var f=q('#f');if(!f)return;var es=f.querySelectorAll('input,textarea,select');for(var i=0;i<es.length;i++){es[i].addEventListener('input',markChanged);es[i].addEventListener('change',markChanged)}}")
+                .append("function markDirty(){dirty=true;q('#dirtyState').textContent='有未保存修改';q('#dirtyState').style.color='var(--gold)'}function markChanged(e){if(e&&e.target)e.target.setAttribute('data-changed','1');markDirty()}function touchField(name){var e=q('[name=\"'+name+'\"]');if(e)e.setAttribute('data-changed','1');markDirty()}function clean(){dirty=false;var es=q('#f')?q('#f').querySelectorAll('[data-changed]'):[];for(var i=0;i<es.length;i++)es[i].removeAttribute('data-changed');q('#dirtyState').textContent='已保存';q('#dirtyState').style.color='var(--ok)'}")
+                .append("function loadStatus(){api('GET','/status',null,function(d){if(!d||!d.authed){authState();return}for(var k in d){var e=q('[name=\"'+k+'\"]');if(!e)continue;var mcpTok=k.indexOf('mcpServer')===0&&k.indexOf('Token')>=0;if(e.type==='checkbox')e.checked=(d[k]===true||d[k]==='true');else if(k!=='apiKey'&&k!=='voiceApiKey'&&k!=='neteaseCookie'&&!mcpTok)e.value=d[k]}q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';q('[name=neteaseCookie]').value='';msg('apiKeyState',d.apiKeySet?'当前 '+d.apiKeyMask:'当前未设置');msg('voiceKeyState',d.voiceApiKeySet?'当前 '+d.voiceApiKeyMask:'当前未设置');msg('voiceConfigState',d.voiceConfigMessage||'');msg('neteaseCookieState',d.neteaseCookieSet?'Cookie 已保存':'未设置 Cookie');msg('neteaseLoginState','登录状态：'+(d.neteaseLoggedIn?('已登录'+(d.neteaseNickname?' · '+d.neteaseNickname:'')):'未登录'));var rg=d.rootGrantStatus||{},ls=d.systemLockscreenStatus||{};msg('rootGrantActual','Magisk 数据库：'+(rg.detail||'状态未知'));msg('lockscreenActual','LockSettingsService：'+(ls.detail||'状态未知')+(ls.secureCredential?' · 检测到安全凭据':''));for(var i=1;i<=3;i++){var p='mcpServer'+i,s=q('[name='+p+'Token]');if(s)s.value='';msg(p+'TokenState',d[p+'TokenSet']?'当前 '+d[p+'TokenMask']:'当前未设置')}syncRanges();clean()})}")
                 .append("function lowBatterySoundStatus(){api('GET','/status',null,function(d){if(!d||!d.authed)return;var s=d.lowBatterySoundStatus||{};msg('lowBatterySoundActual','系统声音：'+(s.detail||'状态未知'))})}")
                 .append("function renderGesture(s){s=s||{};var a=[];a.push(s.installed?'已安装':'未安装');if(s.component)a.push(s.component);a.push(s.configured?'设置已启用':'设置未启用');a.push(s.bound?'实际已绑定':'尚未绑定');a.push(s.processRunning?'进程运行':'进程未见');if(s.moduleHeartbeat)a.push('模块心跳 '+s.moduleHeartbeat);if(s.lastRepair)a.push('最近修复 '+s.lastRepair);if(s.lastError)a.push('错误 '+s.lastError);a.push(s.detail||'');msg('gestureGuardActual',a.join(' · '))}function gestureRefresh(){api('GET','/gesture/status',null,function(d){if(d)renderGesture(d)})}function gestureRepair(){msg('gestureGuardMsg','正在检测…');api('POST','/gesture/repair','',function(d){renderGesture(d);msg('gestureGuardMsg',d&&d.detail?d.detail:(d&&d.ok?'已修复':'修复失败'))},'application/x-www-form-urlencoded')}")
-                .append("function providerChanged(){var p=q('#provider').value;if(p==='deepseek'){q('[name=baseUrl]').value='https://api.deepseek.com/v1';q('[name=textModel]').value='deepseek-chat';if(!q('[name=visionModel]').value)q('[name=visionModel]').value='deepseek-chat';q('[name=textBaseUrl]').value='';q('[name=visionBaseUrl]').value=''}else{if(q('[name=baseUrl]').value==='https://api.deepseek.com/v1')q('[name=baseUrl]').value='';if(!q('[name=textModel]').value||q('[name=textModel]').value==='deepseek-chat')q('[name=textModel]').value='gpt-4.1-mini'}}")
+                .append("function providerChanged(){var p=q('#provider').value;touchField('provider');if(p==='deepseek'){q('[name=baseUrl]').value='https://api.deepseek.com/v1';q('[name=textModel]').value='deepseek-chat';if(!q('[name=visionModel]').value)q('[name=visionModel]').value='deepseek-chat';q('[name=textBaseUrl]').value='';q('[name=visionBaseUrl]').value='';touchField('baseUrl');touchField('textModel');touchField('visionModel');touchField('textBaseUrl');touchField('visionBaseUrl')}else{if(q('[name=baseUrl]').value==='https://api.deepseek.com/v1'){q('[name=baseUrl]').value='';touchField('baseUrl')}if(!q('[name=textModel]').value||q('[name=textModel]').value==='deepseek-chat'){q('[name=textModel]').value='gpt-4.1-mini';touchField('textModel')}}}")
                 .append("function oracleShakeLabel(v){v=Math.max(0,Math.min(100,Number(v||70)));var n=v<18?'轻摇':(v<38?'稍轻':(v<62?'正常':(v<82?'较重':'用力')));return Math.round(v)+' / 100 · '+n}function syncRanges(){var e=q('[name=oracleShakeForce]'),t=q('#oracleShakeForceText');if(e&&t)t.textContent=oracleShakeLabel(e.value)}")
-                .append("function save(){var fd=new FormData(q('#f')),b=new URLSearchParams(fd),c=q('#f').querySelectorAll('input[type=checkbox]');for(var i=0;i<c.length;i++)b.set(c[i].name,c[i].checked?'true':'false');textApi('POST','/save',b.toString(),function(t){msg('msg',t);if(t.indexOf('已保存')>=0){q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';q('[name=neteaseCookie]').value='';for(var j=1;j<=3;j++){var te=q('[name=mcpServer'+j+'Token]');if(te)te.value=''}q('[name=clearApiKey]').checked=false;q('[name=clearVoiceApiKey]').checked=false;q('[name=clearNeteaseCookie]').checked=false;clean();loadStatus()}},'application/x-www-form-urlencoded')}")
+                .append("function save(){var b=new URLSearchParams(),es=q('#f').querySelectorAll('input,textarea,select'),mcpDirty=false;for(var i=0;i<es.length;i++){var e=es[i];if(e.getAttribute('data-changed')!=='1'||!e.name)continue;if(e.name.indexOf('mcpServer')===0)mcpDirty=true;if(e.type==='checkbox')b.set(e.name,e.checked?'true':'false');else b.set(e.name,e.value)}if(mcpDirty){for(var j=1;j<=3;j++){var p='mcpServer'+j;for(var k=0;k<4;k++){var suffix=['Enabled','Name','Url','TimeoutMs'][k],me=q('[name='+p+suffix+']');if(me)b.set(p+suffix,me.type==='checkbox'?(me.checked?'true':'false'):me.value)}}}b.set('saveMode','patch');textApi('POST','/save',b.toString(),function(t){msg('msg',t);if(t.indexOf('已保存')>=0){q('[name=apiKey]').value='';q('[name=voiceApiKey]').value='';q('[name=neteaseCookie]').value='';for(var j=1;j<=3;j++){var te=q('[name=mcpServer'+j+'Token]');if(te)te.value=''}q('[name=clearApiKey]').checked=false;q('[name=clearVoiceApiKey]').checked=false;q('[name=clearNeteaseCookie]').checked=false;clean();loadStatus()}},'application/x-www-form-urlencoded')}")
                 .append("function runTest(kind){var map={llm:['/test/llm','testLlm'],asr:['/test/asr_final','testAsr'],tts:['/test/tts','testTts'],voices:['/test/tts_voices','testTts']},m=map[kind];if(!m)return;msg(m[1],'测试中...');api('GET',m[0],null,function(d){if(kind==='voices'&&d&&d.ok){var dl=q('#ttsVoiceList');dl.innerHTML='';for(var i=0;i<(d.voices||[]).length;i++){var op=document.createElement('option');op.value=d.voices[i];dl.appendChild(op)}msg(m[1],'音色 '+(d.voices||[]).length+' 个 · '+d.ms+'ms');return}msg(m[1],d&&d.ok?('成功 '+(d.ms||0)+'ms '+(d.text||d.contentType||'')+(d.bytes?(' · '+fmtBytes(d.bytes)):'')+(d.retry?' · 已重试':'')+(d.note?' · '+d.note:'')):('失败 '+(d&&d.err?d.err:'未知错误')))})}")
                 .append("function runMcp(kind){var u=kind==='refresh'?'/mcp/refresh':'/mcp/test';msg('mcpState',kind==='refresh'?'刷新中...':'测试中...');api('POST',u,'',function(d){if(!d){msg('mcpState','无返回');return}var ts=d.tools||[],ss=d.servers||[],lines=[];for(var i=0;i<ss.length;i++){lines.push((ss[i].ok===false?'! ':'✓ ')+(ss[i].name||ss[i].id)+' · '+(ss[i].url||'')+' · 工具 '+(ss[i].toolCount||0)+(ss[i].err?(' · '+ss[i].err):''))}for(var j=0;j<ts.length;j++){lines.push('  - '+ts[j].name+' · '+(ts[j].description||''))}if(d.errors&&d.errors.length)lines.push('错误: '+d.errors.join('；'));q('#mcpTools').textContent=lines.join('\\n')||'未发现工具';msg('mcpState',d.ok?('完成 · '+ts.length+' 个工具 · '+(d.ms||0)+'ms'):(d.err||'失败'))},'application/x-www-form-urlencoded')}")
                 .append("function runMcpCall(){var n=(q('#mcpToolName').value||'').trim(),a=(q('#mcpToolArgs').value||'{}').trim();if(!n){msg('mcpCallState','请先刷新并填写工具名');return}try{JSON.parse(a)}catch(e){msg('mcpCallState','参数不是合法 JSON');return}msg('mcpCallState','调用中...');api('POST','/mcp/call',enc({toolName:n,toolArgs:a}),function(d){if(!d){msg('mcpCallState','无返回');return}q('#mcpCallResult').textContent=d.text||d.err||'';msg('mcpCallState',d.ok?('成功 · '+(d.ms||0)+'ms'):('失败 · '+(d.ms||0)+'ms'))},'application/x-www-form-urlencoded')}")
@@ -804,7 +813,7 @@ public class SettingsWebServer {
                 .append("function loadApps(){api('GET','/appmgr/apps',null,function(d){if(d&&d.ok){appApps=d.apps||[];renderApps();appMsg('应用列表已刷新')}else appMsg(appErr(d))})}function renderApps(){var box=q('#appList'),cnt=q('#appCount'),s=q('#appSearch').value.toLowerCase(),h='',n=0;for(var i=0;i<appApps.length;i++){var a=appApps[i],hay=((a.label||'')+' '+(a.packageName||'')).toLowerCase();if(s&&hay.indexOf(s)<0)continue;n++;h+='<div class=\"item\"><div class=\"main\"><b>'+esc(a.label||a.packageName)+'</b><small>'+esc(a.packageName)+'</small><small>'+esc(a.versionName||'')+' · '+(a.system?'系统':'第三方')+' · '+(a.enabled?'启用':'停用')+(a.self?' · 当前管理':'')+'</small></div><button type=\"button\" '+(a.self?'disabled ':'')+'onclick=\"appUninstall(\\''+esc(a.packageName)+'\\','+(a.system?'true':'false')+',\\''+esc(a.label||a.packageName)+'\\')\">卸载</button></div>'}box.innerHTML=h||'<div class=\"item\"><div class=\"main\"><b>没有匹配应用</b></div></div>';cnt.textContent='显示 '+n+' / '+appApps.length+' 个'}function appUninstall(pkg,sys,label){if(sys){var p=prompt('系统应用卸载风险高，请输入包名确认：'+pkg);if(p!==pkg)return}else if(!confirm('卸载 '+label+' ?'))return;api('POST','/appmgr/uninstall',enc({packageName:pkg}),function(d){if(d&&d.ok){appMsg('卸载任务已开始');renderTask(d.task);setTimeout(loadApps,1200)}else appMsg(appErr(d))},'application/x-www-form-urlencoded')}")
                 .append("function convHtml(d){convCache=d;var arr=d.entries||[],f=q('#convFilter').value,h='';for(var i=Math.max(0,arr.length-250);i<arr.length;i++){var e=arr[i];if(f!=='all'&&e.role!==f)continue;var who=e.role==='user'?'用户':(e.role==='assistant'?'AI':(e.role==='heard'?'听见':(e.role==='error'?'错误':'系统')));h+='<div><span class=\"mini\">'+esc(e.ts)+'</span> <b>'+who+':</b> '+esc(e.text)+'</div>'}if(!h)h='<div class=\"hint\">暂无匹配记录</div>';h+='<div class=\"mini\">共 '+arr.length+' 条 · 文件 '+d.sizeKb+' KB / 上限 '+d.maxKb+' KB</div>';return h}function loadConv(){api('GET','/conversations',null,function(d){if(!d||!d.entries)return;var v=q('#conv');v.innerHTML=convHtml(d);v.scrollTop=v.scrollHeight})}function clearConv(){if(!confirm('清空对话记录？'))return;textApi('POST','/clear_conv','',function(){msg('convMsg','已清空');loadConv()})}")
                 .append("function debugHtml(d){var arr=d.entries||[],h='';for(var i=Math.max(0,arr.length-400);i<arr.length;i++){var e=arr[i];h+='<div style=\"border-bottom:1px solid rgba(181,139,48,.14);padding:5px 0\"><span class=\"mini\">'+esc(e.ts)+'</span> <b>'+esc(e.stage||'debug')+':</b><pre style=\"margin:4px 0 0;border:0;background:transparent;padding:0;color:#9ed17d;max-height:none\">'+esc(e.text||'')+'</pre></div>'}if(!h)h='<div class=\"hint\">暂无调试日志。打开调试模式并保存后，再复现一次天气查询。</div>';h+='<div class=\"mini\">共 '+arr.length+' 条 · 文件 '+(d.sizeKb||0)+' KB / 上限 '+(d.maxKb||0)+' KB · '+(d.enabled?'调试已开启':'调试已关闭')+'</div>';return h}function loadDebugLog(){api('GET','/debug_log',null,function(d){if(!d||!d.ok)return;var v=q('#debugLog');if(!v)return;v.innerHTML=debugHtml(d);v.scrollTop=v.scrollHeight;msg('debugMsg',d.enabled?'调试已开启':'调试已关闭')})}function clearDebugLog(){if(!confirm('清空链路调试日志？'))return;textApi('POST','/clear_debug','',function(){msg('debugMsg','已清空');loadDebugLog()})}")
-                .append("function backupExport(){api('GET','/backup/export',null,function(d){if(d&&d.ok){q('#backupContent').value=d.content||'';msg('backupMsg','已导出 '+(d.bytes||0)+' bytes · '+(d.path||''))}else msg('backupMsg',d&&d.err?d.err:'导出失败')})}function backupRestore(){var c=q('#backupContent').value;if(!c.trim()){msg('backupMsg','请先粘贴备份 JSON');return}if(!confirm('从此 JSON 恢复配置？当前配置会被覆盖。'))return;api('POST','/backup/restore',enc({content:c}),function(d){msg('backupMsg',d&&d.ok?'已恢复，正在重载':(d&&d.err?d.err:'恢复失败'));if(d&&d.ok)setTimeout(loadStatus,800)},'application/x-www-form-urlencoded')}")
+                .append("function backupExport(){api('GET','/backup/export',null,function(d){if(d&&d.ok){q('#backupContent').value=d.content||'';msg('backupMsg','已导出 '+(d.bytes||0)+' bytes · '+(d.path||''));backupList()}else msg('backupMsg',d&&d.err?d.err:'导出失败')})}function backupList(){api('GET','/backup/list',null,function(d){var s=q('#backupFileSelect');if(!s)return;s.innerHTML='';if(!d||!d.ok){var er=document.createElement('option');er.value='';er.textContent='读取失败';s.appendChild(er);msg('backupMsg',d&&d.err?d.err:'读取设备备份失败');return}q('#backupDir').textContent=d.dir||'';var a=d.files||[];if(!a.length){var em=document.createElement('option');em.value='';em.textContent='暂无设备备份';s.appendChild(em);msg('backupMsg','设备备份目录为空');return}for(var i=0;i<a.length;i++){var f=a[i],op=document.createElement('option');op.value=f.name;op.textContent=f.name+' · '+fmtBytes(f.bytes)+' · '+(f.modified?new Date(f.modified).toLocaleString():'');s.appendChild(op)}msg('backupMsg','发现 '+a.length+' 个设备备份文件')})}function backupRestoreFile(){var s=q('#backupFileSelect'),name=s?s.value:'';if(!name){msg('backupMsg','请先选择设备备份文件');return}if(!confirm('从设备文件 '+name+' 恢复配置？备份中没有的配置不会被删除。'))return;api('POST','/backup/restore-file',enc({name:name}),function(d){msg('backupMsg',d&&d.ok?'已从设备文件恢复，正在重载':(d&&d.err?d.err:'恢复失败'));if(d&&d.ok){backupList();setTimeout(loadStatus,800)}},'application/x-www-form-urlencoded')}function backupRestore(){var c=q('#backupContent').value;if(!c.trim()){msg('backupMsg','请先粘贴备份 JSON');return}if(!confirm('从此 JSON 恢复配置？备份中没有的配置不会被删除。'))return;api('POST','/backup/restore',enc({content:c}),function(d){msg('backupMsg',d&&d.ok?'已恢复，正在重载':(d&&d.err?d.err:'恢复失败'));if(d&&d.ok){backupList();setTimeout(loadStatus,800)}},'application/x-www-form-urlencoded')}")
                 .append("var bootAssets=null;function bootFileText(x){return x&&x.exists?(fmtBytes(x.bytes)+' · '+(x.sha256||'').slice(0,16)+'...'):'未创建'}function renderBootAssets(d){bootAssets=d||{};var b=d&&d.battery||{},lines=['分区：'+(d&&d.partition?d.partition:'未识别')+' · '+fmtBytes(d&&d.partitionBytes||0),'电量：'+(b.level==null?'--':b.level+'%')+(b.charging?' · 充电中':''),'logo 原厂：'+bootFileText(d&&d.logoRaw),'原厂开机动画：'+bootFileText(d&&d.bootanimation),'原厂关机动画：'+bootFileText(d&&d.shutanimation),'当前关机动画：'+bootFileText(d&&d.activeShutanimation),'待刷 logo：'+bootFileText(d&&d.uploadedLogo),'状态：'+(d&&d.probe||d&&d.err||'未知')];q('#bootAssetState').textContent=lines.join('\\n')}function bootAssetStatus(){api('GET','/boot-assets/status',null,function(d){renderBootAssets(d)})}function bootAssetBackup(){if(!confirm('从真实分区和 Magisk mirror 创建原厂启动资源备份？'))return;msg('bootAssetMsg','正在读取并校验原厂资源...');api('POST','/boot-assets/backup','',function(d){msg('bootAssetMsg',d&&d.ok?(d.msg||'备份完成'):(d&&d.err?d.err:'备份失败'));bootAssetStatus()},'application/x-www-form-urlencoded')}function bootAssetDownload(kind){var x=new XMLHttpRequest();x.open('GET','/boot-assets/download?kind='+encodeURIComponent(kind),true);hdr(x);x.responseType='blob';x.onload=function(){if(x.status!==200){msg('bootAssetMsg','下载失败 '+x.status);return}var names={logo:'logo-original.bin.gz',bootanimation:'bootanimation-original.zip',shutanimation:'shutanimation-original.zip',manifest:'manifest.json',sums:'SHA256SUMS'},a=document.createElement('a');a.href=URL.createObjectURL(x.response);a.download=names[kind]||'boot-asset.bin';a.click();setTimeout(function(){URL.revokeObjectURL(a.href)},1000)};x.onerror=function(){msg('bootAssetMsg','下载中断')};x.send()}")
                 .append("function bootLogLoad(){api('GET','/boot-assets/boot-log',null,function(d){var e=q('#bootLog');e.style.display='block';e.textContent=d&&d.ok?(d.log||'日志为空'):(d&&d.err?d.err:'读取失败')})}")
                 .append("function bootLogoUpload(){var f=q('#bootLogoFile').files&&q('#bootLogoFile').files[0];if(!f){msg('bootAssetMsg','请选择完整 logo.bin');return}var x=new XMLHttpRequest();x.open('POST','/boot-assets/upload-logo',true);hdr(x);x.setRequestHeader('Content-Type','application/octet-stream');x.upload.onprogress=function(e){if(e.lengthComputable)msg('bootAssetMsg','上传 '+Math.round(e.loaded*100/e.total)+'%')};x.onload=function(){var d;try{d=JSON.parse(x.responseText)}catch(e){d={ok:false,err:x.responseText}}msg('bootAssetMsg',d&&d.ok?('上传完成 · '+d.sha256):(d&&d.err?d.err:'上传失败'));bootAssetStatus()};x.onerror=function(){msg('bootAssetMsg','上传中断')};x.send(f)}function bootLogoFlash(){var f=bootAssets&&bootAssets.uploadedLogo;if(!f||!f.exists){msg('bootAssetMsg','请先上传新 logo.bin');return}var c=prompt('高风险操作。输入 FLASH LOGO 确认刷写真实 logo 分区：');if(c!=='FLASH LOGO')return;msg('bootAssetMsg','正在刷写并整分区回读校验...');api('POST','/boot-assets/flash-logo',enc({confirm:c,expectedSha:f.sha256}),function(d){msg('bootAssetMsg',d&&d.ok?(d.msg+' · '+d.sha256):(d&&d.err?d.err:'刷写失败'));bootAssetStatus()},'application/x-www-form-urlencoded')}function bootLogoRestore(){var f=bootAssets&&bootAssets.logoRaw;if(!f||!f.exists){msg('bootAssetMsg','没有原厂备份');return}var c=prompt('输入 RESTORE STOCK LOGO 确认恢复原厂首屏：');if(c!=='RESTORE STOCK LOGO')return;msg('bootAssetMsg','正在恢复并回读校验...');api('POST','/boot-assets/restore-logo',enc({confirm:c,expectedSha:f.sha256}),function(d){msg('bootAssetMsg',d&&d.ok?(d.msg+' · '+d.sha256):(d&&d.err?d.err:'恢复失败'));bootAssetStatus()},'application/x-www-form-urlencoded')}")
@@ -1476,6 +1485,7 @@ public class SettingsWebServer {
             o.put("asrUrlSet", !Prefs.get(app, Prefs.K_ASR_URL, "").trim().isEmpty());
             o.put("asrFinalUrlSet", !Prefs.get(app, Prefs.K_ASR_FINAL_URL, "").trim().isEmpty());
             o.put("ttsUrlSet", !Prefs.get(app, Prefs.K_TTS_URL, "").trim().isEmpty());
+            o.put("voiceConfigMessage", voiceConfigMessage());
             String neteaseCookie = Prefs.neteaseCookie(app);
             o.put("neteaseApiUrl", Prefs.neteaseApiUrl(app));
             o.put("neteaseQuality", Prefs.neteaseQuality(app));
@@ -1661,7 +1671,18 @@ public class SettingsWebServer {
     private static void serveSave(OutputStream out, String body) throws IOException {
         try {
             Map<String, String> fields = form(body);
-            saveMcpServers(fields);
+            boolean patch = "patch".equalsIgnoreCase(trim(fields.get("saveMode")));
+            boolean hasMcpFields = false;
+            for (String key : fields.keySet()) {
+                if (key != null && key.startsWith("mcpServer")) {
+                    hasMcpFields = true;
+                    break;
+                }
+            }
+            validateVoiceUrls(fields);
+            if (hasMcpFields) {
+                saveMcpServers(fields);
+            }
             if (isTrue(fields.get("clearApiKey"))) Prefs.put(app, Prefs.K_API_KEY, "");
             if (isTrue(fields.get("clearVoiceApiKey"))) Prefs.put(app, Prefs.K_VOICE_API_KEY, "");
             if (isTrue(fields.get("clearNeteaseCookie"))) {
@@ -1674,8 +1695,9 @@ public class SettingsWebServer {
                 String v = entry.getValue();
                 if (k == null) continue;
                 if (k.equals("clearApiKey") || k.equals("clearVoiceApiKey")
-                        || k.equals("clearNeteaseCookie")) continue;
+                        || k.equals("clearNeteaseCookie") || k.equals("saveMode")) continue;
                 if (k.startsWith("mcpServer")) continue;
+                if (!patch && trim(v).isEmpty() && !isBoolKey(k)) continue;
                 if (k.equals(Prefs.K_API_KEY) || k.equals(Prefs.K_VOICE_API_KEY)) {
                     if (v == null || v.trim().isEmpty()) continue;
                     Prefs.put(app, k, v.trim());
@@ -1836,6 +1858,25 @@ public class SettingsWebServer {
         serveJson(out, o);
     }
 
+    private static void serveBackupList(OutputStream out) throws IOException {
+        JSONObject o = new JSONObject();
+        try {
+            JSONArray files = new JSONArray();
+            for (File f : Prefs.listBackupFiles()) {
+                if (f == null || !f.isFile()) continue;
+                files.put(new JSONObject().put("name", f.getName())
+                        .put("bytes", f.length())
+                        .put("modified", f.lastModified()));
+            }
+            o.put("ok", true);
+            o.put("dir", Prefs.backupDirectory().getAbsolutePath());
+            o.put("files", files);
+        } catch (Exception e) {
+            putErr(o, e.getMessage());
+        }
+        serveJson(out, o);
+    }
+
     private static void serveBackupRestore(OutputStream out, String body) throws IOException {
         JSONObject o = new JSONObject();
         try {
@@ -1856,6 +1897,25 @@ public class SettingsWebServer {
             boolean ok = Prefs.restoreBackupIfPresent(app);
             o.put("ok", ok);
             o.put("msg", ok ? "已从备份恢复" : "恢复失败");
+        } catch (Exception e) {
+            putErr(o, e.getMessage());
+        }
+        serveJson(out, o);
+    }
+
+    private static void serveBackupRestoreFile(OutputStream out, String body) throws IOException {
+        JSONObject o = new JSONObject();
+        try {
+            String name = form(body).get("name");
+            File f = Prefs.backupFileForName(name);
+            if (f == null || !f.isFile()) {
+                serveJson(out, err("设备备份文件不存在或文件名无效"));
+                return;
+            }
+            boolean ok = Prefs.restoreBackupFile(app, f);
+            o.put("ok", ok);
+            o.put("name", f.getName());
+            o.put("msg", ok ? "已从设备备份恢复" : "备份内容无效或恢复失败");
         } catch (Exception e) {
             putErr(o, e.getMessage());
         }
@@ -2291,6 +2351,76 @@ public class SettingsWebServer {
         try {
             com.magneo.compass.MainActivity.applyLocationPrefsToActive();
         } catch (Exception ignored) {}
+    }
+
+    private static void validateVoiceUrls(Map<String, String> fields) throws IOException {
+        validateVoiceUrl(Prefs.K_ASR_URL, fields.get(Prefs.K_ASR_URL), true);
+        validateVoiceUrl(Prefs.K_ASR_FINAL_URL, fields.get(Prefs.K_ASR_FINAL_URL), false);
+        validateVoiceUrl(Prefs.K_TTS_URL, fields.get(Prefs.K_TTS_URL), false);
+    }
+
+    private static void validateVoiceUrl(String key, String raw, boolean websocketAllowed)
+            throws IOException {
+        String value = trim(raw);
+        if (value.isEmpty()) return;
+        String lower = value.toLowerCase(Locale.US);
+        boolean http = lower.startsWith("http://") || lower.startsWith("https://");
+        boolean websocket = lower.startsWith("ws://") || lower.startsWith("wss://");
+        if (!http && !(websocketAllowed && websocket)) {
+            throw new IOException(voiceUrlLabel(key) + "必须使用 "
+                    + (websocketAllowed ? "ws://、wss:// 或 " : "")
+                    + "http://、https://");
+        }
+        try {
+            java.net.URI uri = new java.net.URI(value);
+            if (uri.getHost() == null || uri.getHost().trim().isEmpty()) {
+                throw new IOException(voiceUrlLabel(key) + "缺少主机地址");
+            }
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException(voiceUrlLabel(key) + "格式无效");
+        }
+    }
+
+    private static String voiceConfigMessage() {
+        String asr = trim(Prefs.get(app, Prefs.K_ASR_URL, ""));
+        String asrFinal = trim(Prefs.get(app, Prefs.K_ASR_FINAL_URL, ""));
+        String tts = trim(Prefs.get(app, Prefs.K_TTS_URL, ""));
+        String issue = voiceUrlIssue("ASR", asr, true);
+        if (!issue.isEmpty()) return issue;
+        issue = voiceUrlIssue("Final ASR", asrFinal, false);
+        if (!issue.isEmpty()) return issue;
+        issue = voiceUrlIssue("TTS", tts, false);
+        if (!issue.isEmpty()) return issue;
+        if (asr.isEmpty() && asrFinal.isEmpty()) return "ASR 未配置，不会启动语音识别请求";
+        if (asr.isEmpty()) return "流式 ASR 未配置，将使用 Final ASR";
+        if (tts.isEmpty()) return "TTS 未配置，识别和对话可用但不会云端播报";
+        if (asrFinal.isEmpty()) return "ASR/TTS 地址格式正常；未配置 Final ASR 时使用流式结果";
+        return "ASR/TTS 地址格式正常";
+    }
+
+    private static String voiceUrlIssue(String label, String value, boolean websocketAllowed) {
+        if (value.isEmpty()) return "";
+        String lower = value.toLowerCase(Locale.US);
+        boolean http = lower.startsWith("http://") || lower.startsWith("https://");
+        boolean websocket = lower.startsWith("ws://") || lower.startsWith("wss://");
+        if (!http && !(websocketAllowed && websocket)) {
+            return label + "地址协议错误";
+        }
+        try {
+            java.net.URI uri = new java.net.URI(value);
+            return uri.getHost() == null || uri.getHost().trim().isEmpty()
+                    ? label + "地址缺少主机" : "";
+        } catch (Exception e) {
+            return label + "地址格式错误";
+        }
+    }
+
+    private static String voiceUrlLabel(String key) {
+        if (Prefs.K_ASR_URL.equals(key)) return "ASR 地址";
+        if (Prefs.K_ASR_FINAL_URL.equals(key)) return "Final ASR 地址";
+        return "TTS 地址";
     }
 
     private static Map<String, String> form(String body) {

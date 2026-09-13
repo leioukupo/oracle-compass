@@ -67,6 +67,7 @@ public class VoiceController {
     private static final long TTS_SEGMENT_RETRY_TIMEOUT_MS = 6_000;
     private static final long FOLLOWUP_WINDOW_MS = 22_000;
     private static final long BARGE_TTS_FADE_MS = 300;
+    private static final long VISUAL_ERROR_DEBOUNCE_MS = 2_000;
     // MT6580's VoIP capture path can occasionally stay alive at a near-silent gain.
     // Recover only after several real VAD boundaries return no usable speech.
     private static final long LOW_INPUT_MAX_LEVEL = 700;
@@ -128,6 +129,8 @@ public class VoiceController {
     private final StringBuilder streamPartial = new StringBuilder();
     private final ConcurrentHashMap<Integer, AsrTurn> asrTurns = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Integer, VoiceTrace> turnTraces = new ConcurrentHashMap<>();
+    private volatile long lastVisualErrorAtMs;
+    private volatile String lastVisualError = "";
 
     private volatile AudioRecord recorder;
     private volatile boolean keepRecording;
@@ -254,6 +257,29 @@ public class VoiceController {
         return FunAsrStreamingClient.isStreamingUrl(new LlmClient(ctx).asrUrl);
     }
 
+    /** True when at least one usable ASR mode is configured. */
+    public boolean hasConfiguredAsr() {
+        LlmClient llm = new LlmClient(ctx);
+        return FunAsrStreamingClient.isStreamingUrl(llm.asrUrl) || hasHttpFinalAsr(llm);
+    }
+
+    /** Report a stable configuration problem without starting an audio loop. */
+    public void reportAsrConfigurationError() {
+        LlmClient llm = new LlmClient(ctx);
+        if (llm.asrUrl.isEmpty() && llm.asrFinalUrl.isEmpty()) {
+            setStatus("未配置 ASR 地址，请在设置填写语音 API");
+        } else if (!usesStreamingAsr() && !hasHttpFinalAsr(llm)) {
+            setStatus(llm.asrFinalUrl.isEmpty()
+                    ? "未配置 Final ASR 地址，请在设置填写语音 API"
+                    : "Final ASR 地址无效，需要 http:// 或 https://");
+        }
+    }
+
+    private boolean hasHttpFinalAsr(LlmClient llm) {
+        String url = llm == null ? "" : llm.asrFinalUrl;
+        return url.startsWith("http://") || url.startsWith("https://");
+    }
+
     public void setSpeechConsumer(SpeechConsumer consumer) {
         speechConsumer = consumer;
     }
@@ -265,8 +291,18 @@ public class VoiceController {
     /** Start continuous FunASR listening, or fall back to the legacy one-shot VAD. */
     public void ensureContinuousListening() {
         LlmClient llm = new LlmClient(ctx);
+        if (llm.asrUrl.isEmpty() && llm.asrFinalUrl.isEmpty()) {
+            setStatus("未配置 ASR 地址，请在设置填写语音 API");
+            return;
+        }
         if (!FunAsrStreamingClient.isStreamingUrl(llm.asrUrl)) {
-            if (!listening.get() && !busy.get()) startFallbackListening(true);
+            if (!hasHttpFinalAsr(llm)) {
+                setStatus(llm.asrFinalUrl.isEmpty()
+                        ? "未配置 Final ASR 地址，请在设置填写语音 API"
+                        : "Final ASR 地址无效，需要 http:// 或 https://");
+            } else if (!listening.get() && !busy.get()) {
+                startFallbackListening(true);
+            }
             return;
         }
         if (!continuousRunning.compareAndSet(false, true)) return;
@@ -310,8 +346,19 @@ public class VoiceController {
 
     /** Start listening. With FunASR configured this keeps the continuous stream alive. */
     public void startListening(boolean autoStop) {
-        if (FunAsrStreamingClient.isStreamingUrl(new LlmClient(ctx).asrUrl)) {
+        LlmClient llm = new LlmClient(ctx);
+        if (llm.asrUrl.isEmpty() && llm.asrFinalUrl.isEmpty()) {
+            setStatus("未配置 ASR 地址，请在设置填写语音 API");
+            return;
+        }
+        if (FunAsrStreamingClient.isStreamingUrl(llm.asrUrl)) {
             ensureContinuousListening();
+            return;
+        }
+        if (!hasHttpFinalAsr(llm)) {
+            setStatus(llm.asrFinalUrl.isEmpty()
+                    ? "未配置 Final ASR 地址，请在设置填写语音 API"
+                    : "Final ASR 地址无效，需要 http:// 或 https://");
             return;
         }
         startFallbackListening(autoStop);
@@ -344,7 +391,12 @@ public class VoiceController {
 
     /** Center tap: toggle continuous listening when FunASR is configured. */
     public void toggle() {
-        if (FunAsrStreamingClient.isStreamingUrl(new LlmClient(ctx).asrUrl)) {
+        LlmClient llm = new LlmClient(ctx);
+        if (llm.asrUrl.isEmpty() && llm.asrFinalUrl.isEmpty()) {
+            setStatus("未配置 ASR 地址，请在设置填写语音 API");
+            return;
+        }
+        if (FunAsrStreamingClient.isStreamingUrl(llm.asrUrl)) {
             if (continuousRunning.get()) {
                 stopContinuousListening();
                 stopTtsPlayback();
@@ -355,7 +407,7 @@ public class VoiceController {
             return;
         }
         if (listening.get()) stopAndSend();
-        else startFallbackListening(false);
+        else startListening(false);
     }
 
     /** Speak an answer generated outside the normal text-only voice loop. */
@@ -466,7 +518,20 @@ public class VoiceController {
         stopTtsPlayback();
         PlaybackLead lead = beforePlayback == null ? null
                 : new PlaybackLead(Math.max(0, playbackLeadMs), beforePlayback);
-        enqueueTts(turnId, t, true, lead);
+        // Vision answers can be much longer than a normal spoken sentence.
+        // Queue bounded pieces so one slow long request cannot consume the
+        // whole TTS timeout and make the complete answer disappear.
+        StringBuilder pending = new StringBuilder(t);
+        List<String> segments = drainSpeakableSegments(pending, true, true,
+                System.currentTimeMillis());
+        if (pending.length() > 0) {
+            String remainder = pending.toString().trim();
+            if (!remainder.isEmpty()) segments.add(remainder);
+        }
+        if (segments.isEmpty()) segments.add(t);
+        for (int i = 0; i < segments.size(); i++) {
+            enqueueTts(turnId, segments.get(i), true, i == 0 ? lead : null);
+        }
     }
 
     public void shutdown() {
@@ -492,8 +557,18 @@ public class VoiceController {
 
     private void updateVisualState(String statusText) {
         String s = statusText == null ? "" : statusText.trim();
-        if (s.contains("错误") || s.contains("异常") || s.contains("失败") || s.contains("未配置")
-                || s.contains("无返回") || s.contains("不可用") || s.contains("缺少")) {
+        if (s.contains("未配置") || s.contains("缺少")) {
+            VoiceVisualState.setPhase(VoiceVisualPhase.IDLE);
+            return;
+        }
+        if (s.contains("错误") || s.contains("异常") || s.contains("失败")
+                || s.contains("无返回") || s.contains("不可用")) {
+            long now = System.currentTimeMillis();
+            if (s.equals(lastVisualError) && now - lastVisualErrorAtMs < VISUAL_ERROR_DEBOUNCE_MS) {
+                return;
+            }
+            lastVisualError = s;
+            lastVisualErrorAtMs = now;
             VoiceVisualState.setPhase(restingVisualPhase());
             VoiceVisualState.showError();
             return;
@@ -1680,8 +1755,13 @@ public class VoiceController {
                     LlmClient.ChatOptions.gate()).toUpperCase(Locale.US);
             reply = verdict.contains("REPLY");
             if (verdict.isEmpty() || verdict.startsWith("!")) {
-                ConversationLog.append(ctx, "system", "LLM gate timeout/skip: " + compact(t, 40));
-                reply = false;
+                // The gate is only a noise filter. A slow or temporarily failed
+                // gate must not silently discard an utterance that looks like a
+                // real request; the main chat call can still decide how to answer.
+                reply = looksExplicitAddressOrCommand(t) || looksAddressedOrQuestion(t)
+                        || looksLikeFollowup(t) || looksLikeConversationOpening(t);
+                ConversationLog.append(ctx, "system", "LLM gate unavailable, fallback="
+                        + (reply ? "REPLY" : "IGNORE") + ": " + compact(t, 40));
             }
         }
         if (trace != null) trace.gateMs = System.currentTimeMillis() - started;
@@ -1726,7 +1806,8 @@ public class VoiceController {
     private boolean looksExplicitAddressOrCommand(String text) {
         String t = text.toLowerCase(Locale.US);
         String[] hot = {"真理", "罗盘", "助手", "小罗", "ai", "帮我", "给我", "告诉我", "回答",
-                "解释", "总结", "翻译", "查一下", "搜一下", "打开", "关闭", "播放", "暂停",
+                "解释", "总结", "翻译", "查一下", "查查", "搜一下", "看一下", "看下", "看看",
+                "检查", "确认一下", "报一下", "重新报", "打开", "关闭", "播放", "暂停",
                 "你好", "在吗", "嗨", "哈喽", "hello", "hi", "讲", "说", "请", "来一个",
                 "下一首", "上一首"};
         for (String s : hot) if (t.contains(s)) return true;

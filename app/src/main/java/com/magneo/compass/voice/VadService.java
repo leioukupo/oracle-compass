@@ -26,7 +26,10 @@ public class VadService extends Service {
         while (running) {
             try {
                 VoiceController vc = VoiceController.get(this, null);
-                if (vc.usesStreamingAsr()) {
+                if (!vc.hasConfiguredAsr()) {
+                    vc.reportAsrConfigurationError();
+                    Thread.sleep(5000);
+                } else if (vc.usesStreamingAsr()) {
                     vc.ensureContinuousListening();
                     Thread.sleep(2000);
                 } else if (!vc.isBusy()) {

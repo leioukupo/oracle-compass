@@ -74,18 +74,14 @@ public class LlmClient {
                 Prefs.DEFAULT_VISION_TEMPERATURE), 0f, 2f);
         textModel = nonEmpty(Prefs.get(ctx, Prefs.K_TEXT_MODEL, ""), preset.textModel);
         visionModel = nonEmpty(Prefs.get(ctx, Prefs.K_VISION_MODEL, ""), preset.visionModel);
-        String asr = Prefs.get(ctx, Prefs.K_ASR_URL, "");
-        if (asr.isEmpty() && !baseUrl.isEmpty()) asr = baseUrl; // 未单独配置时复用 Base URL
-        asrUrl = asr;
-        String asrFinal = Prefs.get(ctx, Prefs.K_ASR_FINAL_URL, "");
-        if (asrFinal.isEmpty()) asrFinal = asr;
-        asrFinalUrl = asrFinal;
-        asrModel = Prefs.get(ctx, Prefs.K_ASR_MODEL, "whisper-1");
-        String tts = Prefs.get(ctx, Prefs.K_TTS_URL, "");
-        if (tts.isEmpty() && !baseUrl.isEmpty()) tts = baseUrl; // 未单独配置时复用 Base URL
-        ttsUrl = tts;
-        ttsModel = Prefs.get(ctx, Prefs.K_TTS_MODEL, "tts-1");
-        ttsVoice = Prefs.get(ctx, Prefs.K_TTS_VOICE, "alloy");
+        // Chat, streaming ASR, final ASR and TTS are independent services.
+        // Never send audio requests to a chat-only provider by inheriting baseUrl.
+        asrUrl = strip(Prefs.get(ctx, Prefs.K_ASR_URL, ""));
+        asrFinalUrl = strip(Prefs.get(ctx, Prefs.K_ASR_FINAL_URL, ""));
+        asrModel = nonEmpty(Prefs.get(ctx, Prefs.K_ASR_MODEL, ""), "whisper-1");
+        ttsUrl = strip(Prefs.get(ctx, Prefs.K_TTS_URL, ""));
+        ttsModel = nonEmpty(Prefs.get(ctx, Prefs.K_TTS_MODEL, ""), "tts-1");
+        ttsVoice = nonEmpty(Prefs.get(ctx, Prefs.K_TTS_VOICE, ""), "alloy");
     }
 
     private static OkHttpClient sharedClient(Context ctx) {
@@ -150,8 +146,8 @@ public class LlmClient {
     private static String transcribeEndpoint(String baseOrEndpoint) {
         if (baseOrEndpoint == null || baseOrEndpoint.trim().isEmpty()) return "";
         String s = strip(baseOrEndpoint);
-        if (s.startsWith("ws://")) s = "http://" + s.substring("ws://".length());
-        else if (s.startsWith("wss://")) s = "https://" + s.substring("wss://".length());
+        // A streaming WebSocket endpoint is not a final multipart ASR endpoint.
+        if (!s.startsWith("http://") && !s.startsWith("https://")) return "";
         String lower = s.toLowerCase(Locale.US);
         if (lower.endsWith("/audio/transcriptions") || lower.endsWith("/api/v1/asr")) return s;
         if (lower.endsWith("/v1")) return s + "/audio/transcriptions";
@@ -178,6 +174,10 @@ public class LlmClient {
         if (scheme < 0) return false;
         int path = s.indexOf('/', scheme + 3);
         return path < 0 || path == s.length() - 1;
+    }
+
+    private static boolean isHttpUrl(String s) {
+        return s != null && (s.startsWith("http://") || s.startsWith("https://"));
     }
 
     private String audioApiKey() {
@@ -519,8 +519,15 @@ public class LlmClient {
 
     /** ASR：OpenAI 兼容 /audio/transcriptions（multipart）。 */
     public Call transcribe(byte[] wav, TextCallback cb) {
+        if (asrFinalUrl.isEmpty()) {
+            cb.onError("未配置 Final ASR 地址");
+            return null;
+        }
         String endpoint = transcribeEndpoint(asrFinalUrl);
-        if (endpoint.isEmpty()) { cb.onError("未配置 ASR 语音 API"); return null; }
+        if (endpoint.isEmpty()) {
+            cb.onError("Final ASR 地址协议错误，需要 http:// 或 https://");
+            return null;
+        }
         try {
             Request req;
             if (isSenseVoiceTranscribe(endpoint)) {
@@ -586,12 +593,17 @@ public class LlmClient {
         try {
             String voice = voiceOverride == null || voiceOverride.trim().isEmpty()
                     ? ttsVoice : voiceOverride.trim();
+            if (!isHttpUrl(ttsUrl)) {
+                cb.onError("TTS 地址协议错误，需要 http:// 或 https://");
+                return null;
+            }
+            String speechEndpoint = endpoint(ttsUrl, "/audio/speech");
             JSONObject body = new JSONObject()
                     .put("model", ttsModel)
                     .put("voice", voice)
                     .put("input", text)
                     .put("response_format", "wav");
-            Request req = new Request.Builder().url(endpoint(ttsUrl, "/audio/speech"))
+            Request req = new Request.Builder().url(speechEndpoint)
                     .addHeader("Authorization", "Bearer " + audioApiKey())
                     .post(RequestBody.create(JSON, body.toString())).build();
             Call call = client.newCall(req);
@@ -616,7 +628,12 @@ public class LlmClient {
     public Call listTtsVoices(VoicesCallback cb) {
         if (ttsUrl.isEmpty()) { cb.onError("未配置 TTS 语音 API"); return null; }
         try {
-            Request req = new Request.Builder().url(voicesEndpoint(ttsUrl))
+            if (!isHttpUrl(ttsUrl)) {
+                cb.onError("TTS 地址协议错误，需要 http:// 或 https://");
+                return null;
+            }
+            String endpoint = voicesEndpoint(ttsUrl);
+            Request req = new Request.Builder().url(endpoint)
                     .addHeader("Authorization", "Bearer " + audioApiKey())
                     .get().build();
             Call call = client.newCall(req);

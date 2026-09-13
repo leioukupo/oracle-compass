@@ -27,6 +27,8 @@ public class McpClient {
     private static final String PROTOCOL_VERSION = "2025-06-18";
     private static final ConcurrentHashMap<String, String> SESSIONS = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, CacheEntry> TOOL_CACHE = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Long> TOOL_FAILURES = new ConcurrentHashMap<>();
+    private static final long TOOL_FAILURE_BACKOFF_MS = 30_000L;
     private static volatile int rpcId = 100;
 
     private final Context ctx;
@@ -50,10 +52,22 @@ public class McpClient {
             DebugLog.append(ctx, "mcp.tools.cache", cfg.name + " tools=" + cached.tools.size());
             return cached.tools;
         }
+        Long retryAt = TOOL_FAILURES.get(key);
+        if (!forceRefresh && retryAt != null && now < retryAt) {
+            DebugLog.append(ctx, "mcp.tools.backoff", cfg.name + " retryInMs="
+                    + (retryAt - now));
+            return new ArrayList<>();
+        }
         DebugLog.append(ctx, "mcp.tools.list", cfg.name + " url=" + cfg.url
                 + " timeoutMs=" + cfg.timeoutMs);
-        initialize(cfg);
-        JSONObject root = postRpc(cfg, "tools/list", new JSONObject(), true);
+        JSONObject root;
+        try {
+            initialize(cfg);
+            root = postRpc(cfg, "tools/list", new JSONObject(), true);
+        } catch (IOException e) {
+            TOOL_FAILURES.put(key, System.currentTimeMillis() + TOOL_FAILURE_BACKOFF_MS);
+            throw e;
+        }
         JSONObject result = root.optJSONObject("result");
         if (result == null && root.has("tools")) result = root;
         JSONArray arr = result == null ? null : result.optJSONArray("tools");
@@ -70,6 +84,7 @@ public class McpClient {
             }
         }
         TOOL_CACHE.put(key, new CacheEntry(now, out));
+        TOOL_FAILURES.remove(key);
         DebugLog.append(ctx, "mcp.tools.result", cfg.name + " tools=" + out.size()
                 + " " + toolNames(out));
         return out;
@@ -101,6 +116,7 @@ public class McpClient {
     public void refresh(McpServerConfig cfg) throws IOException {
         String key = cacheKey(cfg);
         TOOL_CACHE.remove(key);
+        TOOL_FAILURES.remove(key);
         SESSIONS.remove(key);
         listTools(cfg, true);
     }

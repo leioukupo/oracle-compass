@@ -2,6 +2,7 @@ package com.magneo.compass;
 
 import android.content.ComponentName;
 import android.content.Intent;
+import android.net.Uri;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -40,6 +41,7 @@ public class SettingsActivity extends BaseActivity {
     private static final int CAT_COUNT = CATS.length;
     private static final float SLOT_DEG = 360f / CAT_COUNT;
     private static final float RING_RADIUS_RATIO = 0.448f;
+    private static final int REQ_RESTORE_PREFS = 2401;
 
     private int cat = 0;
     private int lastPreviewCat = -1;
@@ -81,6 +83,18 @@ public class SettingsActivity extends BaseActivity {
     @Override
     protected void onVoiceToggleChanged(boolean enabled) {
         if (cat == 3) selectCategory(cat);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_RESTORE_PREFS || resultCode != RESULT_OK || data == null) return;
+        Uri uri = data.getData();
+        if (uri == null) return;
+        boolean ok = Prefs.restoreBackupFromUri(this, uri);
+        Toast.makeText(this, ok ? "配置备份已恢复" : "配置备份无效或恢复失败",
+                Toast.LENGTH_SHORT).show();
+        if (ok) selectCategory(cat);
     }
 
     private void onDragAngle(float acc) {
@@ -456,8 +470,22 @@ public class SettingsActivity extends BaseActivity {
         summaryRow(b, "当前记录", formatBytes(size), this::showConvReadInfo);
         summaryRow(b, "大小上限", maxKb + " KB", this::chooseLogMax);
         summaryRow(b, "清理周期", cleanMin <= 0 ? "关闭定时清理" : cleanMin + " 分钟", this::chooseCleanMin);
+        actionButton(b, "从设备选择配置备份", this::chooseConfigBackup, false);
         actionButton(b, "在网页端查看记录", this::showConvWeb, false);
         actionButton(b, "清空对话记录", this::confirmClearConv, true);
+    }
+
+    private void chooseConfigBackup() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                "application/json", "text/plain", "text/json"});
+        try {
+            startActivityForResult(intent, REQ_RESTORE_PREFS);
+        } catch (Exception e) {
+            Toast.makeText(this, "设备没有可用的文件选择器", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void addTitle(LinearLayout b, String title, String sub) {
