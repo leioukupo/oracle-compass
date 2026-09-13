@@ -146,13 +146,17 @@ public class MusicService extends Service {
     private void playItem(int i, int attempts) { playItem(i, attempts, false); }
 
     private void playItem(int i, int attempts, boolean forceResolve) {
+        playItem(i, attempts, forceResolve, -1);
+    }
+
+    private void playItem(int i, int attempts, boolean forceResolve, int resumePositionMs) {
         playbackGeneration++;
         int generation = playbackGeneration;
-        playItemForGeneration(i, attempts, forceResolve, generation);
+        playItemForGeneration(i, attempts, forceResolve, resumePositionMs, generation);
     }
 
     private void playItemForGeneration(int i, int attempts, boolean forceResolve,
-                                        int generation) {
+                                        int resumePositionMs, int generation) {
         if (generation != playbackGeneration) return;
         if (tracks.isEmpty()) {
             stopPlayback();
@@ -188,25 +192,26 @@ public class MusicService extends Service {
                     if (result.isEmpty()) {
                         notifyTrackError(track, failure.isEmpty()
                                 ? "歌曲暂无可用播放地址" : failure);
-                        playItem(targetIndex + 1, nextAttempts, false);
+                        if (resumePositionMs >= 0) stopPlayback();
+                        else playItem(targetIndex + 1, nextAttempts, false);
                         return;
                     }
                     MusicTrack updated = track.withUrl(result);
                     tracks.set(targetIndex, updated);
                     syncUrls();
                     persistQueue();
-                    prepareMedia(updated, targetIndex, nextAttempts - 1,
-                            generation, forceResolve);
+                    prepareMedia(updated, targetIndex, nextAttempts - 1, generation,
+                            forceResolve, resumePositionMs);
                 });
             });
             return;
         }
-        prepareMedia(track, idx, attempts, generation, forceResolve);
+        prepareMedia(track, idx, attempts, generation, forceResolve, resumePositionMs);
     }
 
     private void prepareMedia(final MusicTrack track, final int targetIndex,
                               final int attempts, final int generation,
-                              final boolean forceResolve) {
+                              final boolean forceResolve, final int resumePositionMs) {
         try {
             if (mp != null) { mp.release(); mp = null; }
             mp = new MediaPlayer();
@@ -224,6 +229,12 @@ public class MusicService extends Service {
                     try { m.release(); } catch (Exception ignored) {}
                     return;
                 }
+                if (resumePositionMs >= 0) {
+                    try {
+                        int duration = Math.max(1, m.getDuration());
+                        m.seekTo(Math.max(0, Math.min(duration - 1000, resumePositionMs)));
+                    } catch (Exception ignored) {}
+                }
                 m.start();
                 if (wakeLock != null && !wakeLock.isHeld()) wakeLock.acquire();
                 notifyState();
@@ -234,27 +245,28 @@ public class MusicService extends Service {
             mp.setOnErrorListener((m, what, extra) -> {
                 if (generation != playbackGeneration || targetIndex != idx || m != mp) return true;
                 Log.w(TAG, "error what=" + what + " extra=" + extra + " idx=" + idx);
-                if (track.isNetease() && !forceResolve) {
-                    tracks.set(targetIndex, track.withUrl(""));
-                    syncUrls();
-                    persistQueue();
-                    playItem(targetIndex, attempts, true);
-                } else {
-                    playItem(targetIndex + 1, attempts + 1, false);
-                }
+                handleMediaError(track, targetIndex, attempts, forceResolve, resumePositionMs);
                 return true;
             });
             mp.prepareAsync();
         } catch (Exception e) {
             Log.w(TAG, "play failed idx=" + idx, e);
-            if (track.isNetease() && !forceResolve) {
-                tracks.set(targetIndex, track.withUrl(""));
-                syncUrls();
-                persistQueue();
-                playItem(targetIndex, attempts, true);
-            } else {
-                playItem(targetIndex + 1, attempts + 1, false);
-            }
+            handleMediaError(track, targetIndex, attempts, forceResolve, resumePositionMs);
+        }
+    }
+
+    private void handleMediaError(MusicTrack track, int targetIndex, int attempts,
+                                  boolean forceResolve, int resumePositionMs) {
+        if (track.isNetease() && !forceResolve) {
+            tracks.set(targetIndex, track.withUrl(""));
+            syncUrls();
+            persistQueue();
+            playItem(targetIndex, attempts, true, resumePositionMs);
+        } else if (resumePositionMs >= 0) {
+            notifyTrackError(track, "恢复播放失败，请重新播放当前歌曲");
+            stopPlayback();
+        } else {
+            playItem(targetIndex + 1, attempts + 1, false);
         }
     }
 
@@ -273,14 +285,21 @@ public class MusicService extends Service {
 
     public void toggle() {
         if (mp == null) { if (!tracks.isEmpty()) playItem(idx); return; }
-        if (mp.isPlaying()) {
-            mp.pause();
+        boolean playing = false;
+        try { playing = mp.isPlaying(); } catch (Exception ignored) {}
+        if (playing) {
+            try { mp.pause(); } catch (Exception ignored) {}
             if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
-        } else {
-            mp.start();
-            if (wakeLock != null && !wakeLock.isHeld()) wakeLock.acquire();
+            notifyState();
+            return;
         }
-        notifyState();
+
+        int resumePositionMs = 0;
+        try { resumePositionMs = Math.max(0, mp.getCurrentPosition()); } catch (Exception ignored) {}
+        // Recreate the player on resume. Network streams, especially on API 22, can
+        // become unusable while paused even though the old MediaPlayer still exists.
+        MusicTrack current = currentTrack();
+        playItem(idx, 0, current != null && current.isNetease(), resumePositionMs);
     }
 
     public void next() { if (!tracks.isEmpty()) playItem(idx + 1); }
