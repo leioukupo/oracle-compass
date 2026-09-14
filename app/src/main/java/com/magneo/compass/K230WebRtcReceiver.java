@@ -44,6 +44,11 @@ public final class K230WebRtcReceiver {
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
     private static final long HTTP_TIMEOUT_MS = 1200L;
     private static final long RECONNECT_MS = 1000L;
+    private static final int MAX_CONNECT_ATTEMPTS = 3;
+
+    private static final class WebRtcUnavailableException extends IOException {
+        WebRtcUnavailableException(String message) { super(message); }
+    }
 
     private final Context context;
     private final Listener listener;
@@ -68,10 +73,12 @@ public final class K230WebRtcReceiver {
     private VideoTrack videoTrack;
     private VideoSink sink;
     private SurfaceViewRenderer renderer;
+    private boolean rendererInitialized;
     private String host = "";
     private int generation;
     private boolean firstFrame;
     private boolean reconnectScheduled;
+    private int connectAttempts;
     private CountDownLatch iceGathered = new CountDownLatch(1);
 
     public K230WebRtcReceiver(Context context, Listener listener) {
@@ -82,11 +89,8 @@ public final class K230WebRtcReceiver {
     /** Must be called on the UI thread before start(). */
     public void setRenderer(SurfaceViewRenderer value) {
         renderer = value;
-        if (renderer != null && egl != null) {
-            renderer.init(egl.getEglBaseContext(), null);
-            renderer.setEnableHardwareScaler(true);
-            renderer.setMirror(false);
-            renderer.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT);
+        if (renderer != null && egl != null && !rendererInitialized) {
+            initializeRenderer(egl.getEglBaseContext());
         }
     }
 
@@ -109,6 +113,7 @@ public final class K230WebRtcReceiver {
         stopPeerOnly();
         final int run = ++generation;
         host = next;
+        connectAttempts = 0;
         stopped.set(false);
         try {
             worker.execute(() -> {
@@ -147,32 +152,73 @@ public final class K230WebRtcReceiver {
         }
         if (renderer != null) {
             try { renderer.release(); } catch (Exception ignored) {}
+            rendererInitialized = false;
         }
     }
 
     private void ensureFactory() {
+        EglBase.Context rendererContext;
         synchronized (peerLock) {
-            if (factory != null) return;
-            PeerConnectionFactory.initialize(PeerConnectionFactory.InitializationOptions
-                    .builder(context).setEnableInternalTracer(false).createInitializationOptions());
-            egl = EglBase.create();
-            factory = PeerConnectionFactory.builder()
-                    .setVideoEncoderFactory(new org.webrtc.SoftwareVideoEncoderFactory())
-                    .setVideoDecoderFactory(new org.webrtc.DefaultVideoDecoderFactory(egl.getEglBaseContext()))
-                    .createPeerConnectionFactory();
-            if (renderer != null) {
-                renderer.init(egl.getEglBaseContext(), null);
-                renderer.setEnableHardwareScaler(true);
-                renderer.setMirror(false);
-                renderer.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT);
+            if (factory == null) {
+                PeerConnectionFactory.initialize(PeerConnectionFactory.InitializationOptions
+                        .builder(context).setEnableInternalTracer(false).createInitializationOptions());
+                egl = EglBase.create();
+                factory = PeerConnectionFactory.builder()
+                        // This peer is receive-only. Do not provision a camera,
+                        // microphone, local track or software video encoder.
+                        .setVideoDecoderFactory(new org.webrtc.DefaultVideoDecoderFactory(egl.getEglBaseContext()))
+                        .createPeerConnectionFactory();
             }
+            rendererContext = egl.getEglBaseContext();
         }
+        if (renderer != null && !rendererInitialized) {
+            initializeRenderer(rendererContext);
+        }
+    }
+
+    private void initializeRenderer(final EglBase.Context rendererContext) {
+        Runnable init = () -> {
+            if (renderer == null || rendererInitialized) return;
+            renderer.init(rendererContext, null);
+            renderer.setEnableHardwareScaler(true);
+            renderer.setMirror(false);
+            renderer.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT);
+            rendererInitialized = true;
+        };
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            init.run();
+            return;
+        }
+        final CountDownLatch ready = new CountDownLatch(1);
+        main.post(() -> {
+            try { init.run(); }
+            finally { ready.countDown(); }
+        });
+        try { ready.await(1200L, TimeUnit.MILLISECONDS); }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
     }
 
     private void connect(final int run, final String target) {
         if (stopped.get() || run != generation) return;
+        connectAttempts++;
         publish("connecting", target);
         try {
+            // Do not load/initialize the native WebRTC stack on a K230 image
+            // that advertises the HTTP endpoint but has no `webrtc` module.
+            // This is important on API 22 devices: initializing the native
+            // factory can crash the process before the RTSP fallback gets a
+            // chance to run.  The K230 status endpoint remains available even
+            // when WebRTC itself is disabled.
+            JSONObject capability = getJson("http://" + target + ":8080/api/webrtc/status");
+            String capabilityError = capability.optString("last_error", "");
+            String capabilityState = capability.optString("state", "");
+            if ((capability.has("available") && capability.optInt("available", 0) == 0) ||
+                    "disabled".equalsIgnoreCase(capabilityState) ||
+                    ("error".equalsIgnoreCase(capabilityState) &&
+                            capability.optInt("session", 0) == 0) ||
+                    capabilityError.toLowerCase(java.util.Locale.US).contains("unavailable")) {
+                throw new WebRtcUnavailableException("K230 WebRTC 不可用，使用 RTSP");
+            }
             ensureFactory();
             JSONObject offerJson = getJson("http://" + target + ":8080/api/webrtc/offer");
             final String sdp = offerJson.optString("sdp", "");
@@ -219,11 +265,28 @@ public final class K230WebRtcReceiver {
             answer.put("type", "answer");
             answer.put("sdp", local.description);
             postJson("http://" + target + ":8080/api/webrtc/answer", answer);
-            if (!stopped.get() && run == generation) publish("connected", target);
+            if (!stopped.get() && run == generation) {
+                connectAttempts = 0;
+                publish("connected", target);
+            }
+        } catch (WebRtcUnavailableException e) {
+            if (stopped.get() || run != generation) return;
+            publish("unavailable", e.getMessage());
         } catch (Exception e) {
             if (stopped.get() || run != generation) return;
-            publish("error", e.getMessage() == null ? e.toString() : e.getMessage());
-            scheduleReconnect(run, target);
+            String detail = e.getMessage() == null ? e.toString() : e.getMessage();
+            if (connectAttempts >= MAX_CONNECT_ATTEMPTS) {
+                publish("error", detail);
+            } else {
+                publish("reconnecting", detail);
+                scheduleReconnect(run, target);
+            }
+        } catch (Throwable e) {
+            // Broken vendor WebRTC libraries on API 22 can throw a LinkageError
+            // instead of an Exception. Convert that failure to the normal RTSP
+            // fallback path instead of allowing the car-control Activity to die.
+            if (stopped.get() || run != generation) return;
+            publish("error", e.toString());
         }
     }
 
