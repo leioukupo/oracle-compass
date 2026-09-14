@@ -427,19 +427,41 @@ public class RoverControlActivity extends BaseActivity implements
     }
 
     private void checkVideoBuffer() {
-        if (!resumed || videoWebRtcFallback == false || mediaPlayer == null) return;
-        ExoPlayer player = mediaPlayer;
-        long buffered = player.getBufferedPosition() - player.getCurrentPosition();
-        // Ignore ExoPlayer's TIME_UNSET/TIME_END_OF_SOURCE sentinels; only a
-        // finite live queue above 300ms should trigger a reconnect.
-        if (buffered > 300L && buffered < 5000L && videoStarting == false) {
-            // Live RTSP has no useful seek position; rebuilding is the only
-            // reliable way to discard an old decoder queue on API 22.
-            videoStarting = true;
-            startRtspVideo(activeVideoHost);
-            return;
-        }
-        ui.postDelayed(bufferWatchdog, 500L);
+        if (!resumed || !videoWebRtcFallback || mediaPlayer == null) return;
+        // ExoPlayer was created on videoWorker, so reading its position from
+        // the UI thread violates Player's application-looper contract.  On
+        // API 22 this is an IllegalStateException that occurs just after the
+        // first frame, making the whole car-control Activity disappear.  Do
+        // the read and any player decision on the same worker as prepare().
+        Handler worker = videoWorker;
+        if (worker == null) return;
+        final int generation = videoGeneration;
+        worker.post(() -> {
+            if (!isVideoCurrent(generation) || !videoWebRtcFallback) return;
+            ExoPlayer player = mediaPlayer;
+            if (player == null) return;
+            long buffered;
+            try {
+                buffered = player.getBufferedPosition() - player.getCurrentPosition();
+            } catch (RuntimeException ignored) {
+                // The player may be released by a simultaneous pause/reconnect.
+                return;
+            }
+            // Ignore ExoPlayer's TIME_UNSET/TIME_END_OF_SOURCE sentinels; only
+            // a finite live queue above 300ms should trigger a reconnect.
+            if (buffered > 300L && buffered < 5000L && !videoStarting) {
+                // Live RTSP has no useful seek position; rebuilding is the only
+                // reliable way to discard an old decoder queue on API 22.
+                videoStarting = true;
+                ui.post(() -> {
+                    if (isVideoCurrent(generation) && videoWebRtcFallback) {
+                        startRtspVideo(activeVideoHost);
+                    }
+                });
+                return;
+            }
+            ui.postDelayed(bufferWatchdog, 500L);
+        });
     }
 
     private void showRoverSettings() {
