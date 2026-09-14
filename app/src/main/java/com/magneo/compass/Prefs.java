@@ -127,6 +127,7 @@ public class Prefs {
     public static final String K_ROVER_RIGHT_Y_INVERT = "roverRightYInvert";
     public static final String K_ROVER_RTSP_PORT = "roverRtspPort";
     public static final String K_ROVER_RTSP_PATH = "roverRtspPath";
+    public static final String K_ROVER_VIDEO_MODE = "roverVideoMode";
     public static final String K_NETEASE_API_URL = "neteaseApiUrl";
     public static final String K_NETEASE_COOKIE = "neteaseCookie";
     public static final String K_NETEASE_UID = "neteaseUid";
@@ -143,12 +144,15 @@ public class Prefs {
     public static final boolean DEFAULT_ROOT_GRANT_NOTIFICATIONS = false;
     public static final boolean DEFAULT_SYSTEM_LOCKSCREEN_ENABLED = false;
     public static final boolean DEFAULT_GESTURE_GUARD_ENABLED = true;
-    public static final String DEFAULT_ROVER_TARGET_HOST = "10.1.20.36";
+    public static final String DEFAULT_ROVER_TARGET_HOST = "10.1.20.83";
     public static final int DEFAULT_ROVER_UDP_PORT = 5555;
     public static final boolean DEFAULT_ROVER_AUTO_DISCOVERY = true;
     public static final boolean DEFAULT_ROVER_BROADCAST = true;
     public static final int DEFAULT_ROVER_RTSP_PORT = 8554;
     public static final String DEFAULT_ROVER_RTSP_PATH = "/test";
+    public static final String ROVER_VIDEO_WEBRTC = "webrtc";
+    public static final String ROVER_VIDEO_RTSP = "rtsp";
+    public static final String DEFAULT_ROVER_VIDEO_MODE = ROVER_VIDEO_WEBRTC;
     public static final String DEFAULT_NETEASE_QUALITY = "standard";
     public static final String MUSIC_SOURCE_LOCAL = "local";
     public static final String MUSIC_SOURCE_NETEASE = "netease";
@@ -249,7 +253,11 @@ public class Prefs {
 
     public static String roverTargetHost(Context c) {
         String host = get(c, K_ROVER_TARGET_HOST, DEFAULT_ROVER_TARGET_HOST);
-        return host == null ? "" : host.trim();
+        host = host == null ? "" : host.trim();
+        // The old app shipped this address as its default; migrate that known
+        // stale value so devices without a discovery beacon reach current K230.
+        if ("10.1.20.36".equals(host)) return DEFAULT_ROVER_TARGET_HOST;
+        return host;
     }
 
     public static int roverUdpPort(Context c) {
@@ -282,6 +290,11 @@ public class Prefs {
         path = path.trim();
         if (path.isEmpty()) return DEFAULT_ROVER_RTSP_PATH;
         return path.startsWith("/") ? path : "/" + path;
+    }
+
+    public static String roverVideoMode(Context c) {
+        String mode = get(c, K_ROVER_VIDEO_MODE, DEFAULT_ROVER_VIDEO_MODE);
+        return ROVER_VIDEO_RTSP.equalsIgnoreCase(mode) ? ROVER_VIDEO_RTSP : ROVER_VIDEO_WEBRTC;
     }
 
     public static String roverTargetSummary(Context c) {

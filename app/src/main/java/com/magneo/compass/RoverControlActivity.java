@@ -2,7 +2,6 @@ package com.magneo.compass;
 
 import android.graphics.Color;
 import android.graphics.SurfaceTexture;
-import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -22,6 +21,14 @@ import android.net.wifi.WifiManager;
 
 import com.magneo.compass.ui.OutlineUtil;
 import com.magneo.compass.ui.Ui;
+import com.google.android.exoplayer2.ExoPlayer;
+import com.google.android.exoplayer2.MediaItem;
+import com.google.android.exoplayer2.PlaybackException;
+import com.google.android.exoplayer2.Player;
+import com.google.android.exoplayer2.DefaultLoadControl;
+import com.google.android.exoplayer2.trackselection.DefaultTrackSelector;
+import com.google.android.exoplayer2.source.rtsp.RtspMediaSource;
+import org.webrtc.SurfaceViewRenderer;
 
 /**
  * TALOS rover page.  The video is only a background preview; the raw joy
@@ -30,27 +37,34 @@ import com.magneo.compass.ui.Ui;
 public class RoverControlActivity extends BaseActivity implements
         RoverUdpTransport.Listener, RoverStatusClient.Listener {
     public static final String EXTRA_OPEN_SETTINGS = "open_rover_settings";
+    private static final long WEBRTC_FALLBACK_DELAY_MS = 1800L;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private FrameLayout root;
     private TextureView video;
     private RoverControlView controls;
     private RoverUdpTransport transport;
     private RoverStatusClient statusClient;
-    private volatile MediaPlayer mediaPlayer;
+    private volatile ExoPlayer mediaPlayer;
     private HandlerThread videoThread;
     private Handler videoWorker;
     private Surface videoSurface;
     private String activeVideoHost = "";
     private volatile boolean resumed;
-    private boolean videoStarting;
+    private volatile boolean videoStarting;
     private volatile int videoGeneration;
+    private SurfaceViewRenderer webRtcView;
+    private K230WebRtcReceiver webRtcReceiver;
+    private boolean rtspTcpFallback;
+    private boolean videoWebRtcFallback;
+    private boolean webRtcFirst;
+    private final Runnable bufferWatchdog = this::checkVideoBuffer;
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-        // MediaPlayer may perform network I/O while setting up an RTSP source.
+        // ExoPlayer may perform network I/O while setting up an RTSP source.
         // Keep all of that work off the UI thread so a slow/unavailable camera
         // cannot trigger NetworkOnMainThreadException or stall the controls.
         videoThread = new HandlerThread("rover-rtsp");
@@ -71,12 +85,27 @@ public class RoverControlActivity extends BaseActivity implements
                 if (resumed) {
                     String host = activeVideoHost.length() == 0 && transport != null
                             ? transport.activeHost() : activeVideoHost;
-                    startVideo(host);
+                    // Visibility changes can recreate the TextureView only
+                    // after WebRTC has failed. Resume that pending RTSP
+                    // fallback directly instead of starting WebRTC again.
+                    if (videoWebRtcFallback && host != null && host.length() > 0) {
+                        startRtspVideo(host);
+                    } else {
+                        startVideo(host);
+                    }
                 }
             }
             @Override public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int w, int h) {}
             @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
-                releaseVideo();
+                // The TextureView is only the RTSP fallback. Hiding it while
+                // WebRTC is active may destroy its SurfaceTexture; that must
+                // not tear down the independent WebRTC receiver/control path.
+                if (videoWebRtcFallback) {
+                    videoStarting = false;
+                    ++videoGeneration;
+                }
+                ui.removeCallbacks(bufferWatchdog);
+                releasePlayerAsync();
                 if (videoSurface != null) {
                     videoSurface.release();
                     videoSurface = null;
@@ -87,6 +116,44 @@ public class RoverControlActivity extends BaseActivity implements
         });
         root.addView(video, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        webRtcView = new SurfaceViewRenderer(this);
+        webRtcView.setVisibility(View.GONE);
+        webRtcView.setBackgroundColor(Color.BLACK);
+        root.addView(webRtcView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        webRtcReceiver = new K230WebRtcReceiver(this, new K230WebRtcReceiver.Listener() {
+            @Override public void onState(String state, String detail) {
+                if (!resumed || videoWebRtcFallback) return;
+                if ("connected".equals(state)) {
+                    controls.setVideoText("WebRTC 连接中");
+                } else if ("error".equals(state)) {
+                    // RTSP remains available when the current K230 firmware has
+                    // no WebRTC module or ICE negotiation fails.
+                    videoWebRtcFallback = true;
+                    if (webRtcReceiver != null) webRtcReceiver.stop();
+                    webRtcView.setVisibility(View.GONE);
+                    video.setVisibility(View.VISIBLE);
+                    startRtspVideo(activeVideoHost);
+                } else {
+                    controls.setVideoText("WebRTC " + state);
+                }
+            }
+            @Override public void onFirstFrame() {
+                if (resumed && !videoWebRtcFallback) {
+                    webRtcFirst = true;
+                    videoStarting = false;
+                    controls.setVideoText("WebRTC 在线");
+                }
+            }
+        });
+        webRtcReceiver.setRenderer(webRtcView);
+        try {
+            webRtcReceiver.initialize();
+        } catch (Throwable ignored) {
+            // The page still falls back to RTSP on devices without a usable
+            // WebRTC native library.
+        }
 
         controls = new RoverControlView(this, new RoverControlView.Listener() {
             @Override public void onJoyChanged(int lx, int ly, int rx, int ry,
@@ -140,6 +207,10 @@ public class RoverControlActivity extends BaseActivity implements
 
     @Override protected void onDestroy() {
         releaseVideo();
+        if (webRtcReceiver != null) {
+            webRtcReceiver.dispose();
+            webRtcReceiver = null;
+        }
         videoWorker = null;
         if (videoThread != null) {
             videoThread.quitSafely();
@@ -203,74 +274,122 @@ public class RoverControlActivity extends BaseActivity implements
     }
 
     private void startVideo(String host) {
-        if (!resumed || videoSurface == null || host == null || host.trim().length() == 0) {
+        if (!resumed || host == null || host.trim().length() == 0) {
             if (host == null || host.trim().length() == 0) controls.setVideoText("视频等待 K230");
             return;
         }
-        host = host.trim();
-        if (videoStarting && host.equals(activeVideoHost)) return;
-        activeVideoHost = host;
-        final int generation = ++videoGeneration;
-        videoStarting = true;
-        controls.setVideoText("视频连接中");
-        final String url = Uri.parse("rtsp://" + host + ":" + Prefs.roverRtspPort(this)
-                + Prefs.roverRtspPath(this)).toString();
-        final Surface surface = videoSurface;
-        Handler worker = videoWorker;
-        if (worker == null) {
-            videoFailed(generation);
+        final String targetHost = host.trim();
+        if (videoStarting && targetHost.equals(activeVideoHost)) {
+            // WebRTC does not need the TextureView surface. If it already
+            // failed while that surface was unavailable, retry the pending
+            // RTSP fallback as soon as TextureView becomes available.
+            if (videoWebRtcFallback && videoSurface != null && mediaPlayer == null) {
+                startRtspVideo(targetHost);
+            }
             return;
         }
-        worker.post(() -> prepareVideoOnWorker(generation, url, surface));
+        activeVideoHost = targetHost;
+        final int generation = ++videoGeneration;
+        videoStarting = true;
+        videoWebRtcFallback = false;
+        webRtcFirst = false;
+        rtspTcpFallback = false;
+        controls.setVideoText("视频连接中");
+        releasePlayerAsync();
+        if (!Prefs.ROVER_VIDEO_WEBRTC.equals(Prefs.roverVideoMode(this))) {
+            videoWebRtcFallback = true;
+            if (webRtcReceiver != null) webRtcReceiver.stop();
+            video.setVisibility(View.VISIBLE);
+            webRtcView.setVisibility(View.GONE);
+            startRtspVideo(targetHost);
+            return;
+        }
+        video.setVisibility(View.GONE);
+        webRtcView.setVisibility(View.VISIBLE);
+        if (webRtcReceiver != null) webRtcReceiver.start(targetHost);
+        // Old K230 firmware can expose RTSP but not the WebRTC module. Give
+        // signaling a short head start, then fall back without affecting UDP.
+        ui.postDelayed(() -> {
+            if (isVideoCurrent(generation) && videoStarting && !webRtcFirst) {
+                videoWebRtcFallback = true;
+                if (webRtcReceiver != null) webRtcReceiver.stop();
+                webRtcView.setVisibility(View.GONE);
+                video.setVisibility(View.VISIBLE);
+                startRtspVideo(targetHost);
+            }
+        }, WEBRTC_FALLBACK_DELAY_MS);
     }
 
-    private void prepareVideoOnWorker(final int generation, String url, Surface surface) {
+    private void startRtspVideo(String host) {
+        if (!resumed || videoSurface == null || host == null || host.length() == 0) {
+            if (controls != null) controls.setVideoText("RTSP 等待画面");
+            return;
+        }
+        final int generation = videoGeneration;
+        final Surface surface = videoSurface;
+        final String url = Uri.parse("rtsp://" + host + ":" + Prefs.roverRtspPort(this)
+                + Prefs.roverRtspPath(this)).toString();
+        Handler worker = videoWorker;
+        if (worker == null) { videoFailed(generation); return; }
+        controls.setVideoText(rtspTcpFallback ? "RTSP TCP 连接中" : "RTSP UDP 连接中");
+        worker.post(() -> prepareVideoOnWorker(generation, url, surface, rtspTcpFallback));
+    }
+
+    private void prepareVideoOnWorker(final int generation, String url, Surface surface,
+                                      final boolean forceTcp) {
         releasePlayerOnWorker();
         if (!isVideoCurrent(generation) || surface == null) return;
         try {
-            MediaPlayer mp = new MediaPlayer();
+            DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(100, 250, 50, 50)
+                    .setPrioritizeTimeOverSizeThresholds(true)
+                    .build();
+            DefaultTrackSelector selector = new DefaultTrackSelector(this);
+            ExoPlayer mp = new ExoPlayer.Builder(this)
+                    .setLoadControl(loadControl)
+                    .setTrackSelector(selector)
+                    .build();
             mediaPlayer = mp;
-            mp.setAudioStreamType(android.media.AudioManager.STREAM_MUSIC);
-            mp.setOnPreparedListener(player -> {
-                if (!isVideoCurrent(generation) || mediaPlayer != player) return;
-                try {
-                    player.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT);
-                    player.start();
+            mp.addListener(new Player.Listener() {
+                @Override public void onPlaybackStateChanged(int state) {
+                    if (!isVideoCurrent(generation) || mediaPlayer != mp) return;
                     ui.post(() -> {
-                        if (isVideoCurrent(generation) && mediaPlayer == player) {
+                        if (!isVideoCurrent(generation) || mediaPlayer != mp) return;
+                        if (state == Player.STATE_READY) {
                             videoStarting = false;
-                            controls.setVideoText("视频在线");
+                            controls.setVideoText("RTSP 在线");
+                            ui.removeCallbacks(bufferWatchdog);
+                            ui.post(bufferWatchdog);
+                        } else if (state == Player.STATE_BUFFERING) {
+                            controls.setVideoText("RTSP 缓冲");
                         }
                     });
-                } catch (Exception e) {
-                    ui.post(() -> videoFailed(generation));
+                }
+                @Override public void onPlayerError(PlaybackException error) {
+                    if (!isVideoCurrent(generation) || mediaPlayer != mp) return;
+                    if (!forceTcp) {
+                        rtspTcpFallback = true;
+                        ui.post(() -> startRtspVideo(activeVideoHost));
+                    } else {
+                        ui.post(() -> videoFailed(generation));
+                    }
                 }
             });
-            mp.setOnInfoListener((player, what, extra) -> {
-                if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
-                    ui.post(() -> {
-                        if (isVideoCurrent(generation) && mediaPlayer == player)
-                            controls.setVideoText("视频缓冲");
-                    });
-                } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
-                    ui.post(() -> {
-                        if (isVideoCurrent(generation) && mediaPlayer == player)
-                            controls.setVideoText("视频在线");
-                    });
-                }
-                return false;
-            });
-            mp.setOnErrorListener((player, what, extra) -> {
-                ui.post(() -> videoFailed(generation));
-                return true;
-            });
-            // This call can touch the network, so it deliberately runs on the
-            // rover-rtsp HandlerThread rather than the main/UI thread.
-            mp.setDataSource(this, Uri.parse(url));
-            mp.setSurface(surface);
-            mp.prepareAsync();
+            RtspMediaSource source = new RtspMediaSource.Factory()
+                    .setForceUseRtpTcp(forceTcp)
+                    .setTimeoutMs(1500)
+                    .createMediaSource(MediaItem.fromUri(url));
+            mp.setVideoSurface(surface);
+            mp.setMediaSource(source);
+            mp.prepare();
+            mp.play();
         } catch (Exception e) {
-            ui.post(() -> videoFailed(generation));
+            if (!forceTcp) {
+                rtspTcpFallback = true;
+                ui.post(() -> startRtspVideo(activeVideoHost));
+            } else {
+                ui.post(() -> videoFailed(generation));
+            }
         }
     }
 
@@ -282,29 +401,45 @@ public class RoverControlActivity extends BaseActivity implements
         if (generation != videoGeneration) return;
         videoStarting = false;
         ++videoGeneration;
-        postReleasePlayer();
+        releasePlayerAsync();
         if (controls != null) controls.setVideoText("视频不可用 · 控制仍运行");
     }
 
     private void releaseVideo() {
         videoStarting = false;
         ++videoGeneration;
-        postReleasePlayer();
+        ui.removeCallbacks(bufferWatchdog);
+        if (webRtcReceiver != null) webRtcReceiver.stop();
+        releasePlayerAsync();
     }
 
-    private void postReleasePlayer() {
+    private void releasePlayerAsync() {
         Handler worker = videoWorker;
         if (worker != null) worker.post(this::releasePlayerOnWorker);
     }
 
     private void releasePlayerOnWorker() {
-        MediaPlayer mp = mediaPlayer;
+        ExoPlayer mp = mediaPlayer;
         mediaPlayer = null;
         if (mp != null) {
-            try { mp.stop(); } catch (Exception ignored) {}
-            try { mp.reset(); } catch (Exception ignored) {}
             try { mp.release(); } catch (Exception ignored) {}
         }
+    }
+
+    private void checkVideoBuffer() {
+        if (!resumed || videoWebRtcFallback == false || mediaPlayer == null) return;
+        ExoPlayer player = mediaPlayer;
+        long buffered = player.getBufferedPosition() - player.getCurrentPosition();
+        // Ignore ExoPlayer's TIME_UNSET/TIME_END_OF_SOURCE sentinels; only a
+        // finite live queue above 300ms should trigger a reconnect.
+        if (buffered > 300L && buffered < 5000L && videoStarting == false) {
+            // Live RTSP has no useful seek position; rebuilding is the only
+            // reliable way to discard an old decoder queue on API 22.
+            videoStarting = true;
+            startRtspVideo(activeVideoHost);
+            return;
+        }
+        ui.postDelayed(bufferWatchdog, 500L);
     }
 
     private void showRoverSettings() {
@@ -325,17 +460,20 @@ public class RoverControlActivity extends BaseActivity implements
         rtspPath.setText(Prefs.roverRtspPath(this));
         final CheckBox discovery = check("自动发现（7789）", Prefs.roverAutoDiscovery(this));
         final CheckBox broadcast = check("无目标时允许广播", Prefs.roverBroadcast(this));
+        final CheckBox webRtc = check("优先 WebRTC（失败回退 RTSP）",
+                Prefs.ROVER_VIDEO_WEBRTC.equals(Prefs.roverVideoMode(this)));
         final CheckBox leftInvert = check("左摇杆 Y 轴反向", Prefs.roverLeftYInverted(this));
         final CheckBox rightInvert = check("右摇杆 Y 轴反向", Prefs.roverRightYInverted(this));
         new RoundDialog(this)
                 .title("车控设置")
-                .text("UDP 5555 协议兼容 ESP32；视频地址由下面 RTSP 端口和路径组成")
+                .text("UDP 5555 协议兼容 ESP32；WebRTC 优先，失败自动回退 RTSP")
                 .field(host)
                 .field(port)
                 .field(rtspPort)
                 .field(rtspPath)
                 .view(discovery)
                 .view(broadcast)
+                .view(webRtc)
                 .view(leftInvert)
                 .view(rightInvert)
                 .item("保存", () -> {
@@ -357,6 +495,8 @@ public class RoverControlActivity extends BaseActivity implements
                     Prefs.put(this, Prefs.K_ROVER_RTSP_PATH, path);
                     Prefs.putB(this, Prefs.K_ROVER_AUTO_DISCOVERY, discovery.isChecked());
                     Prefs.putB(this, Prefs.K_ROVER_BROADCAST, broadcast.isChecked());
+                    Prefs.put(this, Prefs.K_ROVER_VIDEO_MODE,
+                            webRtc.isChecked() ? Prefs.ROVER_VIDEO_WEBRTC : Prefs.ROVER_VIDEO_RTSP);
                     Prefs.putB(this, Prefs.K_ROVER_LEFT_Y_INVERT, leftInvert.isChecked());
                     Prefs.putB(this, Prefs.K_ROVER_RIGHT_Y_INVERT, rightInvert.isChecked());
                     controls.setYInverted(leftInvert.isChecked(), rightInvert.isChecked());
