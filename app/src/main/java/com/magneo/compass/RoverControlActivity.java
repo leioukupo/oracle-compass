@@ -104,6 +104,9 @@ public class RoverControlActivity extends BaseActivity implements
         video.setOpaque(true);
         video.setBackgroundColor(Color.BLACK);
         video.setClickable(false);
+        // The rover camera is mounted upside down relative to the tablet. Keep
+        // the control overlay upright and rotate only the received video.
+        video.setRotation(180f);
         video.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             @Override public void onSurfaceTextureAvailable(SurfaceTexture texture, int w, int h) {
                 if (videoSurface != null) videoSurface.release();
