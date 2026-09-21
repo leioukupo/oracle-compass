@@ -1,6 +1,7 @@
 package com.magneo.compass;
 
 import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Build;
@@ -72,6 +73,12 @@ public class RoverControlActivity extends BaseActivity implements
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        // The application theme has an opaque dark window background.  On the
+        // MT6580 compositor that background is still submitted above a normal
+        // SurfaceView, even when the content root itself is transparent.
+        // Remove it for this video page so decoded frames can pass through;
+        // the SurfaceView remains black until MediaCodec supplies a frame.
+        getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
 
         // ExoPlayer may perform network I/O while setting up an RTSP source.
         // Keep all of that work off the UI thread so a slow/unavailable camera
