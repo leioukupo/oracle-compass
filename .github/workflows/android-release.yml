@@ -108,7 +108,11 @@ jobs:
           cp "${module}" app/src/main/assets/oracle-compass-bootanimation.zip
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          # The deprecated `tools` package is no longer served by Google.
+          # Required platform/build-tools/NDK/CMake versions are installed below.
+          packages: 'platform-tools'
 
       - name: Install Android build packages
         shell: bash
