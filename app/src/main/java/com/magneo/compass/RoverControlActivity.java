@@ -1,6 +1,7 @@
 package com.magneo.compass;
 
 import android.graphics.Color;
+import android.graphics.SurfaceTexture;
 import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.Bundle;
@@ -11,8 +12,7 @@ import android.os.Looper;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.Surface;
-import android.view.SurfaceHolder;
-import android.view.SurfaceView;
+import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
@@ -44,7 +44,7 @@ public class RoverControlActivity extends BaseActivity implements
     private static final int MIN_WEBRTC_API = 23;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private FrameLayout root;
-    private SurfaceView video;
+    private TextureView video;
     private RoverControlView controls;
     private RoverUdpTransport transport;
     private RoverStatusClient statusClient;
@@ -95,16 +95,19 @@ public class RoverControlActivity extends BaseActivity implements
         // a black fallback until its first frame arrives.
         root.setBackgroundColor(Color.TRANSPARENT);
 
-        // SurfaceView lets MediaCodec render into a dedicated hardware layer.
-        // TextureView adds a GPU composition/copy step on this Android 5.1
-        // MT6580 device and can leave one or more old frames queued.
-        video = new SurfaceView(this);
+        // Keep RTSP in the normal View composition tree.  A SurfaceView is
+        // placed below the Activity window by this Android 5.1 MTK ROM, where
+        // the themed window buffer covers it even while decoded YUV frames are
+        // being queued.  TextureView costs one composition step but lets the
+        // camera picture and touch controls remain visible together.
+        video = new TextureView(this);
+        video.setOpaque(true);
         video.setBackgroundColor(Color.BLACK);
         video.setClickable(false);
-        video.setZOrderMediaOverlay(false);
-        video.getHolder().addCallback(new SurfaceHolder.Callback() {
-            @Override public void surfaceCreated(SurfaceHolder holder) {
-                videoSurface = holder.getSurface();
+        video.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+            @Override public void onSurfaceTextureAvailable(SurfaceTexture texture, int w, int h) {
+                if (videoSurface != null) videoSurface.release();
+                videoSurface = new Surface(texture);
                 if (resumed) {
                     String host = activeVideoHost.length() == 0 && transport != null
                             ? transport.activeHost() : activeVideoHost;
@@ -115,17 +118,30 @@ public class RoverControlActivity extends BaseActivity implements
                     }
                 }
             }
-            @Override public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) {
-                videoSurface = holder.getSurface();
-            }
-            @Override public void surfaceDestroyed(SurfaceHolder holder) {
+            @Override public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int w, int h) {}
+            @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
                 if (videoWebRtcFallback) {
                     videoStarting = false;
                     ++videoGeneration;
                 }
                 ui.removeCallbacks(bufferWatchdog);
                 releasePlayerAsync();
+                if (videoSurface != null) videoSurface.release();
                 videoSurface = null;
+                return true;
+            }
+            @Override public void onSurfaceTextureUpdated(SurfaceTexture texture) {
+                // Some API-22 MediaCodec implementations never dispatch
+                // ExoPlayer's first-frame callback. SurfaceTexture update is
+                // the compositor-level proof that a frame is actually visible.
+                if (resumed && videoWebRtcFallback && videoStarting) {
+                    videoStarting = false;
+                    if (videoFirstFrameMs == 0) videoFirstFrameMs = System.currentTimeMillis();
+                    long cost = videoConnectStartMs > 0
+                            ? videoFirstFrameMs - videoConnectStartMs : 0;
+                    controls.setVideoText(videoLabel((rtspTcpFallback ? "RTSP TCP" : "RTSP UDP")
+                            + " 在线 · 首帧 " + cost + "ms"));
+                }
             }
         });
         root.addView(video, new FrameLayout.LayoutParams(
@@ -214,7 +230,7 @@ public class RoverControlActivity extends BaseActivity implements
         }
         if (statusClient != null) statusClient.stop();
         releaseVideo();
-        // SurfaceView owns this Surface; surfaceDestroyed() clears it.
+        // TextureView owns the SurfaceTexture; its listener clears our Surface.
         controls.stopAndReset();
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         super.onPause();
