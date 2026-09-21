@@ -53,6 +53,7 @@ public class RoverControlActivity extends BaseActivity implements
     private volatile int videoGeneration;
     private SurfaceViewRenderer webRtcView;
     private K230WebRtcReceiver webRtcReceiver;
+    private volatile int webRtcGeneration;
     private boolean rtspTcpFallback;
     private boolean videoWebRtcFallback;
     private boolean webRtcFirst;
@@ -120,8 +121,8 @@ public class RoverControlActivity extends BaseActivity implements
         root.addView(webRtcView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         webRtcReceiver = new K230WebRtcReceiver(this, new K230WebRtcReceiver.Listener() {
-            @Override public void onState(String state, String detail) {
-                if (!resumed || videoWebRtcFallback) return;
+            @Override public void onState(String state, String detail, int generation) {
+                if (generation != webRtcGeneration || !resumed || videoWebRtcFallback) return;
                 if ("connected".equals(state)) {
                     controls.setVideoText("WebRTC 连接中");
                 } else if ("reconnecting".equals(state)) {
@@ -139,8 +140,8 @@ public class RoverControlActivity extends BaseActivity implements
                     controls.setVideoText("WebRTC " + state);
                 }
             }
-            @Override public void onFirstFrame() {
-                if (resumed && !videoWebRtcFallback) {
+            @Override public void onFirstFrame(int generation) {
+                if (generation == webRtcGeneration && resumed && !videoWebRtcFallback) {
                     webRtcFirst = true;
                     videoStarting = false;
                     videoFirstFrameMs = System.currentTimeMillis();
@@ -204,6 +205,10 @@ public class RoverControlActivity extends BaseActivity implements
     }
 
     @Override protected void onDestroy() {
+        // Do not rely solely on onPause(): task removal and process teardown
+        // can reach onDestroy with the control threads still alive.
+        if (transport != null) transport.stop();
+        if (statusClient != null) statusClient.stop();
         releaseVideo();
         if (webRtcReceiver != null) {
             webRtcReceiver.dispose();
@@ -272,8 +277,15 @@ public class RoverControlActivity extends BaseActivity implements
     }
 
     private void startVideo(String host) {
-        if (!resumed || host == null || host.trim().length() == 0) {
-            if (host == null || host.trim().length() == 0) controls.setVideoText("视频等待 K230");
+        if (!resumed) return;
+        if (host == null || host.trim().length() == 0) {
+            // Do not leave the previous target's decoder/WebRTC peer running
+            // when discovery is disabled or the target is cleared.
+            activeVideoHost = "";
+            releaseVideo();
+            video.setVisibility(View.VISIBLE);
+            webRtcView.setVisibility(View.GONE);
+            if (controls != null) controls.setVideoText("视频等待 K230");
             return;
         }
         final String targetHost = host.trim();
@@ -309,7 +321,7 @@ public class RoverControlActivity extends BaseActivity implements
         }
         video.setVisibility(View.GONE);
         webRtcView.setVisibility(View.VISIBLE);
-        if (webRtcReceiver != null) webRtcReceiver.start(targetHost);
+        if (webRtcReceiver != null) webRtcGeneration = webRtcReceiver.start(targetHost);
         // A missing WebRTC module is reported by the capability probe. Keep a
         // short deadline for a broken/old peer so the control page still gets
         // a usable RTSP picture without waiting indefinitely.
@@ -344,8 +356,13 @@ public class RoverControlActivity extends BaseActivity implements
 
     private void prepareVideoOnWorker(final int generation, String url, Surface surface,
                                       final boolean forceTcp) {
-        releasePlayerOnWorker();
         if (!isVideoCurrent(generation) || surface == null) return;
+        // Check the generation before releasing the current player. A stale
+        // prepare task can remain queued on the RTSP worker after a target
+        // change; releasing first would tear down the newer generation's
+        // player when that stale task finally runs.
+        releasePlayerOnWorker();
+        if (!isVideoCurrent(generation)) return;
         try {
             DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
                     .setBufferDurationsMs(50, 150, 25, 25)
@@ -399,7 +416,10 @@ public class RoverControlActivity extends BaseActivity implements
             });
             RtspMediaSource source = new RtspMediaSource.Factory()
                     .setForceUseRtpTcp(forceTcp)
-                    .setTimeoutMs(1200)
+                    // Keep RTSP control/RTP setup tolerant of the K230 waking
+                    // its encoder after the socket handshake. The player
+                    // still uses the small live buffer below for latency.
+                    .setTimeoutMs(3000)
                     .createMediaSource(MediaItem.fromUri(url));
             mp.setVideoSurface(surface);
             mp.setMediaSource(source);

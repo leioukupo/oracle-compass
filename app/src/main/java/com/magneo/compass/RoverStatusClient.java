@@ -18,17 +18,20 @@ public final class RoverStatusClient {
     private static final int PORT = 7788;
     private final Listener listener;
     private volatile boolean running;
+    /** Prevents an interrupted worker from becoming live again after restart. */
+    private volatile int lifecycleGeneration;
     private volatile String host = "";
     private Thread thread;
-    private Socket socket;
+    private volatile Socket socket;
 
     public RoverStatusClient(Listener l) { listener = l; }
 
     public synchronized void start(String h) {
         host = h == null ? "" : h.trim();
         if (running) return;
+        final int generation = ++lifecycleGeneration;
         running = true;
-        thread = new Thread(this::runLoop, "rover-k230-status");
+        thread = new Thread(() -> runLoop(generation), "rover-k230-status");
         thread.setDaemon(true);
         thread.start();
     }
@@ -40,6 +43,7 @@ public final class RoverStatusClient {
     }
 
     public synchronized void stop() {
+        ++lifecycleGeneration;
         running = false;
         Socket s = socket;
         socket = null;
@@ -48,8 +52,8 @@ public final class RoverStatusClient {
         thread = null;
     }
 
-    private void runLoop() {
-        while (running) {
+    private void runLoop(final int generation) {
+        while (running && generation == lifecycleGeneration) {
             String h = host;
             if (h.length() == 0) {
                 publish("K230 状态未连接");
@@ -65,11 +69,14 @@ public final class RoverStatusClient {
                         s.getInputStream(), StandardCharsets.UTF_8));
                 publish("K230 状态在线");
                 String line;
-                while (running && h.equals(host) && (line = reader.readLine()) != null) {
+                while (running && generation == lifecycleGeneration &&
+                        h.equals(host) && (line = reader.readLine()) != null) {
                     parse(line);
                 }
             } catch (Exception e) {
-                if (running) publish("K230 状态不可用");
+                if (running && generation == lifecycleGeneration && h.equals(host)) {
+                    publish("K230 状态不可用");
+                }
             } finally {
                 if (socket == s) socket = null;
                 try { s.close(); } catch (Exception ignored) {}

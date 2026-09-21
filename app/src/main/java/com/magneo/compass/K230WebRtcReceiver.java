@@ -37,12 +37,15 @@ import okhttp3.Response;
 /** Receives the K230 offer as a LAN WebRTC video stream. Control stays UDP. */
 public final class K230WebRtcReceiver {
     public interface Listener {
-        void onState(String state, String detail);
-        void onFirstFrame();
+        void onState(String state, String detail, int generation);
+        void onFirstFrame(int generation);
     }
 
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
-    private static final long HTTP_TIMEOUT_MS = 1200L;
+    // SDP/ICE are control-plane operations; allowing a couple of seconds here
+    // prevents a fragmented answer on Android 5.1 from being mistaken for a
+    // dead K230.  Video packets never use this client.
+    private static final long HTTP_TIMEOUT_MS = 3000L;
     private static final long RECONNECT_MS = 1000L;
     private static final int MAX_CONNECT_ATTEMPTS = 3;
 
@@ -75,7 +78,7 @@ public final class K230WebRtcReceiver {
     private SurfaceViewRenderer renderer;
     private boolean rendererInitialized;
     private String host = "";
-    private int generation;
+    private volatile int generation;
     private boolean firstFrame;
     private boolean reconnectScheduled;
     private int connectAttempts;
@@ -103,15 +106,18 @@ public final class K230WebRtcReceiver {
         return egl == null ? null : egl.getEglBaseContext();
     }
 
-    public void start(String targetHost) {
+    public int start(String targetHost) {
         final String next = targetHost == null ? "" : targetHost.trim();
+        final int run = ++generation;
         if (next.length() == 0) {
-            publish("idle", "等待 K230 地址");
-            return;
+            stopped.set(true);
+            stopPeerOnly();
+            publish("idle", "等待 K230 地址", run);
+            return run;
         }
         final String previous = host;
         stopPeerOnly();
-        final int run = ++generation;
+        synchronized (peerLock) { reconnectScheduled = false; }
         host = next;
         connectAttempts = 0;
         stopped.set(false);
@@ -121,20 +127,23 @@ public final class K230WebRtcReceiver {
                 connect(run, next);
             });
         } catch (java.util.concurrent.RejectedExecutionException ignored) {
-            publish("error", "WebRTC 线程已退出");
+            publish("error", "WebRTC 线程已退出", run);
         }
+        return run;
     }
 
     public void stop() {
         stopped.set(true);
-        ++generation;
+        final int run = ++generation;
+        final String target = host;
+        synchronized (peerLock) { reconnectScheduled = false; }
         stopPeerOnly();
         try {
-            worker.execute(() -> postClose(host));
+            worker.execute(() -> postClose(target));
         } catch (java.util.concurrent.RejectedExecutionException ignored) {
             // dispose() may have already shut down the worker.
         }
-        publish("stopped", "");
+        publish("stopped", "", run);
     }
 
     public void dispose() {
@@ -201,7 +210,7 @@ public final class K230WebRtcReceiver {
     private void connect(final int run, final String target) {
         if (stopped.get() || run != generation) return;
         connectAttempts++;
-        publish("connecting", target);
+        publish("connecting", target, run);
         try {
             // Do not load/initialize the native WebRTC stack on a K230 image
             // that advertises the HTTP endpoint but has no `webrtc` module.
@@ -234,7 +243,7 @@ public final class K230WebRtcReceiver {
                 @Override public void onCreateSuccess(SessionDescription sd) {}
                 @Override public void onCreateFailure(String error) {}
             }, new SessionDescription(SessionDescription.Type.OFFER, sdp));
-            if (!remoteSet.await(1500L, TimeUnit.MILLISECONDS)) throw new IOException("设置 K230 offer 超时");
+            if (!remoteSet.await(3000L, TimeUnit.MILLISECONDS)) throw new IOException("设置 K230 offer 超时");
             if (remoteError[0].length() > 0) throw new IOException("设置 K230 offer 失败: " + remoteError[0]);
 
             final CountDownLatch answerSet = new CountDownLatch(1);
@@ -252,12 +261,12 @@ public final class K230WebRtcReceiver {
                 @Override public void onSetSuccess() {}
                 @Override public void onSetFailure(String error) {}
             }, new MediaConstraints());
-            if (!answerSet.await(1500L, TimeUnit.MILLISECONDS)) throw new IOException("创建 answer 超时");
+            if (!answerSet.await(3000L, TimeUnit.MILLISECONDS)) throw new IOException("创建 answer 超时");
             if (answerError[0].length() > 0) throw new IOException("创建 answer 失败: " + answerError[0]);
 
             // K230 uses non-trickle LAN signaling: wait until all candidates
             // are embedded in the local SDP before posting the answer.
-            iceGathered.await(1500L, TimeUnit.MILLISECONDS);
+            iceGathered.await(3000L, TimeUnit.MILLISECONDS);
             SessionDescription local = created.getLocalDescription();
             if (local == null) throw new IOException("本地 answer 为空");
             if (stopped.get() || run != generation) return;
@@ -267,18 +276,18 @@ public final class K230WebRtcReceiver {
             postJson("http://" + target + ":8080/api/webrtc/answer", answer);
             if (!stopped.get() && run == generation) {
                 connectAttempts = 0;
-                publish("connected", target);
+                publish("connected", target, run);
             }
         } catch (WebRtcUnavailableException e) {
             if (stopped.get() || run != generation) return;
-            publish("unavailable", e.getMessage());
+            publish("unavailable", e.getMessage(), run);
         } catch (Exception e) {
             if (stopped.get() || run != generation) return;
             String detail = e.getMessage() == null ? e.toString() : e.getMessage();
             if (connectAttempts >= MAX_CONNECT_ATTEMPTS) {
-                publish("error", detail);
+                publish("error", detail, run);
             } else {
-                publish("reconnecting", detail);
+                publish("reconnecting", detail, run);
                 scheduleReconnect(run, target);
             }
         } catch (Throwable e) {
@@ -286,7 +295,7 @@ public final class K230WebRtcReceiver {
             // instead of an Exception. Convert that failure to the normal RTSP
             // fallback path instead of allowing the car-control Activity to die.
             if (stopped.get() || run != generation) return;
-            publish("error", e.toString());
+            publish("error", e.toString(), run);
         }
     }
 
@@ -307,43 +316,56 @@ public final class K230WebRtcReceiver {
                     if ((s == PeerConnection.IceConnectionState.FAILED ||
                             s == PeerConnection.IceConnectionState.DISCONNECTED) &&
                             !stopped.get() && run == generation) {
-                        publish("reconnecting", s.toString());
+                        publish("reconnecting", s.toString(), run);
                         scheduleReconnect(run, host);
                     }
                 }
                 @Override public void onSignalingChange(PeerConnection.SignalingState s) {}
                 @Override public void onIceConnectionReceivingChange(boolean b) {}
-                @Override public void onAddStream(MediaStream s) {}
+                @Override public void onAddStream(MediaStream s) {
+                    // Keep compatibility with WebRTC builds that deliver a
+                    // remote track through the legacy stream callback
+                    // instead of Unified Plan's onTrack callback.
+                    if (s != null && s.videoTracks != null) {
+                        for (VideoTrack track : s.videoTracks) attach(run, track);
+                    }
+                }
                 @Override public void onRemoveStream(MediaStream s) {}
                 @Override public void onDataChannel(org.webrtc.DataChannel d) {}
                 @Override public void onRenegotiationNeeded() {}
                 @Override public void onAddTrack(RtpReceiver receiver, MediaStream[] streams) {
-                    attach(receiver.track());
+                    attach(run, receiver.track());
                 }
                 @Override public void onRemoveTrack(RtpReceiver receiver) {}
                 @Override public void onTrack(RtpTransceiver transceiver) {
-                    attach(transceiver.getReceiver().track());
+                    attach(run, transceiver.getReceiver().track());
                 }
             });
             if (peer == null) return null;
-            try {
-                peer.addTransceiver(MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
-                        new RtpTransceiver.RtpTransceiverInit(
-                                RtpTransceiver.RtpTransceiverDirection.RECV_ONLY));
-            } catch (Exception ignored) {}
+            // Do not add a local transceiver before applying K230's offer.
+            // The offer already contains the single send-only video m-line;
+            // Unified Plan creates its receive transceiver automatically.
+            // Adding another RECV_ONLY transceiver here produces a second
+            // m-line in the Android answer on some WebRTC 114 builds, which
+            // leaves the K230 peer connected but no video track delivered.
             return peer;
         }
     }
 
-    private void attach(MediaStreamTrack track) {
+    private void attach(final int run, MediaStreamTrack track) {
         if (!(track instanceof VideoTrack)) return;
         final VideoTrack next = (VideoTrack) track;
         final VideoSink nextSink = frame -> {
+            if (stopped.get() || run != generation) return;
             SurfaceViewRenderer r = renderer;
             if (r != null) r.onFrame(frame);
             if (!firstFrame) {
                 firstFrame = true;
-                if (listener != null) main.post(listener::onFirstFrame);
+                if (listener != null) {
+                    main.post(() -> {
+                        if (!stopped.get() && run == generation) listener.onFirstFrame(run);
+                    });
+                }
             }
         };
         VideoTrack old = videoTrack;
@@ -410,7 +432,9 @@ public final class K230WebRtcReceiver {
         catch (Exception ignored) {}
     }
 
-    private void publish(final String state, final String detail) {
-        if (listener != null) main.post(() -> listener.onState(state, detail == null ? "" : detail));
+    private void publish(final String state, final String detail, final int run) {
+        if (listener != null) main.post(() -> {
+            if (run == generation) listener.onState(state, detail == null ? "" : detail, run);
+        });
     }
 }

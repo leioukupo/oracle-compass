@@ -29,6 +29,8 @@ public final class RoverUdpTransport {
     private final WifiManager wifi;
     private final Object sendLock = new Object();
     private volatile boolean running;
+    /** Invalidates send/discovery workers across a fast pause/resume cycle. */
+    private volatile int lifecycleGeneration;
     private volatile int lx, ly, rx, ry;
     private volatile boolean swL, swR;
     private volatile String configuredHost = "";
@@ -36,6 +38,7 @@ public final class RoverUdpTransport {
     private volatile boolean autoDiscovery = true;
     private volatile boolean broadcast = true;
     private volatile String discoveredHost = "";
+    private volatile long discoveredAtMs;
     private volatile DatagramSocket socket;
     private volatile DatagramSocket discoverySocket;
     private Thread sendThread;
@@ -60,6 +63,7 @@ public final class RoverUdpTransport {
     public void start() {
         if (running) return;
         reloadPrefs();
+        final int generation = ++lifecycleGeneration;
         running = true;
         try {
             socket = new DatagramSocket();
@@ -68,11 +72,19 @@ public final class RoverUdpTransport {
             socket = null;
             recordError(e);
         }
+        if (socket == null) {
+            running = false;
+            notifyState();
+            return;
+        }
+        rateWindowSent = 0;
+        rate = 0f;
         rateWindowAt = SystemClock.elapsedRealtime();
-        sendThread = new Thread(this::sendLoop, "rover-joy-udp");
+        final DatagramSocket sendSocket = socket;
+        sendThread = new Thread(() -> sendLoop(generation, sendSocket), "rover-joy-udp");
         sendThread.setDaemon(true);
         sendThread.start();
-        discoveryThread = new Thread(this::discoveryLoop, "rover-k230-discovery");
+        discoveryThread = new Thread(() -> discoveryLoop(generation), "rover-k230-discovery");
         discoveryThread.setDaemon(true);
         discoveryThread.start();
         notifyState();
@@ -87,6 +99,11 @@ public final class RoverUdpTransport {
             resolvedHost = "";
             resolvedAddress = null;
         }
+        // A manual target change must not keep sending to a stale address
+        // learned from a previous K230 discovery beacon.  The next beacon can
+        // repopulate it when automatic discovery remains enabled.
+        discoveredHost = "";
+        discoveredAtMs = 0L;
         if (listener != null) listener.onTargetChanged(activeHost());
     }
 
@@ -109,7 +126,11 @@ public final class RoverUdpTransport {
     public void stop() {
         if (!running && socket == null && discoverySocket == null) return;
         setInput(0, 0, 0, 0, false, false);
+        final String stopTarget = activeHost();
+        ++lifecycleGeneration;
         running = false;
+        discoveredHost = "";
+        discoveredAtMs = 0L;
         DatagramSocket ds = discoverySocket;
         discoverySocket = null;
         if (ds != null) ds.close();
@@ -120,7 +141,7 @@ public final class RoverUdpTransport {
         // exactly while leaving the rover page.
         if (s != null) {
             Thread neutral = new Thread(() -> {
-                sendNeutralBurst(s);
+                sendNeutralBurst(s, stopTarget);
                 try { s.close(); } catch (Exception ignored) {}
             }, "rover-neutral-stop");
             neutral.setDaemon(true);
@@ -135,13 +156,15 @@ public final class RoverUdpTransport {
 
     public boolean isRunning() { return running; }
     public String activeHost() {
-        if (autoDiscovery && validHost(discoveredHost)) return discoveredHost;
+        long seen = discoveredAtMs;
+        if (autoDiscovery && validHost(discoveredHost) && seen > 0L &&
+                SystemClock.elapsedRealtime() - seen <= 3500L) return discoveredHost;
         return configuredHost == null ? "" : configuredHost.trim();
     }
 
-    private void sendLoop() {
+    private void sendLoop(final int generation, final DatagramSocket sendSocket) {
         long next = SystemClock.elapsedRealtime();
-        while (running) {
+        while (running && generation == lifecycleGeneration) {
             long now = SystemClock.elapsedRealtime();
             if (now < next) {
                 try { Thread.sleep(Math.min(20L, next - now)); }
@@ -150,7 +173,7 @@ public final class RoverUdpTransport {
             }
             next += PERIOD_MS;
             if (next < now - PERIOD_MS * 4L) next = now + PERIOD_MS;
-            sendFrame(socket, lx, ly, rx, ry, swL, swR);
+            sendFrame(sendSocket, lx, ly, rx, ry, swL, swR);
             if (now - rateWindowAt >= 1000L) {
                 rate = rateWindowSent * 1000f / Math.max(1L, now - rateWindowAt);
                 rateWindowSent = 0;
@@ -161,9 +184,14 @@ public final class RoverUdpTransport {
     }
 
     private void sendFrame(DatagramSocket s, int leftX, int leftY, int rightX, int rightY,
-                            boolean leftButton, boolean rightButton) {
+                           boolean leftButton, boolean rightButton) {
+        sendFrame(s, leftX, leftY, rightX, rightY, leftButton, rightButton, null);
+    }
+
+    private void sendFrame(DatagramSocket s, int leftX, int leftY, int rightX, int rightY,
+                           boolean leftButton, boolean rightButton, String targetOverride) {
         if (s == null) return;
-        String target = activeHost();
+        String target = validHost(targetOverride) ? targetOverride : activeHost();
         try {
             WifiInfo wi = wifi == null ? null : wifi.getConnectionInfo();
             int rssi = wi == null ? 0 : wi.getRssi();
@@ -213,7 +241,13 @@ public final class RoverUdpTransport {
     }
 
     private void sendNeutralBurst(DatagramSocket s) {
-        for (int i = 0; i < 3; i++) sendFrame(s, 0, 0, 0, 0, false, false);
+        sendNeutralBurst(s, null);
+    }
+
+    private void sendNeutralBurst(DatagramSocket s, String targetOverride) {
+        for (int i = 0; i < 3; i++) {
+            sendFrame(s, 0, 0, 0, 0, false, false, targetOverride);
+        }
     }
 
     private void sendTo(DatagramSocket s, byte[] data, String host, int destinationPort)
@@ -231,7 +265,7 @@ public final class RoverUdpTransport {
         s.send(new DatagramPacket(data, data.length, address, destinationPort));
     }
 
-    private void discoveryLoop() {
+    private void discoveryLoop(final int generation) {
         DatagramSocket s = null;
         try {
             s = new DatagramSocket(null);
@@ -240,7 +274,7 @@ public final class RoverUdpTransport {
             s.setSoTimeout(1000);
             discoverySocket = s;
             byte[] buf = new byte[512];
-            while (running) {
+            while (running && generation == lifecycleGeneration) {
                 try {
                     DatagramPacket p = new DatagramPacket(buf, buf.length);
                     s.receive(p);
@@ -252,11 +286,15 @@ public final class RoverUdpTransport {
                     if (!validHost(host)) host = p.getAddress().getHostAddress();
                     if (validHost(host) && !host.equals(discoveredHost)) {
                         discoveredHost = host;
+                        discoveredAtMs = SystemClock.elapsedRealtime();
                         synchronized (sendLock) {
                             resolvedHost = "";
                             resolvedAddress = null;
                         }
                         if (listener != null) listener.onTargetChanged(activeHost());
+                    } else if (validHost(host)) {
+                        // Refresh liveness even when the IP did not change.
+                        discoveredAtMs = SystemClock.elapsedRealtime();
                     }
                 } catch (SocketTimeoutException ignored) {
                     // Wake periodically to notice stop().
