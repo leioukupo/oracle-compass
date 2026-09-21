@@ -81,7 +81,12 @@ public class RoverControlActivity extends BaseActivity implements
         videoWorker = new Handler(videoThread.getLooper());
 
         root = new FrameLayout(this);
-        root.setBackgroundColor(Color.BLACK);
+        // SurfaceView is deliberately below the activity window on Android 5.1.
+        // An opaque root background would therefore cover every decoded frame
+        // even though MediaCodec is successfully queueing buffers.  Keep the
+        // window content transparent; the video surface itself still supplies
+        // a black fallback until its first frame arrives.
+        root.setBackgroundColor(Color.TRANSPARENT);
 
         // SurfaceView lets MediaCodec render into a dedicated hardware layer.
         // TextureView adds a GPU composition/copy step on this Android 5.1
