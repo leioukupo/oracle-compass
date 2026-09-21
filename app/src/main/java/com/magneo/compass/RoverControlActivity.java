@@ -3,9 +3,11 @@ package com.magneo.compass;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -36,7 +38,9 @@ import org.webrtc.SurfaceViewRenderer;
 public class RoverControlActivity extends BaseActivity implements
         RoverUdpTransport.Listener, RoverStatusClient.Listener {
     public static final String EXTRA_OPEN_SETTINGS = "open_rover_settings";
+    private static final String TAG = "RoverControl";
     private static final long WEBRTC_FALLBACK_DELAY_MS = 7000L;
+    private static final int MIN_WEBRTC_API = 23;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private FrameLayout root;
     private SurfaceView video;
@@ -308,10 +312,13 @@ public class RoverControlActivity extends BaseActivity implements
         videoStarting = true;
         videoWebRtcFallback = false;
         webRtcFirst = false;
-        rtspTcpFallback = false;
+        // Android 5.1 devices commonly receive the RTSP control handshake but
+        // cannot receive the server's RTP UDP ports over Wi-Fi.  Interleaved
+        // RTP over the RTSP TCP connection is reliable on this network.
+        rtspTcpFallback = true;
         controls.setVideoText("视频连接中");
         releasePlayerAsync();
-        if (!Prefs.ROVER_VIDEO_WEBRTC.equals(Prefs.roverVideoMode(this))) {
+        if (!shouldUseWebRtc()) {
             videoWebRtcFallback = true;
             if (webRtcReceiver != null) webRtcReceiver.stop();
             video.setVisibility(View.VISIBLE);
@@ -351,6 +358,7 @@ public class RoverControlActivity extends BaseActivity implements
         if (worker == null) { videoFailed(generation); return; }
         if (videoConnectStartMs <= 0) videoConnectStartMs = System.currentTimeMillis();
         controls.setVideoText(rtspTcpFallback ? "RTSP TCP 连接中" : "RTSP UDP 连接中");
+        Log.i(TAG, "open " + (rtspTcpFallback ? "TCP" : "UDP") + " " + url);
         worker.post(() -> prepareVideoOnWorker(generation, url, surface, rtspTcpFallback));
     }
 
@@ -405,8 +413,12 @@ public class RoverControlActivity extends BaseActivity implements
                 }
                 @Override public void onPlayerError(PlaybackException error) {
                     if (!isVideoCurrent(generation) || mediaPlayer != mp) return;
-                    if (!forceTcp) {
-                        rtspTcpFallback = true;
+                    Log.e(TAG, "RTSP " + (forceTcp ? "TCP" : "UDP") + " error: " + error, error);
+                    if (forceTcp) {
+                        // TCP is the first choice on the control tablet.  Give
+                        // UDP one chance for servers that do not implement
+                        // interleaved RTP, then report a stable failure.
+                        rtspTcpFallback = false;
                         markVideoReconnect();
                         ui.post(() -> startRtspVideo(activeVideoHost));
                     } else {
@@ -426,8 +438,9 @@ public class RoverControlActivity extends BaseActivity implements
             mp.prepare();
             mp.play();
         } catch (Exception e) {
-            if (!forceTcp) {
-                rtspTcpFallback = true;
+            Log.e(TAG, "RTSP " + (forceTcp ? "TCP" : "UDP") + " setup failed", e);
+            if (forceTcp) {
+                rtspTcpFallback = false;
                 markVideoReconnect();
                 ui.post(() -> startRtspVideo(activeVideoHost));
             } else {
@@ -440,8 +453,15 @@ public class RoverControlActivity extends BaseActivity implements
         return resumed && generation == videoGeneration;
     }
 
+    /** WebRTC native rendering is not stable on the API-22 control tablet. */
+    private boolean shouldUseWebRtc() {
+        return Build.VERSION.SDK_INT >= MIN_WEBRTC_API &&
+                Prefs.ROVER_VIDEO_WEBRTC.equals(Prefs.roverVideoMode(this));
+    }
+
     private void videoFailed(int generation) {
         if (generation != videoGeneration) return;
+        Log.w(TAG, "video failed generation=" + generation + " host=" + activeVideoHost);
         videoStarting = false;
         ++videoGeneration;
         releasePlayerAsync();
@@ -491,8 +511,11 @@ public class RoverControlActivity extends BaseActivity implements
                 return;
             }
             // Ignore ExoPlayer's TIME_UNSET/TIME_END_OF_SOURCE sentinels; only
-            // a finite live queue above 300ms should trigger a reconnect.
-            if (buffered > 300L && buffered < 5000L && !videoStarting) {
+            // a finite live queue above 5s should trigger a reconnect.
+            // A few hundred milliseconds is normal for ExoPlayer's RTSP
+            // queue, especially while the decoder waits for an IDR frame. Do
+            // not tear down a healthy stream merely because it is buffered.
+            if (buffered > 5000L && buffered < 30000L && !videoStarting) {
                 // A single large buffer reading is normal while RTSP starts.
                 // Reconnect only after four consecutive 500ms readings so a
                 // transient Wi-Fi burst cannot create a reconnect/keyframe
@@ -545,13 +568,13 @@ public class RoverControlActivity extends BaseActivity implements
         rtspPath.setText(Prefs.roverRtspPath(this));
         final CheckBox discovery = check("自动发现（7789）", Prefs.roverAutoDiscovery(this));
         final CheckBox broadcast = check("无目标时允许广播", Prefs.roverBroadcast(this));
-        final CheckBox webRtc = check("优先 WebRTC（失败回退 RTSP）",
-                Prefs.ROVER_VIDEO_WEBRTC.equals(Prefs.roverVideoMode(this)));
+        final CheckBox webRtc = check("优先 WebRTC（Android 6+，失败回退 RTSP）",
+                shouldUseWebRtc());
         final CheckBox leftInvert = check("左摇杆 Y 轴反向", Prefs.roverLeftYInverted(this));
         final CheckBox rightInvert = check("右摇杆 Y 轴反向", Prefs.roverRightYInverted(this));
         new RoundDialog(this)
                 .title("车控设置")
-                .text("UDP 5555 协议兼容 ESP32；WebRTC 优先，失败自动回退 RTSP")
+                .text("UDP 5555 协议兼容 ESP32；默认 RTSP/TCP，WebRTC 仅在兼容设备上启用")
                 .field(host)
                 .field(port)
                 .field(rtspPort)

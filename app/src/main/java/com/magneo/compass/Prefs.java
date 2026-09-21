@@ -152,7 +152,9 @@ public class Prefs {
     public static final String DEFAULT_ROVER_RTSP_PATH = "/test";
     public static final String ROVER_VIDEO_WEBRTC = "webrtc";
     public static final String ROVER_VIDEO_RTSP = "rtsp";
-    public static final String DEFAULT_ROVER_VIDEO_MODE = ROVER_VIDEO_WEBRTC;
+    // RTSP is the compatible baseline for the MT6580/API-22 control tablet.
+    // WebRTC remains available as an explicit option on newer devices.
+    public static final String DEFAULT_ROVER_VIDEO_MODE = ROVER_VIDEO_RTSP;
     public static final String DEFAULT_NETEASE_QUALITY = "standard";
     public static final String MUSIC_SOURCE_LOCAL = "local";
     public static final String MUSIC_SOURCE_NETEASE = "netease";
