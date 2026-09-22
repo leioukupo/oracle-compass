@@ -40,8 +40,9 @@ public class RoverControlActivity extends BaseActivity implements
         RoverUdpTransport.Listener, RoverStatusClient.Listener {
     public static final String EXTRA_OPEN_SETTINGS = "open_rover_settings";
     private static final String TAG = "RoverControl";
-    private static final long WEBRTC_FALLBACK_DELAY_MS = 7000L;
-    private static final int MIN_WEBRTC_API = 23;
+    private static final long WEBRTC_FALLBACK_DELAY_MS = 5000L;
+    private static final long RTSP_FIRST_FRAME_TIMEOUT_MS = 2500L;
+    private static final int MIN_WEBRTC_API = 22;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private FrameLayout root;
     private TextureView video;
@@ -59,7 +60,7 @@ public class RoverControlActivity extends BaseActivity implements
     private SurfaceViewRenderer webRtcView;
     private K230WebRtcReceiver webRtcReceiver;
     private volatile int webRtcGeneration;
-    private boolean rtspTcpFallback;
+    private volatile boolean rtspTcpFallback;
     private boolean videoWebRtcFallback;
     private boolean webRtcFirst;
     private long videoConnectStartMs;
@@ -151,6 +152,9 @@ public class RoverControlActivity extends BaseActivity implements
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         webRtcView = new SurfaceViewRenderer(this);
+        // The camera is mounted upside down. Keep the controls upright and
+        // apply the same 180-degree correction used by the RTSP TextureView.
+        webRtcView.setRotation(180f);
         webRtcView.setVisibility(View.GONE);
         webRtcView.setBackgroundColor(Color.BLACK);
         root.addView(webRtcView, new FrameLayout.LayoutParams(
@@ -343,10 +347,10 @@ public class RoverControlActivity extends BaseActivity implements
         videoStarting = true;
         videoWebRtcFallback = false;
         webRtcFirst = false;
-        // Android 5.1 devices commonly receive the RTSP control handshake but
-        // cannot receive the server's RTP UDP ports over Wi-Fi.  Interleaved
-        // RTP over the RTSP TCP connection is reliable on this network.
-        rtspTcpFallback = true;
+        // UDP is the low-latency path. If this Android/Wi-Fi combination does
+        // not deliver the negotiated RTP ports, startRtspVideo() promotes the
+        // same generation to interleaved TCP after a short first-frame wait.
+        rtspTcpFallback = false;
         controls.setVideoText("视频连接中");
         releasePlayerAsync();
         if (!shouldUseWebRtc()) {
@@ -388,9 +392,27 @@ public class RoverControlActivity extends BaseActivity implements
         Handler worker = videoWorker;
         if (worker == null) { videoFailed(generation); return; }
         if (videoConnectStartMs <= 0) videoConnectStartMs = System.currentTimeMillis();
-        controls.setVideoText(rtspTcpFallback ? "RTSP TCP 连接中" : "RTSP UDP 连接中");
-        Log.i(TAG, "open " + (rtspTcpFallback ? "TCP" : "UDP") + " " + url);
-        worker.post(() -> prepareVideoOnWorker(generation, url, surface, rtspTcpFallback));
+        final boolean forceTcp = rtspTcpFallback;
+        controls.setVideoText(forceTcp ? "RTSP TCP 连接中" : "RTSP UDP 连接中");
+        Log.i(TAG, "open " + (forceTcp ? "TCP" : "UDP") + " " + url);
+        worker.post(() -> prepareVideoOnWorker(generation, url, surface, forceTcp));
+        // A UDP RTSP session can complete OPTIONS/DESCRIBE/SETUP and then
+        // wait forever for RTP on a Wi-Fi AP that filters the server ports.
+        // Bound that wait and promote to TCP; a TCP attempt gets the same
+        // bound so a dead camera cannot leave the activity stuck in READY.
+        ui.postDelayed(() -> {
+            if (!isVideoCurrent(generation) || !videoWebRtcFallback ||
+                    !videoStarting || rtspTcpFallback != forceTcp) return;
+            if (!forceTcp) {
+                rtspTcpFallback = true;
+                videoStarting = true;
+                markVideoReconnect();
+                releasePlayerAsync();
+                startRtspVideo(activeVideoHost);
+            } else {
+                videoFailed(generation);
+            }
+        }, RTSP_FIRST_FRAME_TIMEOUT_MS);
     }
 
     private void prepareVideoOnWorker(final int generation, String url, Surface surface,
@@ -404,7 +426,7 @@ public class RoverControlActivity extends BaseActivity implements
         if (!isVideoCurrent(generation)) return;
         try {
             DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(50, 150, 25, 25)
+                    .setBufferDurationsMs(40, 120, 0, 0)
                     .setPrioritizeTimeOverSizeThresholds(true)
                     .build();
             DefaultTrackSelector selector = new DefaultTrackSelector(this);
@@ -446,24 +468,30 @@ public class RoverControlActivity extends BaseActivity implements
                     if (!isVideoCurrent(generation) || mediaPlayer != mp) return;
                     Log.e(TAG, "RTSP " + (forceTcp ? "TCP" : "UDP") + " error: " + error, error);
                     if (forceTcp) {
-                        // TCP is the first choice on the control tablet.  Give
-                        // UDP one chance for servers that do not implement
-                        // interleaved RTP, then report a stable failure.
-                        rtspTcpFallback = false;
+                        // TCP is the final compatibility path. A failure here
+                        // must not bounce back to UDP forever.
+                        ui.post(() -> videoFailed(generation));
+                    } else {
+                        // UDP is preferred for latency. If the server or AP
+                        // cannot deliver RTP, retry the same generation over
+                        // interleaved TCP before declaring video unavailable.
+                        rtspTcpFallback = true;
+                        videoStarting = true;
                         markVideoReconnect();
                         ui.post(() -> startRtspVideo(activeVideoHost));
-                    } else {
-                        ui.post(() -> videoFailed(generation));
                     }
                 }
             });
+            MediaItem item = new MediaItem.Builder()
+                    .setUri(url)
+                    .setLiveConfiguration(new MediaItem.LiveConfiguration.Builder()
+                            .setTargetOffsetMs(120L)
+                            .build())
+                    .build();
             RtspMediaSource source = new RtspMediaSource.Factory()
                     .setForceUseRtpTcp(forceTcp)
-                    // Keep RTSP control/RTP setup tolerant of the K230 waking
-                    // its encoder after the socket handshake. The player
-                    // still uses the small live buffer below for latency.
-                    .setTimeoutMs(3000)
-                    .createMediaSource(MediaItem.fromUri(url));
+                    .setTimeoutMs(2000)
+                    .createMediaSource(item);
             mp.setVideoSurface(surface);
             mp.setMediaSource(source);
             mp.prepare();
@@ -471,11 +499,12 @@ public class RoverControlActivity extends BaseActivity implements
         } catch (Exception e) {
             Log.e(TAG, "RTSP " + (forceTcp ? "TCP" : "UDP") + " setup failed", e);
             if (forceTcp) {
-                rtspTcpFallback = false;
+                ui.post(() -> videoFailed(generation));
+            } else {
+                rtspTcpFallback = true;
+                videoStarting = true;
                 markVideoReconnect();
                 ui.post(() -> startRtspVideo(activeVideoHost));
-            } else {
-                ui.post(() -> videoFailed(generation));
             }
         }
     }
@@ -484,7 +513,7 @@ public class RoverControlActivity extends BaseActivity implements
         return resumed && generation == videoGeneration;
     }
 
-    /** WebRTC native rendering is not stable on the API-22 control tablet. */
+    /** API-22 is supported by the bundled WebRTC AAR; failed negotiation falls back to RTSP. */
     private boolean shouldUseWebRtc() {
         return Build.VERSION.SDK_INT >= MIN_WEBRTC_API &&
                 Prefs.ROVER_VIDEO_WEBRTC.equals(Prefs.roverVideoMode(this));
@@ -599,13 +628,13 @@ public class RoverControlActivity extends BaseActivity implements
         rtspPath.setText(Prefs.roverRtspPath(this));
         final CheckBox discovery = check("自动发现（7789）", Prefs.roverAutoDiscovery(this));
         final CheckBox broadcast = check("无目标时允许广播", Prefs.roverBroadcast(this));
-        final CheckBox webRtc = check("优先 WebRTC（Android 6+，失败回退 RTSP）",
+        final CheckBox webRtc = check("优先 WebRTC（Android 5.1+，失败回退 RTSP）",
                 shouldUseWebRtc());
         final CheckBox leftInvert = check("左摇杆 Y 轴反向", Prefs.roverLeftYInverted(this));
         final CheckBox rightInvert = check("右摇杆 Y 轴反向", Prefs.roverRightYInverted(this));
         new RoundDialog(this)
                 .title("车控设置")
-                .text("UDP 5555 协议兼容 ESP32；默认 RTSP/TCP，WebRTC 仅在兼容设备上启用")
+                .text("UDP 5555 协议兼容 ESP32；视频优先 WebRTC，失败回退 RTSP/UDP，再回退 TCP")
                 .field(host)
                 .field(port)
                 .field(rtspPort)
