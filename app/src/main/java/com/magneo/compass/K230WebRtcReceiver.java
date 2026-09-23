@@ -581,13 +581,10 @@ public final class K230WebRtcReceiver {
     }
 
     private void postClose(String target, int session) {
-        if (target == null || target.length() == 0) return;
-        try {
-            JSONObject close = new JSONObject();
-            if (session > 0) close.put("session", session);
-            postJson("http://" + target + ":8080/api/webrtc/close", close);
-        }
-        catch (Exception ignored) {}
+        // Do not call the K230 /close endpoint.  CanMV v1.8 native
+        // PeerConnection.close() can terminate the whole firmware process;
+        // the K230 bridge now retires/reuses the peer safely on the next
+        // offer, and local PeerConnection.close() is sufficient here.
     }
 
     private void publish(final String state, final String detail, final int run) {

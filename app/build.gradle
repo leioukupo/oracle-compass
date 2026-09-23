@@ -10,8 +10,8 @@ android {
         applicationId "com.magneo.compass"
         minSdk 22
         targetSdk 22
-        versionCode 21
-        versionName "0.3.10"
+        versionCode 22
+        versionName "0.3.11"
         ndk { abiFilters 'armeabi-v7a' }
         ndkVersion '27.0.12077973'
         externalNativeBuild {
