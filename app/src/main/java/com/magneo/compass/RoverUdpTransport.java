@@ -168,13 +168,13 @@ public final class RoverUdpTransport {
 
     public boolean isRunning() { return running; }
     public String activeHost() {
-        long seen = discoveredAtMs;
-        // When stopped, return the cached discovery immediately so onResume
-        // can restart video/control without waiting for the next beacon. Once
-        // running, retain the normal 3.5s liveness expiry.
-        if (autoDiscovery && validHost(discoveredHost) &&
-                (!running || (seen > 0L &&
-                        SystemClock.elapsedRealtime() - seen <= 3500L))) {
+        // Keep the last discovered address across pause/resume and brief
+        // beacon gaps. Falling back to broadcast after 3.5s made a reopened
+        // control page appear connected while every joystick frame missed
+        // the rover's unicast endpoint. A new beacon replaces this value, so
+        // retaining it is safe and gives control/video a stable target while
+        // the K230 is rebooting.
+        if (autoDiscovery && validHost(discoveredHost)) {
             return discoveredHost;
         }
         return configuredHost == null ? "" : configuredHost.trim();

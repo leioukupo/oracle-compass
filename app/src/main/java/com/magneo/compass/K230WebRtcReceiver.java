@@ -180,7 +180,13 @@ public final class K230WebRtcReceiver {
         stopped.set(false);
         try {
             worker.execute(() -> {
-                if (previous != null && previous.length() > 0) postClose(previous);
+                // stop() already queued the remote close for the same host
+                // during pause. Sending a second close immediately on resume
+                // can wedge older CanMV native PeerConnection builds and
+                // leaves the K230 HTTP/RTSP listeners unavailable.
+                if (previous != null && previous.length() > 0 && !previous.equals(next)) {
+                    postClose(previous);
+                }
                 connect(run, next);
             });
         } catch (java.util.concurrent.RejectedExecutionException ignored) {
@@ -190,15 +196,17 @@ public final class K230WebRtcReceiver {
     }
 
     public void stop() {
-        stopped.set(true);
+        boolean wasStopped = stopped.getAndSet(true);
         final int run = ++generation;
         final String target = host;
         synchronized (peerLock) { reconnectScheduled = false; }
         stopPeerOnly();
-        try {
-            worker.execute(() -> postClose(target));
-        } catch (java.util.concurrent.RejectedExecutionException ignored) {
-            // dispose() may have already shut down the worker.
+        if (!wasStopped) {
+            try {
+                worker.execute(() -> postClose(target));
+            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                // dispose() may have already shut down the worker.
+            }
         }
         publish("stopped", "", run);
     }
