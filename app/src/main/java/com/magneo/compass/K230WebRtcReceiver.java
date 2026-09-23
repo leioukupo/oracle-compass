@@ -113,10 +113,21 @@ public final class K230WebRtcReceiver {
             if ("H264".equalsIgnoreCase(name)) h264Payloads.add(payload);
         }
         if (h264Payloads.isEmpty()) h264Payloads.add("96");
-        StringBuilder out = new StringBuilder(sdp.length() + 32);
+        StringBuilder out = new StringBuilder(sdp.length() + 64);
         boolean changed = false;
+        boolean videoSection = false;
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i];
+            if (line.startsWith("m=")) {
+                videoSection = line.startsWith("m=video ");
+            } else if (videoSection && "a=sendrecv".equalsIgnoreCase(line.trim())) {
+                // K230 is a sender-only peer.  Older CanMV builds advertised
+                // sendrecv even though they have no local receive parameters;
+                // Android 5.1 rejects that offer with "failed to set remote
+                // video description send parameters" before it can answer.
+                line = "a=sendonly";
+                changed = true;
+            }
             for (String payload : h264Payloads) {
                 String prefix = "a=fmtp:" + payload + " ";
                 if (!line.startsWith(prefix)) continue;
