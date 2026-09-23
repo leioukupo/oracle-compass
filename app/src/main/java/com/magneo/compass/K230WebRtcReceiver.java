@@ -3,6 +3,7 @@ package com.magneo.compass;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import org.json.JSONObject;
 import org.webrtc.EglBase;
@@ -22,6 +23,9 @@ import org.webrtc.VideoTrack;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -36,6 +40,7 @@ import okhttp3.Response;
 
 /** Receives the K230 offer as a LAN WebRTC video stream. Control stays UDP. */
 public final class K230WebRtcReceiver {
+    private static final String TAG = "K230WebRtc";
     public interface Listener {
         void onState(String state, String detail, int generation);
         void onFirstFrame(int generation);
@@ -83,6 +88,58 @@ public final class K230WebRtcReceiver {
     private boolean reconnectScheduled;
     private int connectAttempts;
     private CountDownLatch iceGathered = new CountDownLatch(1);
+
+    /**
+     * Older K230 CanMV images omit packetization-mode from the H.264 fmtp
+     * attribute. Android WebRTC rejects that offer before it can create an
+     * answer, although the encoder actually sends packetized (mode 1) NALs.
+     * Normalize only H.264 fmtp lines and leave all other SDP untouched.
+     * Package visibility also lets a JVM unit test cover old-device offers.
+     */
+    static String normalizeH264Offer(String sdp) {
+        if (sdp == null || sdp.length() == 0) return sdp;
+        final boolean crlf = sdp.contains("\r\n");
+        String[] lines = sdp.split("\\r?\\n", -1);
+        Set<String> h264Payloads = new HashSet<>();
+        for (String line : lines) {
+            if (!line.startsWith("a=rtpmap:")) continue;
+            int space = line.indexOf(' ');
+            if (space <= "a=rtpmap:".length()) continue;
+            String payload = line.substring("a=rtpmap:".length(), space).trim();
+            String codec = line.substring(space + 1).trim();
+            int slash = codec.indexOf('/');
+            String name = slash >= 0 ? codec.substring(0, slash) : codec;
+            if ("H264".equalsIgnoreCase(name)) h264Payloads.add(payload);
+        }
+        if (h264Payloads.isEmpty()) h264Payloads.add("96");
+        StringBuilder out = new StringBuilder(sdp.length() + 32);
+        boolean changed = false;
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            for (String payload : h264Payloads) {
+                String prefix = "a=fmtp:" + payload + " ";
+                if (!line.startsWith(prefix)) continue;
+                String params = line.substring(prefix.length());
+                if (params.toLowerCase(Locale.US).contains("packetization-mode=")) break;
+                String lower = params.toLowerCase(Locale.US);
+                int profile = lower.indexOf("profile-level-id=");
+                if (profile >= 0) {
+                    int end = params.indexOf(';', profile);
+                    if (end < 0) end = params.length();
+                    line = prefix + params.substring(0, end)
+                            + ";packetization-mode=1" + params.substring(end);
+                } else {
+                    line = prefix + "packetization-mode=1;" + params;
+                }
+                changed = true;
+                break;
+            }
+            if (i > 0) out.append(crlf ? "\r\n" : "\n");
+            out.append(line);
+        }
+        if (changed) Log.i(TAG, "normalized H264 offer: packetization-mode=1");
+        return out.toString();
+    }
 
     public K230WebRtcReceiver(Context context, Listener listener) {
         this.context = context.getApplicationContext();
@@ -211,6 +268,7 @@ public final class K230WebRtcReceiver {
         if (stopped.get() || run != generation) return;
         connectAttempts++;
         publish("connecting", target, run);
+        String stage = "status";
         try {
             // Do not load/initialize the native WebRTC stack on a K230 image
             // that advertises the HTTP endpoint but has no `webrtc` module.
@@ -218,9 +276,14 @@ public final class K230WebRtcReceiver {
             // factory can crash the process before the RTSP fallback gets a
             // chance to run.  The K230 status endpoint remains available even
             // when WebRTC itself is disabled.
-            JSONObject capability = getJson("http://" + target + ":8080/api/webrtc/status");
+            String statusUrl = "http://" + target + ":8080/api/webrtc/status";
+            Log.i(TAG, "[" + run + "] status request " + statusUrl);
+            JSONObject capability = getJson(statusUrl);
             String capabilityError = capability.optString("last_error", "");
             String capabilityState = capability.optString("state", "");
+            Log.i(TAG, "[" + run + "] status available=" + capability.optInt("available", 0)
+                    + " state=" + capabilityState + " session="
+                    + capability.optInt("session", 0));
             if ((capability.has("available") && capability.optInt("available", 0) == 0) ||
                     "disabled".equalsIgnoreCase(capabilityState) ||
                     ("error".equalsIgnoreCase(capabilityState) &&
@@ -228,55 +291,104 @@ public final class K230WebRtcReceiver {
                     capabilityError.toLowerCase(java.util.Locale.US).contains("unavailable")) {
                 throw new WebRtcUnavailableException("K230 WebRTC 不可用，使用 RTSP");
             }
+            stage = "factory";
             ensureFactory();
-            JSONObject offerJson = getJson("http://" + target + ":8080/api/webrtc/offer");
-            final String sdp = offerJson.optString("sdp", "");
-            if (sdp.length() == 0) throw new IOException("K230 offer 为空");
+            stage = "offer";
+            String offerUrl = "http://" + target + ":8080/api/webrtc/offer";
+            Log.i(TAG, "[" + run + "] offer request " + offerUrl);
+            JSONObject offerJson = getJson(offerUrl);
+            final String rawSdp = offerJson.optString("sdp", "");
+            if (rawSdp.length() == 0) throw new IOException("K230 offer 为空");
+            final String sdp = normalizeH264Offer(rawSdp);
+            Log.i(TAG, "[" + run + "] offer received session="
+                    + offerJson.optInt("session", 0) + " sdp=" + rawSdp.length()
+                    + " normalized=" + !rawSdp.equals(sdp));
 
+            stage = "remote_sdp";
             final CountDownLatch remoteSet = new CountDownLatch(1);
             final String[] remoteError = {""};
             PeerConnection created = createPeer(run);
             if (created == null) throw new IOException("WebRTC PeerConnection 创建失败");
             created.setRemoteDescription(new SdpObserver() {
-                @Override public void onSetSuccess() { remoteSet.countDown(); }
-                @Override public void onSetFailure(String error) { remoteError[0] = error; remoteSet.countDown(); }
+                @Override public void onSetSuccess() {
+                    Log.i(TAG, "[" + run + "] remote SDP set success");
+                    remoteSet.countDown();
+                }
+                @Override public void onSetFailure(String error) {
+                    Log.e(TAG, "[" + run + "] remote SDP set failure: " + error);
+                    remoteError[0] = error; remoteSet.countDown();
+                }
                 @Override public void onCreateSuccess(SessionDescription sd) {}
                 @Override public void onCreateFailure(String error) {}
             }, new SessionDescription(SessionDescription.Type.OFFER, sdp));
-            if (!remoteSet.await(3000L, TimeUnit.MILLISECONDS)) throw new IOException("设置 K230 offer 超时");
-            if (remoteError[0].length() > 0) throw new IOException("设置 K230 offer 失败: " + remoteError[0]);
+            if (!remoteSet.await(3000L, TimeUnit.MILLISECONDS)) {
+                throw new IOException("WebRTC SDP 等待超时");
+            }
+            if (remoteError[0].length() > 0) {
+                throw new IOException("WebRTC SDP 失败: " + remoteError[0]);
+            }
+            Log.i(TAG, "[" + run + "] remote SDP accepted");
 
+            stage = "answer";
             final CountDownLatch answerSet = new CountDownLatch(1);
             final String[] answerError = {""};
             created.createAnswer(new SdpObserver() {
                 @Override public void onCreateSuccess(final SessionDescription answer) {
+                    Log.i(TAG, "[" + run + "] answer created sdp="
+                            + (answer == null || answer.description == null
+                            ? 0 : answer.description.length()));
                     created.setLocalDescription(new SdpObserver() {
-                        @Override public void onSetSuccess() { answerSet.countDown(); }
-                        @Override public void onSetFailure(String error) { answerError[0] = error; answerSet.countDown(); }
+                        @Override public void onSetSuccess() {
+                            Log.i(TAG, "[" + run + "] local answer set");
+                            answerSet.countDown();
+                        }
+                        @Override public void onSetFailure(String error) {
+                            Log.e(TAG, "[" + run + "] local answer set failure: " + error);
+                            answerError[0] = error; answerSet.countDown();
+                        }
                         @Override public void onCreateSuccess(SessionDescription sd) {}
                         @Override public void onCreateFailure(String error) {}
                     }, answer);
                 }
-                @Override public void onCreateFailure(String error) { answerError[0] = error; answerSet.countDown(); }
+                @Override public void onCreateFailure(String error) {
+                    Log.e(TAG, "[" + run + "] answer create failure: " + error);
+                    answerError[0] = error; answerSet.countDown();
+                }
                 @Override public void onSetSuccess() {}
                 @Override public void onSetFailure(String error) {}
             }, new MediaConstraints());
-            if (!answerSet.await(3000L, TimeUnit.MILLISECONDS)) throw new IOException("创建 answer 超时");
-            if (answerError[0].length() > 0) throw new IOException("创建 answer 失败: " + answerError[0]);
+            if (!answerSet.await(3000L, TimeUnit.MILLISECONDS)) {
+                throw new IOException("WebRTC answer 创建超时");
+            }
+            if (answerError[0].length() > 0) {
+                throw new IOException("WebRTC answer 创建失败: " + answerError[0]);
+            }
+            Log.i(TAG, "[" + run + "] answer ready");
 
             // K230 uses non-trickle LAN signaling: wait until all candidates
             // are embedded in the local SDP before posting the answer.
-            iceGathered.await(3000L, TimeUnit.MILLISECONDS);
+            stage = "ice";
+            Log.i(TAG, "[" + run + "] waiting for ICE gathering");
+            if (!iceGathered.await(3000L, TimeUnit.MILLISECONDS)) {
+                throw new IOException("WebRTC ICE 等待超时");
+            }
+            Log.i(TAG, "[" + run + "] ICE gathering complete");
             SessionDescription local = created.getLocalDescription();
             if (local == null) throw new IOException("本地 answer 为空");
             if (stopped.get() || run != generation) return;
             JSONObject answer = new JSONObject();
             answer.put("type", "answer");
             answer.put("sdp", local.description);
-            postJson("http://" + target + ":8080/api/webrtc/answer", answer);
+            stage = "answer_post";
+            String answerUrl = "http://" + target + ":8080/api/webrtc/answer";
+            Log.i(TAG, "[" + run + "] answer POST " + answerUrl + " sdp="
+                    + (local.description == null ? 0 : local.description.length()));
+            int answerCode = postJson(answerUrl, answer);
+            Log.i(TAG, "[" + run + "] answer POST HTTP " + answerCode);
             if (!stopped.get() && run == generation) {
                 connectAttempts = 0;
                 publish("connected", target, run);
+                Log.i(TAG, "[" + run + "] signaling connected");
             }
         } catch (WebRtcUnavailableException e) {
             if (stopped.get() || run != generation) return;
@@ -284,6 +396,17 @@ public final class K230WebRtcReceiver {
         } catch (Exception e) {
             if (stopped.get() || run != generation) return;
             String detail = e.getMessage() == null ? e.toString() : e.getMessage();
+            if ("remote_sdp".equals(stage) && !detail.startsWith("WebRTC SDP")) {
+                detail = "WebRTC SDP 失败: " + detail;
+            } else if ("answer".equals(stage) && !detail.startsWith("WebRTC answer")) {
+                detail = "WebRTC answer 创建失败: " + detail;
+            } else if ("ice".equals(stage) && !detail.startsWith("WebRTC ICE")) {
+                detail = "WebRTC ICE 等待超时: " + detail;
+            } else if ("answer_post".equals(stage) && !detail.startsWith("WebRTC answer")) {
+                detail = "WebRTC answer POST 失败: " + detail;
+            }
+            Log.e(TAG, "[" + run + "] stage=" + stage + " attempt="
+                    + connectAttempts + " failed: " + detail, e);
             if (connectAttempts >= MAX_CONNECT_ATTEMPTS) {
                 publish("error", detail, run);
             } else {
@@ -295,6 +418,7 @@ public final class K230WebRtcReceiver {
             // instead of an Exception. Convert that failure to the normal RTSP
             // fallback path instead of allowing the car-control Activity to die.
             if (stopped.get() || run != generation) return;
+            Log.e(TAG, "[" + run + "] stage=" + stage + " fatal WebRTC failure", e);
             publish("error", e.toString(), run);
         }
     }
@@ -310,9 +434,11 @@ public final class K230WebRtcReceiver {
                 @Override public void onIceCandidate(IceCandidate candidate) {}
                 @Override public void onIceCandidatesRemoved(IceCandidate[] c) {}
                 @Override public void onIceGatheringChange(PeerConnection.IceGatheringState s) {
+                    Log.i(TAG, "[" + run + "] ICE gathering=" + s);
                     if (s == PeerConnection.IceGatheringState.COMPLETE) iceGathered.countDown();
                 }
                 @Override public void onIceConnectionChange(PeerConnection.IceConnectionState s) {
+                    Log.i(TAG, "[" + run + "] ICE connection=" + s);
                     if ((s == PeerConnection.IceConnectionState.FAILED ||
                             s == PeerConnection.IceConnectionState.DISCONNECTED) &&
                             !stopped.get() && run == generation) {
@@ -418,11 +544,13 @@ public final class K230WebRtcReceiver {
         }
     }
 
-    private void postJson(String url, JSONObject obj) throws Exception {
+    private int postJson(String url, JSONObject obj) throws Exception {
         Request request = new Request.Builder().url(url)
                 .post(RequestBody.create(JSON, obj.toString())).build();
         try (Response response = http.newCall(request).execute()) {
-            if (!response.isSuccessful()) throw new IOException("HTTP " + response.code());
+            int code = response.code();
+            if (!response.isSuccessful()) throw new IOException("HTTP " + code);
+            return code;
         }
     }
 

@@ -163,18 +163,29 @@ public class RoverControlActivity extends BaseActivity implements
             @Override public void onState(String state, String detail, int generation) {
                 if (generation != webRtcGeneration || !resumed || videoWebRtcFallback) return;
                 if ("connected".equals(state)) {
-                    controls.setVideoText("WebRTC 连接中");
+                    controls.setVideoText("WebRTC 已协商 · 等待首帧");
                 } else if ("reconnecting".equals(state)) {
                     markVideoReconnect();
                     controls.setVideoText(videoLabel("WebRTC 重连 " + videoReconnectCount));
                 } else if ("error".equals(state) || "unavailable".equals(state)) {
                     // RTSP remains available when the current K230 firmware has
                     // no WebRTC module or ICE negotiation fails.
+                    String reason = detail == null || detail.length() == 0
+                            ? "协商失败" : detail;
+                    controls.setVideoText("WebRTC 失败: " + reason);
+                    Log.w(TAG, "WebRTC fallback: " + reason);
                     videoWebRtcFallback = true;
                     if (webRtcReceiver != null) webRtcReceiver.stop();
                     webRtcView.setVisibility(View.GONE);
                     video.setVisibility(View.VISIBLE);
-                    startRtspVideo(activeVideoHost);
+                    // Keep the stage-specific reason visible briefly before
+                    // replacing it with the RTSP transport state.
+                    final int videoRun = videoGeneration;
+                    ui.postDelayed(() -> {
+                        if (isVideoCurrent(videoRun) && videoWebRtcFallback) {
+                            startRtspVideo(activeVideoHost);
+                        }
+                    }, 250L);
                 } else {
                     controls.setVideoText("WebRTC " + state);
                 }
