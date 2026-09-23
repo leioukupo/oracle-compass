@@ -174,6 +174,7 @@ public final class K230WebRtcReceiver {
             return run;
         }
         final String previous = host;
+        final int previousSession = remoteSession;
         stopPeerOnly();
         synchronized (peerLock) { reconnectScheduled = false; }
         host = next;
@@ -186,7 +187,7 @@ public final class K230WebRtcReceiver {
                 // can wedge older CanMV native PeerConnection builds and
                 // leaves the K230 HTTP/RTSP listeners unavailable.
                 if (previous != null && previous.length() > 0 && !previous.equals(next)) {
-                    postClose(previous);
+                    postClose(previous, previousSession);
                 }
                 connect(run, next);
             });
@@ -200,11 +201,12 @@ public final class K230WebRtcReceiver {
         boolean wasStopped = stopped.getAndSet(true);
         final int run = ++generation;
         final String target = host;
+        final int session = remoteSession;
         synchronized (peerLock) { reconnectScheduled = false; }
         stopPeerOnly();
         if (!wasStopped) {
             try {
-                worker.execute(() -> postClose(target));
+                worker.execute(() -> postClose(target, session));
             } catch (java.util.concurrent.RejectedExecutionException ignored) {
                 // dispose() may have already shut down the worker.
             }
@@ -551,9 +553,10 @@ public final class K230WebRtcReceiver {
         main.postDelayed(() -> {
             synchronized (peerLock) { reconnectScheduled = false; }
             if (stopped.get() || run != generation) return;
+            final int oldSession = remoteSession;
             stopPeerOnly();
             worker.execute(() -> {
-                postClose(target);
+                postClose(target, oldSession);
                 connect(run, target);
             });
         }, RECONNECT_MS);
@@ -577,11 +580,11 @@ public final class K230WebRtcReceiver {
         }
     }
 
-    private void postClose(String target) {
+    private void postClose(String target, int session) {
         if (target == null || target.length() == 0) return;
         try {
             JSONObject close = new JSONObject();
-            if (remoteSession > 0) close.put("session", remoteSession);
+            if (session > 0) close.put("session", session);
             postJson("http://" + target + ":8080/api/webrtc/close", close);
         }
         catch (Exception ignored) {}
