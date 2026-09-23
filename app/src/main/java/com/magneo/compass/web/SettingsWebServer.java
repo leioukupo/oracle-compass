@@ -724,6 +724,9 @@ public class SettingsWebServer {
                 .append(rowInput("UDP 端口", Prefs.K_ROVER_UDP_PORT, "number", String.valueOf(Prefs.DEFAULT_ROVER_UDP_PORT)))
                 .append(rowInput("RTSP 端口", Prefs.K_ROVER_RTSP_PORT, "number", String.valueOf(Prefs.DEFAULT_ROVER_RTSP_PORT)))
                 .append(rowInput("RTSP 路径", Prefs.K_ROVER_RTSP_PATH, "text", Prefs.DEFAULT_ROVER_RTSP_PATH))
+                .append(rowSelect("车控视频模式", Prefs.K_ROVER_VIDEO_MODE, null,
+                        "<option value='webrtc'>优先 WebRTC（低延迟，失败回退 RTSP）</option>"
+                                + "<option value='rtsp'>优先 RTSP UDP（失败回退 TCP）</option>", null))
                 .append(rowCheckbox("自动发现", Prefs.K_ROVER_AUTO_DISCOVERY, "监听 UDP 7789 的 talos/k230/hello"))
                 .append(rowCheckbox("允许广播兜底", Prefs.K_ROVER_BROADCAST, "无可用单播目标时发送单个广播帧"))
                 .append(rowCheckbox("左 Y 轴反向", Prefs.K_ROVER_LEFT_Y_INVERT, "与 ESP32 摇杆方向不一致时开启"))
@@ -1606,6 +1609,7 @@ public class SettingsWebServer {
             o.put(Prefs.K_ROVER_RIGHT_Y_INVERT, Prefs.roverRightYInverted(app));
             o.put(Prefs.K_ROVER_RTSP_PORT, String.valueOf(Prefs.roverRtspPort(app)));
             o.put(Prefs.K_ROVER_RTSP_PATH, Prefs.roverRtspPath(app));
+            o.put(Prefs.K_ROVER_VIDEO_MODE, Prefs.roverVideoMode(app));
             o.put("mode", H264SurfaceStreamer.isActive() ? "h264fast"
                     : (H264Streamer.isActive() ? "h264" : (ScreenStreamer.isActive() ? "mjpeg" : "idle")));
             o.put("ip", LOOPBACK_HOST);
@@ -1778,6 +1782,9 @@ public class SettingsWebServer {
                     String path = v == null ? "" : v.trim();
                     if (path.isEmpty()) path = Prefs.DEFAULT_ROVER_RTSP_PATH;
                     Prefs.put(app, k, path.startsWith("/") ? path : "/" + path);
+                } else if (k.equals(Prefs.K_ROVER_VIDEO_MODE)) {
+                    Prefs.put(app, k, Prefs.ROVER_VIDEO_RTSP.equalsIgnoreCase(v)
+                            ? Prefs.ROVER_VIDEO_RTSP : Prefs.ROVER_VIDEO_WEBRTC);
                 } else if (k.equals(Prefs.K_ROVER_TARGET_HOST)) {
                     Prefs.put(app, k, v == null ? "" : v.trim());
                 } else if (k.equals(Prefs.K_SYSTEM_LOCKSCREEN_ENABLED)) {

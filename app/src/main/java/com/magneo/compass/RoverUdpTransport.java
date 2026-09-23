@@ -91,6 +91,7 @@ public final class RoverUdpTransport {
     }
 
     public void reloadPrefs() {
+        String previousConfiguredHost = configuredHost;
         configuredHost = Prefs.roverTargetHost(context);
         port = Prefs.roverUdpPort(context);
         autoDiscovery = Prefs.roverAutoDiscovery(context);
@@ -99,11 +100,16 @@ public final class RoverUdpTransport {
             resolvedHost = "";
             resolvedAddress = null;
         }
-        // A manual target change must not keep sending to a stale address
-        // learned from a previous K230 discovery beacon.  The next beacon can
-        // repopulate it when automatic discovery remains enabled.
-        discoveredHost = "";
-        discoveredAtMs = 0L;
+        // Keep the last discovered K230 across a pause/resume cycle. The
+        // discovery socket is deliberately short-lived with the Activity;
+        // clearing this cache here makes the second car-control open show
+        // "等待 K230" until another broadcast happens to arrive. Only a real
+        // manual target change invalidates the cached discovery result.
+        if (previousConfiguredHost != null &&
+                !previousConfiguredHost.equals(configuredHost)) {
+            discoveredHost = "";
+            discoveredAtMs = 0L;
+        }
         if (listener != null) listener.onTargetChanged(activeHost());
     }
 
@@ -129,8 +135,6 @@ public final class RoverUdpTransport {
         final String stopTarget = activeHost();
         ++lifecycleGeneration;
         running = false;
-        discoveredHost = "";
-        discoveredAtMs = 0L;
         DatagramSocket ds = discoverySocket;
         discoverySocket = null;
         if (ds != null) ds.close();
@@ -157,8 +161,14 @@ public final class RoverUdpTransport {
     public boolean isRunning() { return running; }
     public String activeHost() {
         long seen = discoveredAtMs;
-        if (autoDiscovery && validHost(discoveredHost) && seen > 0L &&
-                SystemClock.elapsedRealtime() - seen <= 3500L) return discoveredHost;
+        // When stopped, return the cached discovery immediately so onResume
+        // can restart video/control without waiting for the next beacon. Once
+        // running, retain the normal 3.5s liveness expiry.
+        if (autoDiscovery && validHost(discoveredHost) &&
+                (!running || (seen > 0L &&
+                        SystemClock.elapsedRealtime() - seen <= 3500L))) {
+            return discoveredHost;
+        }
         return configuredHost == null ? "" : configuredHost.trim();
     }
 
