@@ -674,7 +674,7 @@ public class RoverControlActivity extends BaseActivity implements
                     Prefs.put(this, Prefs.K_ROVER_RTSP_PATH, path);
                     Prefs.putB(this, Prefs.K_ROVER_AUTO_DISCOVERY, discovery.isChecked());
                     Prefs.putB(this, Prefs.K_ROVER_BROADCAST, broadcast.isChecked());
-                    Prefs.put(this, Prefs.K_ROVER_VIDEO_MODE,
+                    Prefs.setRoverVideoMode(this,
                             webRtc.isChecked() ? Prefs.ROVER_VIDEO_WEBRTC : Prefs.ROVER_VIDEO_RTSP);
                     Prefs.putB(this, Prefs.K_ROVER_LEFT_Y_INVERT, leftInvert.isChecked());
                     Prefs.putB(this, Prefs.K_ROVER_RIGHT_Y_INVERT, rightInvert.isChecked());

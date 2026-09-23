@@ -128,6 +128,8 @@ public class Prefs {
     public static final String K_ROVER_RTSP_PORT = "roverRtspPort";
     public static final String K_ROVER_RTSP_PATH = "roverRtspPath";
     public static final String K_ROVER_VIDEO_MODE = "roverVideoMode";
+    /** Set only when the user explicitly changes video mode in current UI. */
+    public static final String K_ROVER_VIDEO_MODE_USER_SET = "roverVideoModeUserSet";
     /** Last K230 address learned from the UDP hello beacon. */
     public static final String K_ROVER_LAST_DISCOVERED_HOST = "roverLastDiscoveredHost";
     public static final String K_NETEASE_API_URL = "neteaseApiUrl";
@@ -306,8 +308,23 @@ public class Prefs {
     }
 
     public static String roverVideoMode(Context c) {
+        // Releases before WebRTC priority stored their RTSP default in the
+        // same key.  Do not let that legacy value silently disable WebRTC on
+        // upgrade; an RTSP choice made in the current settings screen carries
+        // the explicit marker below and remains respected.
+        if (!getB(c, K_ROVER_VIDEO_MODE_USER_SET, false)
+                && sp(c).contains(K_ROVER_VIDEO_MODE)) {
+            return ROVER_VIDEO_WEBRTC;
+        }
         String mode = get(c, K_ROVER_VIDEO_MODE, DEFAULT_ROVER_VIDEO_MODE);
         return ROVER_VIDEO_RTSP.equalsIgnoreCase(mode) ? ROVER_VIDEO_RTSP : ROVER_VIDEO_WEBRTC;
+    }
+
+    public static void setRoverVideoMode(Context c, String mode) {
+        put(c, K_ROVER_VIDEO_MODE,
+                ROVER_VIDEO_RTSP.equalsIgnoreCase(mode)
+                        ? ROVER_VIDEO_RTSP : ROVER_VIDEO_WEBRTC);
+        putB(c, K_ROVER_VIDEO_MODE_USER_SET, true);
     }
 
     public static String roverTargetSummary(Context c) {
