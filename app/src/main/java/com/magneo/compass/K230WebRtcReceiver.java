@@ -88,6 +88,10 @@ public final class K230WebRtcReceiver {
     private boolean reconnectScheduled;
     private int connectAttempts;
     private volatile int remoteSession;
+    // Only the newer K230 bridge can logically close/reuse a WebRTC session.
+    // Older CanMV builds crash when /close reaches the native peer, so this
+    // is enabled from the firmware capability reported by /status.
+    private volatile boolean k230CloseSafe;
     private CountDownLatch iceGathered = new CountDownLatch(1);
 
     /**
@@ -301,6 +305,8 @@ public final class K230WebRtcReceiver {
             String statusUrl = "http://" + target + ":8080/api/webrtc/status";
             Log.i(TAG, "[" + run + "] status request " + statusUrl);
             JSONObject capability = getJson(statusUrl);
+            String firmware = capability.optString("firmware", "");
+            k230CloseSafe = firmware.toLowerCase(java.util.Locale.US).contains("close-safe");
             String capabilityError = capability.optString("last_error", "");
             String capabilityState = capability.optString("state", "");
             Log.i(TAG, "[" + run + "] status available=" + capability.optInt("available", 0)
@@ -592,10 +598,18 @@ public final class K230WebRtcReceiver {
     }
 
     private void postClose(String target, int session) {
-        // Do not call the K230 /close endpoint.  CanMV v1.8 native
-        // PeerConnection.close() can terminate the whole firmware process;
-        // the K230 bridge now retires/reuses the peer safely on the next
-        // offer, and local PeerConnection.close() is sufficient here.
+        if (!k230CloseSafe || target == null || target.length() == 0) return;
+        try {
+            JSONObject body = new JSONObject();
+            if (session > 0) body.put("session", session);
+            String url = "http://" + target + ":8080/api/webrtc/close";
+            int code = postJson(url, body);
+            Log.i(TAG, "close session=" + session + " HTTP " + code);
+        } catch (Throwable e) {
+            // Closing is best effort.  A failed close must never take down
+            // the control page; the next offer can still recover the peer.
+            Log.w(TAG, "close session=" + session + " failed: " + e);
+        }
     }
 
     private void publish(final String state, final String detail, final int run) {
