@@ -87,6 +87,7 @@ public final class K230WebRtcReceiver {
     private boolean firstFrame;
     private boolean reconnectScheduled;
     private int connectAttempts;
+    private volatile int remoteSession;
     private CountDownLatch iceGathered = new CountDownLatch(1);
 
     /**
@@ -311,6 +312,7 @@ public final class K230WebRtcReceiver {
             Log.i(TAG, "[" + run + "] offer received session="
                     + offerJson.optInt("session", 0) + " sdp=" + rawSdp.length()
                     + " normalized=" + !rawSdp.equals(sdp));
+            remoteSession = offerJson.optInt("session", 0);
 
             stage = "remote_sdp";
             final CountDownLatch remoteSet = new CountDownLatch(1);
@@ -394,6 +396,7 @@ public final class K230WebRtcReceiver {
             JSONObject answer = new JSONObject();
             answer.put("type", "answer");
             answer.put("sdp", local.description);
+            if (remoteSession > 0) answer.put("session", remoteSession);
             stage = "answer_post";
             String answerUrl = "http://" + target + ":8080/api/webrtc/answer";
             Log.i(TAG, "[" + run + "] answer POST " + answerUrl + " sdp="
@@ -446,7 +449,12 @@ public final class K230WebRtcReceiver {
                     new ArrayList<PeerConnection.IceServer>());
             cfg.sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN;
             peer = factory.createPeerConnection(cfg, new PeerConnection.Observer() {
-                @Override public void onIceCandidate(IceCandidate candidate) {}
+                @Override public void onIceCandidate(IceCandidate candidate) {
+                    // The null candidate is the end-of-gathering marker on
+                    // older libwebrtc builds.  API 22 devices have been seen
+                    // to deliver it without a matching state callback.
+                    if (candidate == null) iceGathered.countDown();
+                }
                 @Override public void onIceCandidatesRemoved(IceCandidate[] c) {}
                 @Override public void onIceGatheringChange(PeerConnection.IceGatheringState s) {
                     Log.i(TAG, "[" + run + "] ICE gathering=" + s);
@@ -571,7 +579,11 @@ public final class K230WebRtcReceiver {
 
     private void postClose(String target) {
         if (target == null || target.length() == 0) return;
-        try { postJson("http://" + target + ":8080/api/webrtc/close", new JSONObject()); }
+        try {
+            JSONObject close = new JSONObject();
+            if (remoteSession > 0) close.put("session", remoteSession);
+            postJson("http://" + target + ":8080/api/webrtc/close", close);
+        }
         catch (Exception ignored) {}
     }
 
