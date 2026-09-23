@@ -33,7 +33,7 @@ public final class RoverUdpTransport {
     private volatile int lifecycleGeneration;
     private volatile int lx, ly, rx, ry;
     private volatile boolean swL, swR;
-    private volatile String configuredHost = "";
+    private volatile String configuredHost;
     private volatile int port = Prefs.DEFAULT_ROVER_UDP_PORT;
     private volatile boolean autoDiscovery = true;
     private volatile boolean broadcast = true;
@@ -105,10 +105,18 @@ public final class RoverUdpTransport {
         // clearing this cache here makes the second car-control open show
         // "等待 K230" until another broadcast happens to arrive. Only a real
         // manual target change invalidates the cached discovery result.
-        if (previousConfiguredHost != null &&
+        if (previousConfiguredHost == null && configuredHost.length() == 0 && autoDiscovery) {
+            // A new Activity (or a process restart) has no in-memory discovery
+            // state. Restore the last beacon address so the second car-control
+            // open can send immediately instead of waiting for another hello.
+            discoveredHost = Prefs.roverLastDiscoveredHost(context);
+            discoveredAtMs = discoveredHost.length() == 0
+                    ? 0L : SystemClock.elapsedRealtime();
+        } else if (previousConfiguredHost != null &&
                 !previousConfiguredHost.equals(configuredHost)) {
             discoveredHost = "";
             discoveredAtMs = 0L;
+            Prefs.setRoverLastDiscoveredHost(context, "");
         }
         if (listener != null) listener.onTargetChanged(activeHost());
     }
@@ -297,6 +305,7 @@ public final class RoverUdpTransport {
                     if (validHost(host) && !host.equals(discoveredHost)) {
                         discoveredHost = host;
                         discoveredAtMs = SystemClock.elapsedRealtime();
+                        Prefs.setRoverLastDiscoveredHost(context, host);
                         synchronized (sendLock) {
                             resolvedHost = "";
                             resolvedAddress = null;

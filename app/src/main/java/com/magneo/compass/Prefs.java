@@ -128,6 +128,8 @@ public class Prefs {
     public static final String K_ROVER_RTSP_PORT = "roverRtspPort";
     public static final String K_ROVER_RTSP_PATH = "roverRtspPath";
     public static final String K_ROVER_VIDEO_MODE = "roverVideoMode";
+    /** Last K230 address learned from the UDP hello beacon. */
+    public static final String K_ROVER_LAST_DISCOVERED_HOST = "roverLastDiscoveredHost";
     public static final String K_NETEASE_API_URL = "neteaseApiUrl";
     public static final String K_NETEASE_COOKIE = "neteaseCookie";
     public static final String K_NETEASE_UID = "neteaseUid";
@@ -260,6 +262,15 @@ public class Prefs {
         // stale value so devices without a discovery beacon reach current K230.
         if ("10.1.20.36".equals(host)) return DEFAULT_ROVER_TARGET_HOST;
         return host;
+    }
+
+    public static String roverLastDiscoveredHost(Context c) {
+        String host = get(c, K_ROVER_LAST_DISCOVERED_HOST, "");
+        return host == null ? "" : host.trim();
+    }
+
+    public static void setRoverLastDiscoveredHost(Context c, String host) {
+        put(c, K_ROVER_LAST_DISCOVERED_HOST, host == null ? "" : host.trim());
     }
 
     public static int roverUdpPort(Context c) {
