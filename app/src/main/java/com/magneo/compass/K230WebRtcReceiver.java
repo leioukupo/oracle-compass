@@ -377,10 +377,17 @@ public final class K230WebRtcReceiver {
             // are embedded in the local SDP before posting the answer.
             stage = "ice";
             Log.i(TAG, "[" + run + "] waiting for ICE gathering");
-            if (!iceGathered.await(3000L, TimeUnit.MILLISECONDS)) {
-                throw new IOException("WebRTC ICE 等待超时");
+            // Host-only LAN sessions normally reach COMPLETE quickly.  Some
+            // Android 5.1 WebRTC builds never deliver the final callback even
+            // though the host candidate is already present in the local SDP;
+            // the official CanMV browser client treats its 3 s wait as a
+            // deadline rather than a hard negotiation failure.  Continue with
+            // the gathered SDP so those devices can still send the answer.
+            if (!iceGathered.await(2500L, TimeUnit.MILLISECONDS)) {
+                Log.w(TAG, "[" + run + "] ICE gathering deadline reached; using current local SDP");
+            } else {
+                Log.i(TAG, "[" + run + "] ICE gathering complete");
             }
-            Log.i(TAG, "[" + run + "] ICE gathering complete");
             SessionDescription local = created.getLocalDescription();
             if (local == null) throw new IOException("本地 answer 为空");
             if (stopped.get() || run != generation) return;
