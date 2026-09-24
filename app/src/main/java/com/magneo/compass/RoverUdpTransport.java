@@ -14,7 +14,7 @@ import java.net.InetAddress;
 import java.net.SocketTimeoutException;
 import java.util.Locale;
 
-/** ESP32-compatible 20Hz joy sender plus K230 UDP discovery. */
+/** ESP32-compatible 50Hz joy sender plus K230 UDP discovery. */
 public final class RoverUdpTransport {
     public interface Listener {
         void onTargetChanged(String host);
@@ -22,7 +22,9 @@ public final class RoverUdpTransport {
     }
 
     private static final int DISCOVERY_PORT = 7789;
-    private static final long PERIOD_MS = 50L;
+    // Keep the wire format unchanged, but sample/send often enough for the
+    // K230 trajectory controller to receive a fresh stick value every 20 ms.
+    private static final long PERIOD_MS = 20L;
 
     private final Context context;
     private final Listener listener;

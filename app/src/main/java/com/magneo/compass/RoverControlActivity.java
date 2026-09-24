@@ -641,7 +641,7 @@ public class RoverControlActivity extends BaseActivity implements
         final CheckBox rightInvert = check("右摇杆 Y 轴反向", Prefs.roverRightYInverted(this));
         new RoundDialog(this)
                 .title("车控设置")
-                .text("UDP 5555 协议兼容 ESP32；视频优先 WebRTC，失败回退 RTSP/UDP，再回退 TCP")
+                .text("UDP 5555 协议兼容 ESP32，约 50Hz；视频优先 WebRTC，失败回退 RTSP/UDP，再回退 TCP")
                 .field(host)
                 .field(port)
                 .field(rtspPort)
