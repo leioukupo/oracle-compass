@@ -162,7 +162,11 @@ public class RoverControlActivity extends BaseActivity implements
         // the regular controls view remains on top of the video surface.
         webRtcView.setZOrderMediaOverlay(true);
         webRtcView.setVisibility(View.GONE);
-        webRtcView.setBackgroundColor(Color.BLACK);
+        // Do not paint an opaque View background here.  SurfaceViewRenderer's
+        // EGL output is a separate surface; on the MTK Android 5.1 compositor
+        // an opaque background on the View itself covers that surface and
+        // produces a black screen even while EglRenderer is receiving frames.
+        webRtcView.setBackgroundColor(Color.TRANSPARENT);
         root.addView(webRtcView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         webRtcReceiver = new K230WebRtcReceiver(this, new K230WebRtcReceiver.Listener() {
