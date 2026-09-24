@@ -155,6 +155,12 @@ public class RoverControlActivity extends BaseActivity implements
         // The camera is mounted upside down. Keep the controls upright and
         // apply the same 180-degree correction used by the RTSP TextureView.
         webRtcView.setRotation(180f);
+        // The MTK Android 5.1 compositor otherwise puts the normal Activity
+        // window above SurfaceViewRenderer: WebRTC decodes and renders frames
+        // (EglRenderer reports them) but the user sees only the window's black
+        // background.  Media-overlay keeps the video above the window while
+        // the regular controls view remains on top of the video surface.
+        webRtcView.setZOrderMediaOverlay(true);
         webRtcView.setVisibility(View.GONE);
         webRtcView.setBackgroundColor(Color.BLACK);
         root.addView(webRtcView, new FrameLayout.LayoutParams(
