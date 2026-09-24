@@ -45,6 +45,10 @@ public final class K230WebRtcReceiver {
         void onState(String state, String detail, int generation);
         void onFirstFrame(int generation);
     }
+    interface ManagedRenderer {
+        void initRenderer(EglBase.Context context);
+        void releaseRenderer();
+    }
 
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
     // SDP/ICE are control-plane operations; allowing a couple of seconds here
@@ -80,7 +84,7 @@ public final class K230WebRtcReceiver {
     private PeerConnection peer;
     private VideoTrack videoTrack;
     private VideoSink sink;
-    private SurfaceViewRenderer renderer;
+    private VideoSink renderer;
     private boolean rendererInitialized;
     private String host = "";
     private volatile int generation;
@@ -163,9 +167,9 @@ public final class K230WebRtcReceiver {
     }
 
     /** Must be called on the UI thread before start(). */
-    public void setRenderer(SurfaceViewRenderer value) {
+    public void setRenderer(VideoSink value) {
         renderer = value;
-        if (renderer != null && egl != null && !rendererInitialized) {
+        if (renderer instanceof ManagedRenderer && egl != null && !rendererInitialized) {
             initializeRenderer(egl.getEglBaseContext());
         }
     }
@@ -242,8 +246,8 @@ public final class K230WebRtcReceiver {
                 egl = null;
             }
         }
-        if (renderer != null) {
-            try { renderer.release(); } catch (Exception ignored) {}
+        if (renderer instanceof ManagedRenderer) {
+            try { ((ManagedRenderer) renderer).releaseRenderer(); } catch (Exception ignored) {}
             rendererInitialized = false;
         }
     }
@@ -263,7 +267,7 @@ public final class K230WebRtcReceiver {
             }
             rendererContext = egl.getEglBaseContext();
         }
-        if (renderer != null && !rendererInitialized) {
+        if (renderer instanceof ManagedRenderer && !rendererInitialized) {
             initializeRenderer(rendererContext);
         }
     }
@@ -271,10 +275,15 @@ public final class K230WebRtcReceiver {
     private void initializeRenderer(final EglBase.Context rendererContext) {
         Runnable init = () -> {
             if (renderer == null || rendererInitialized) return;
-            renderer.init(rendererContext, null);
-            renderer.setEnableHardwareScaler(true);
-            renderer.setMirror(false);
-            renderer.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT);
+            if (renderer instanceof ManagedRenderer) {
+                ((ManagedRenderer) renderer).initRenderer(rendererContext);
+            } else if (renderer instanceof SurfaceViewRenderer) {
+                SurfaceViewRenderer surface = (SurfaceViewRenderer) renderer;
+                surface.init(rendererContext, null);
+                surface.setEnableHardwareScaler(true);
+                surface.setMirror(false);
+                surface.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT);
+            }
             rendererInitialized = true;
         };
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -525,7 +534,7 @@ public final class K230WebRtcReceiver {
         final VideoTrack next = (VideoTrack) track;
         final VideoSink nextSink = frame -> {
             if (stopped.get() || run != generation) return;
-            SurfaceViewRenderer r = renderer;
+            VideoSink r = renderer;
             if (r != null) r.onFrame(frame);
             if (!firstFrame) {
                 firstFrame = true;

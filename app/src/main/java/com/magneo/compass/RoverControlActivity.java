@@ -30,7 +30,6 @@ import com.google.android.exoplayer2.Player;
 import com.google.android.exoplayer2.DefaultLoadControl;
 import com.google.android.exoplayer2.trackselection.DefaultTrackSelector;
 import com.google.android.exoplayer2.source.rtsp.RtspMediaSource;
-import org.webrtc.SurfaceViewRenderer;
 
 /**
  * TALOS rover page.  The video is only a background preview; the raw joy
@@ -57,7 +56,7 @@ public class RoverControlActivity extends BaseActivity implements
     private volatile boolean resumed;
     private volatile boolean videoStarting;
     private volatile int videoGeneration;
-    private SurfaceViewRenderer webRtcView;
+    private K230WebRtcTextureRenderer webRtcTextureRenderer;
     private K230WebRtcReceiver webRtcReceiver;
     private volatile int webRtcGeneration;
     private volatile boolean rtspTcpFallback;
@@ -112,6 +111,9 @@ public class RoverControlActivity extends BaseActivity implements
             @Override public void onSurfaceTextureAvailable(SurfaceTexture texture, int w, int h) {
                 if (videoSurface != null) videoSurface.release();
                 videoSurface = new Surface(texture);
+                if (webRtcTextureRenderer != null) {
+                    webRtcTextureRenderer.onSurfaceTextureAvailable(texture);
+                }
                 if (resumed) {
                     String host = activeVideoHost.length() == 0 && transport != null
                             ? transport.activeHost() : activeVideoHost;
@@ -130,6 +132,9 @@ public class RoverControlActivity extends BaseActivity implements
                 }
                 ui.removeCallbacks(bufferWatchdog);
                 releasePlayerAsync();
+                if (webRtcTextureRenderer != null) {
+                    webRtcTextureRenderer.onSurfaceTextureDestroyed(texture);
+                }
                 if (videoSurface != null) videoSurface.release();
                 videoSurface = null;
                 return true;
@@ -151,24 +156,10 @@ public class RoverControlActivity extends BaseActivity implements
         root.addView(video, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        webRtcView = new SurfaceViewRenderer(this);
-        // The camera is mounted upside down. Keep the controls upright and
-        // apply the same 180-degree correction used by the RTSP TextureView.
-        webRtcView.setRotation(180f);
-        // The MTK Android 5.1 compositor otherwise puts the normal Activity
-        // window above SurfaceViewRenderer: WebRTC decodes and renders frames
-        // (EglRenderer reports them) but the user sees only the window's black
-        // background.  Media-overlay keeps the video above the window while
-        // the regular controls view remains on top of the video surface.
-        webRtcView.setZOrderMediaOverlay(true);
-        webRtcView.setVisibility(View.GONE);
-        // Do not paint an opaque View background here.  SurfaceViewRenderer's
-        // EGL output is a separate surface; on the MTK Android 5.1 compositor
-        // an opaque background on the View itself covers that surface and
-        // produces a black screen even while EglRenderer is receiving frames.
-        webRtcView.setBackgroundColor(Color.TRANSPARENT);
-        root.addView(webRtcView, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // Render WebRTC into the same TextureView used by RTSP.  This avoids
+        // the MTK Android 5.1 SurfaceView composition bug that shows black
+        // while SurfaceViewRenderer/EglRenderer is receiving frames.
+        webRtcTextureRenderer = new K230WebRtcTextureRenderer(video);
         webRtcReceiver = new K230WebRtcReceiver(this, new K230WebRtcReceiver.Listener() {
             @Override public void onState(String state, String detail, int generation) {
                 if (generation != webRtcGeneration || !resumed || videoWebRtcFallback) return;
@@ -186,7 +177,6 @@ public class RoverControlActivity extends BaseActivity implements
                     Log.w(TAG, "WebRTC fallback: " + reason);
                     videoWebRtcFallback = true;
                     if (webRtcReceiver != null) webRtcReceiver.stop();
-                    webRtcView.setVisibility(View.GONE);
                     video.setVisibility(View.VISIBLE);
                     // Keep the stage-specific reason visible briefly before
                     // replacing it with the RTSP transport state.
@@ -211,7 +201,7 @@ public class RoverControlActivity extends BaseActivity implements
                 }
             }
         });
-        webRtcReceiver.setRenderer(webRtcView);
+        webRtcReceiver.setRenderer(webRtcTextureRenderer);
         // Initialize the native WebRTC factory lazily, only after K230's
         // /api/webrtc/status confirms that its current firmware supports it.
         // Unsupported K230 images go straight to the RTSP fallback without
@@ -344,7 +334,6 @@ public class RoverControlActivity extends BaseActivity implements
             activeVideoHost = "";
             releaseVideo();
             video.setVisibility(View.VISIBLE);
-            webRtcView.setVisibility(View.GONE);
             if (controls != null) controls.setVideoText("视频等待 K230");
             return;
         }
@@ -378,12 +367,10 @@ public class RoverControlActivity extends BaseActivity implements
             videoWebRtcFallback = true;
             if (webRtcReceiver != null) webRtcReceiver.stop();
             video.setVisibility(View.VISIBLE);
-            webRtcView.setVisibility(View.GONE);
             startRtspVideo(targetHost);
             return;
         }
-        video.setVisibility(View.GONE);
-        webRtcView.setVisibility(View.VISIBLE);
+        video.setVisibility(View.VISIBLE);
         if (webRtcReceiver != null) webRtcGeneration = webRtcReceiver.start(targetHost);
         // A missing WebRTC module is reported by the capability probe. Keep a
         // short deadline for a broken/old peer so the control page still gets
@@ -393,7 +380,6 @@ public class RoverControlActivity extends BaseActivity implements
                     videoStarting && !webRtcFirst) {
                 videoWebRtcFallback = true;
                 if (webRtcReceiver != null) webRtcReceiver.stop();
-                webRtcView.setVisibility(View.GONE);
                 video.setVisibility(View.VISIBLE);
                 startRtspVideo(targetHost);
             }
