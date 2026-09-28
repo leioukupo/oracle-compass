@@ -148,7 +148,10 @@ public class Prefs {
     public static final boolean DEFAULT_ROOT_GRANT_NOTIFICATIONS = false;
     public static final boolean DEFAULT_SYSTEM_LOCKSCREEN_ENABLED = false;
     public static final boolean DEFAULT_GESTURE_GUARD_ENABLED = true;
-    public static final String DEFAULT_ROVER_TARGET_HOST = "10.1.20.83";
+    // K230 uses DHCP; discovery on UDP 7789 supplies the current address.
+    // Keeping a historical fixed address here makes a reboot/DHCP lease change
+    // look like a video failure on the rover page.
+    public static final String DEFAULT_ROVER_TARGET_HOST = "";
     public static final int DEFAULT_ROVER_UDP_PORT = 5555;
     public static final boolean DEFAULT_ROVER_AUTO_DISCOVERY = true;
     public static final boolean DEFAULT_ROVER_BROADCAST = true;
@@ -260,9 +263,11 @@ public class Prefs {
     public static String roverTargetHost(Context c) {
         String host = get(c, K_ROVER_TARGET_HOST, DEFAULT_ROVER_TARGET_HOST);
         host = host == null ? "" : host.trim();
-        // The old app shipped this address as its default; migrate that known
-        // stale value so devices without a discovery beacon reach current K230.
-        if ("10.1.20.36".equals(host)) return DEFAULT_ROVER_TARGET_HOST;
+        // Older releases shipped fixed DHCP addresses as defaults. Treat them
+        // as unset so UDP 7789 discovery can select the current K230 address.
+        if ("10.1.20.36".equals(host) || "10.1.20.83".equals(host)) {
+            return DEFAULT_ROVER_TARGET_HOST;
+        }
         return host;
     }
 
