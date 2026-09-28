@@ -635,13 +635,13 @@ public class RoverControlActivity extends BaseActivity implements
         rtspPath.setText(Prefs.roverRtspPath(this));
         final CheckBox discovery = check("自动发现（7789）", Prefs.roverAutoDiscovery(this));
         final CheckBox broadcast = check("无目标时允许广播", Prefs.roverBroadcast(this));
-        final CheckBox webRtc = check("优先 WebRTC（Android 5.1+，失败回退 RTSP）",
+        final CheckBox webRtc = check("优先 WebRTC（实验性，失败回退 RTSP）",
                 shouldUseWebRtc());
         final CheckBox leftInvert = check("左摇杆 Y 轴反向", Prefs.roverLeftYInverted(this));
         final CheckBox rightInvert = check("右摇杆 Y 轴反向", Prefs.roverRightYInverted(this));
         new RoundDialog(this)
                 .title("车控设置")
-                .text("UDP 5555 协议兼容 ESP32，约 50Hz；视频优先 WebRTC，失败回退 RTSP/UDP，再回退 TCP")
+                .text("UDP 5555 协议兼容 ESP32，约 50Hz；视频默认 RTSP，必要时可启用 WebRTC")
                 .field(host)
                 .field(port)
                 .field(rtspPort)

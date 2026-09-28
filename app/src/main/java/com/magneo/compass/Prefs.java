@@ -159,9 +159,10 @@ public class Prefs {
     public static final String DEFAULT_ROVER_RTSP_PATH = "/test";
     public static final String ROVER_VIDEO_WEBRTC = "webrtc";
     public static final String ROVER_VIDEO_RTSP = "rtsp";
-    // Prefer the low-latency WebRTC path on new installs. A value explicitly
-    // saved by the user (including RTSP) is still returned unchanged.
-    public static final String DEFAULT_ROVER_VIDEO_MODE = ROVER_VIDEO_WEBRTC;
+    // RTSP is the compatibility path for the Android 5.1 MTK devices used by
+    // the rover. A value explicitly saved by the user (including WebRTC) is
+    // still returned unchanged.
+    public static final String DEFAULT_ROVER_VIDEO_MODE = ROVER_VIDEO_RTSP;
     public static final String DEFAULT_NETEASE_QUALITY = "standard";
     public static final String MUSIC_SOURCE_LOCAL = "local";
     public static final String MUSIC_SOURCE_NETEASE = "netease";
@@ -313,13 +314,13 @@ public class Prefs {
     }
 
     public static String roverVideoMode(Context c) {
-        // Releases before WebRTC priority stored their RTSP default in the
-        // same key.  Do not let that legacy value silently disable WebRTC on
-        // upgrade; an RTSP choice made in the current settings screen carries
-        // the explicit marker below and remains respected.
+        // Releases before the RTSP compatibility default stored their mode in
+        // the same key without an explicit user-choice marker. Treat that
+        // legacy value as the compatibility default; an explicit choice made
+        // in the current settings screen carries the marker below.
         if (!getB(c, K_ROVER_VIDEO_MODE_USER_SET, false)
                 && sp(c).contains(K_ROVER_VIDEO_MODE)) {
-            return ROVER_VIDEO_WEBRTC;
+            return DEFAULT_ROVER_VIDEO_MODE;
         }
         String mode = get(c, K_ROVER_VIDEO_MODE, DEFAULT_ROVER_VIDEO_MODE);
         return ROVER_VIDEO_RTSP.equalsIgnoreCase(mode) ? ROVER_VIDEO_RTSP : ROVER_VIDEO_WEBRTC;

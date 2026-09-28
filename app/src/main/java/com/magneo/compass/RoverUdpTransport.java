@@ -29,6 +29,7 @@ public final class RoverUdpTransport {
     private final Context context;
     private final Listener listener;
     private final WifiManager wifi;
+    private WifiManager.MulticastLock discoveryMulticastLock;
     private final Object sendLock = new Object();
     private volatile boolean running;
     /** Invalidates send/discovery workers across a fast pause/resume cycle. */
@@ -67,6 +68,7 @@ public final class RoverUdpTransport {
         reloadPrefs();
         final int generation = ++lifecycleGeneration;
         running = true;
+        acquireDiscoveryMulticastLock();
         try {
             socket = new DatagramSocket();
             socket.setBroadcast(true);
@@ -76,6 +78,7 @@ public final class RoverUdpTransport {
         }
         if (socket == null) {
             running = false;
+            releaseDiscoveryMulticastLock();
             notifyState();
             return;
         }
@@ -161,6 +164,7 @@ public final class RoverUdpTransport {
             neutral.setDaemon(true);
             neutral.start();
         }
+        releaseDiscoveryMulticastLock();
         interrupt(sendThread);
         interrupt(discoveryThread);
         sendThread = null;
@@ -169,6 +173,28 @@ public final class RoverUdpTransport {
     }
 
     public boolean isRunning() { return running; }
+
+    /** Android 5.x Wi-Fi drivers may filter broadcast/multicast beacons unless
+     * the application explicitly holds this lock while discovery is active. */
+    private void acquireDiscoveryMulticastLock() {
+        if (!autoDiscovery || wifi == null || discoveryMulticastLock != null) return;
+        try {
+            WifiManager.MulticastLock lock = wifi.createMulticastLock("rover-k230-discovery");
+            lock.setReferenceCounted(false);
+            lock.acquire();
+            discoveryMulticastLock = lock;
+        } catch (Exception e) {
+            recordError(e);
+        }
+    }
+
+    private void releaseDiscoveryMulticastLock() {
+        WifiManager.MulticastLock lock = discoveryMulticastLock;
+        discoveryMulticastLock = null;
+        if (lock != null) {
+            try { if (lock.isHeld()) lock.release(); } catch (Exception ignored) {}
+        }
+    }
     public String activeHost() {
         // Keep the last discovered address across pause/resume and brief
         // beacon gaps. Falling back to broadcast after 3.5s made a reopened

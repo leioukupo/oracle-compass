@@ -725,7 +725,7 @@ public class SettingsWebServer {
                 .append(rowInput("RTSP 端口", Prefs.K_ROVER_RTSP_PORT, "number", String.valueOf(Prefs.DEFAULT_ROVER_RTSP_PORT)))
                 .append(rowInput("RTSP 路径", Prefs.K_ROVER_RTSP_PATH, "text", Prefs.DEFAULT_ROVER_RTSP_PATH))
                 .append(rowSelect("车控视频模式", Prefs.K_ROVER_VIDEO_MODE, null,
-                        "<option value='webrtc'>优先 WebRTC（低延迟，失败回退 RTSP）</option>"
+                        "<option value='webrtc'>优先 WebRTC（实验性，失败回退 RTSP）</option>"
                                 + "<option value='rtsp'>优先 RTSP UDP（失败回退 TCP）</option>", null))
                 .append(rowCheckbox("自动发现", Prefs.K_ROVER_AUTO_DISCOVERY, "监听 UDP 7789 的 talos/k230/hello"))
                 .append(rowCheckbox("允许广播兜底", Prefs.K_ROVER_BROADCAST, "无可用单播目标时发送单个广播帧"))
