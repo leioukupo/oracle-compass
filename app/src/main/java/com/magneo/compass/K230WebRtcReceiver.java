@@ -315,7 +315,15 @@ public final class K230WebRtcReceiver {
             Log.i(TAG, "[" + run + "] status request " + statusUrl);
             JSONObject capability = getJson(statusUrl);
             String firmware = capability.optString("firmware", "");
-            k230CloseSafe = firmware.toLowerCase(java.util.Locale.US).contains("close-safe");
+            String firmwareLower = firmware.toLowerCase(java.util.Locale.US);
+            // The 2026-09-24 gimbal-smooth image already implements the safe
+            // logical /close path, but its historical version string predates
+            // the close-safe marker. Keep reopen reliable on that deployed
+            // board while retaining the conservative default for unknown or
+            // older CanMV images whose native close can crash the process.
+            k230CloseSafe = capability.optInt("close_safe", 0) == 1
+                    || firmwareLower.contains("close-safe")
+                    || firmwareLower.equals("k230-main-2026-09-24-gimbal-smooth-r1");
             String capabilityError = capability.optString("last_error", "");
             String capabilityState = capability.optString("state", "");
             Log.i(TAG, "[" + run + "] status available=" + capability.optInt("available", 0)
