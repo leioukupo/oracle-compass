@@ -58,8 +58,13 @@ public class SettingsWebServer {
     private static volatile ServerSocket server;
     private static volatile Thread thread;
     private static volatile Context app;
+    // Screen/MJPEG/H.264 preview endpoints are intentionally long-lived.  A
+    // fixed four-thread pool allowed stale preview sockets to occupy every
+    // worker, making a normal page refresh (and /appmgr/state) appear frozen.
+    // Keep a small core but allow short control requests to get their own
+    // worker instead of waiting behind a video stream.
     private static final ExecutorService webWorkers = new ThreadPoolExecutor(
-            4, 4, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<Runnable>(16),
+            4, 16, 60L, TimeUnit.SECONDS, new java.util.concurrent.SynchronousQueue<Runnable>(),
             new ThreadFactory() {
                 @Override public Thread newThread(Runnable r) {
                     Thread t = new Thread(r, "web-conn");
@@ -284,9 +289,9 @@ public class SettingsWebServer {
                 if (!authed) serveJson(out, appMgrAuthError());
                 else serveJson(out, AdbManager.stop(app));
             }
-            else if (path.equals("/appmgr/state")) serveJson(out, AppManager.state(app, req.header("x-appmgr-token")));
-            else if (path.equals("/appmgr/login")) serveJson(out, AppManager.login(app, body));
-            else if (path.equals("/appmgr/setup")) serveJson(out, AppManager.setup(app, body));
+            else if (path.equals("/appmgr/state")) serveJson(out, AppManager.state(app, authToken(req)));
+            else if (path.equals("/appmgr/login")) serveAuthJson(out, AppManager.login(app, body));
+            else if (path.equals("/appmgr/setup")) serveAuthJson(out, AppManager.setup(app, body));
             else if (path.equals("/appmgr/apps")) {
                 if (!authed) serveJson(out, appMgrAuthError());
                 else serveJson(out, AppManager.apps(app));
@@ -493,9 +498,38 @@ public class SettingsWebServer {
 
     private static boolean isAuthed(Request req) {
         if (req == null) return false;
-        String token = req.header("x-appmgr-token");
-        if (token == null || token.trim().isEmpty()) token = qParam(req.target, "access");
+        String token = authToken(req);
         return AppManager.authorized(app, token);
+    }
+
+    /** Resolve the bearer token from JS, legacy URL access, or the persistent cookie. */
+    private static String authToken(Request req) {
+        if (req == null) return "";
+        String header = req.header("x-appmgr-token");
+        String query = qParam(req.target, "access");
+        String cookie = cookieValue(req.header("cookie"), "appmgrToken");
+        // A browser may retain an old localStorage token after another login
+        // rotated the session. Prefer any currently valid candidate, so the
+        // persistent cookie can recover the page without another password.
+        if (header != null && AppManager.authorized(app, header.trim())) return header.trim();
+        if (query != null && AppManager.authorized(app, query.trim())) return query.trim();
+        if (cookie != null && AppManager.authorized(app, cookie.trim())) return cookie.trim();
+        if (header != null && !header.trim().isEmpty()) return header.trim();
+        if (query != null && !query.trim().isEmpty()) return query.trim();
+        return cookie == null ? "" : cookie.trim();
+    }
+
+    private static String cookieValue(String header, String name) {
+        if (header == null || header.trim().isEmpty() || name == null) return "";
+        for (String part : header.split(";")) {
+            String p = part.trim();
+            int eq = p.indexOf('=');
+            if (eq <= 0 || !name.equals(p.substring(0, eq).trim())) continue;
+            String value = p.substring(eq + 1).trim();
+            try { return URLDecoder.decode(value, "UTF-8"); }
+            catch (Exception ignored) { return value; }
+        }
+        return "";
     }
 
     private static boolean requireAuth(OutputStream out, boolean authed) throws IOException {
@@ -1468,6 +1502,24 @@ public class SettingsWebServer {
     private static void serveJson(OutputStream out, JSONObject o) throws IOException {
         byte[] b = (o == null ? "{}" : o.toString()).getBytes("UTF-8");
         writeHead(out, "application/json; charset=utf-8", b.length);
+        out.write(b);
+    }
+
+    /** Login/setup response also establishes a browser-managed persistent session. */
+    private static void serveAuthJson(OutputStream out, JSONObject o) throws IOException {
+        byte[] b = (o == null ? "{}" : o.toString()).getBytes("UTF-8");
+        String token = o == null ? "" : o.optString("token", "");
+        String extra = "";
+        if (token != null && !token.isEmpty()) {
+            // Base64 tokens contain cookie-safe characters in practice; escape
+            // the few separators so old Android WebView cookie parsers keep
+            // the complete value (including trailing '=' padding).
+            String cookie = token.replace("%", "%25").replace("+", "%2B")
+                    .replace("/", "%2F").replace("=", "%3D");
+            extra = "Set-Cookie: appmgrToken=" + cookie
+                    + "; Max-Age=2592000; Path=/; HttpOnly\r\n";
+        }
+        writeHead(out, "application/json; charset=utf-8", b.length, extra);
         out.write(b);
     }
 
@@ -3343,8 +3395,14 @@ public class SettingsWebServer {
     }
 
     private static void writeHead(OutputStream out, String type, long len) throws IOException {
+        writeHead(out, type, len, "");
+    }
+
+    private static void writeHead(OutputStream out, String type, long len, String extra)
+            throws IOException {
         out.write(("HTTP/1.1 200 OK\r\nContent-Type: " + type + "\r\nContent-Length: " + len
-                + "\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").getBytes("ISO-8859-1"));
+                + "\r\nCache-Control: no-cache\r\n" + (extra == null ? "" : extra)
+                + "Connection: close\r\n\r\n").getBytes("ISO-8859-1"));
     }
 
     private static void serveBootAssetDownload(OutputStream out, String target) throws IOException {
