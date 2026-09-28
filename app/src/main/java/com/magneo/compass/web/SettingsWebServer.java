@@ -750,7 +750,7 @@ public class SettingsWebServer {
                 .append("</form></div></div>")
                 .append("<div class='savebar hidden' id='savebar'><div class='inner'><div><b id='dirtyState'>未修改</b><div class='hint'>保存前自动导出备份；Key 留空不会覆盖旧值。</div></div><div><button type='button' onclick='save()'>保存设置</button><span class='state' id='msg'></span></div></div></div>")
                 .append("<script>")
-                .append("var token=sessionStorage.getItem('appmgrToken')||'',started=false,dirty=false,appApps=[],fsConns=[],convCache=null,streamOn=false;")
+                .append("function readAuthToken(){try{return localStorage.getItem('appmgrToken')||sessionStorage.getItem('appmgrToken')||'';}catch(e){return sessionStorage.getItem('appmgrToken')||'';}}function saveAuthToken(t){try{localStorage.setItem('appmgrToken',t);}catch(e){}try{sessionStorage.setItem('appmgrToken',t);}catch(e){}}var token=readAuthToken(),started=false,dirty=false,appApps=[],fsConns=[],convCache=null,streamOn=false;")
                 .append("var streamEnded=false,mse=null,sb=null,abortCtl=null,watchdog=null,sess=0,streamPoll=null;")
                 .append("var boxBuf=new Uint8Array(0),boxOff=0,initDone=false,appending=false,pending=[],gotData=false;")
                 .append("function q(s){return document.querySelector(s)}function qa(s){return document.querySelectorAll(s)}")
@@ -762,8 +762,8 @@ public class SettingsWebServer {
                 .append("function chip(id,text,ok,bad){var e=q('#'+id);if(!e)return;e.textContent=text||'未知';var c=e.parentNode;c.className='chip'+(ok?' ok':'')+(bad?' bad':'')}")
                 .append("var publicTimer=null;function boot(){wireTabs();wireDirty();wireAuthKeys();publicStatus();publicTimer=setInterval(function(){if(!document.hidden)publicStatus()},5000)}")
                 .append("function authState(){api('GET','/appmgr/state',null,function(d){var p=q('#authPanel'),c=q('#console'),b=q('#authBadge'),h=q('#authHelp');if(!d||!d.ok){b.textContent='未登录';return}if(!d.hasPassword){h.textContent='首次使用请设置管理密码';b.textContent='未设置密码';p.classList.remove('hidden');c.classList.add('hidden');return}if(d.authed){b.textContent='已登录';p.classList.add('hidden');c.classList.remove('hidden');q('#savebar').classList.remove('hidden');if(!started){started=true;initConsole()}}else{b.textContent='未登录';p.classList.remove('hidden');c.classList.add('hidden');q('#savebar').classList.add('hidden')}})}")
-                .append("function appLogin(){api('POST','/appmgr/login',enc({password:q('#appPwd').value}),function(d){if(d&&d.ok){token=d.token;sessionStorage.setItem('appmgrToken',token);q('#appPwd').value='';msg('appAuth','已登录');authState()}else msg('appAuth',d&&d.err?d.err:'登录失败')},'application/x-www-form-urlencoded')}")
-                .append("function appSetup(){api('POST','/appmgr/setup',enc({password:q('#appPwd').value,oldPassword:q('#appOldPwd').value}),function(d){if(d&&d.ok){token=d.token;sessionStorage.setItem('appmgrToken',token);q('#appPwd').value='';q('#appOldPwd').value='';msg('appAuth','管理密码已保存');authState()}else msg('appAuth',d&&d.err?d.err:'设置失败')},'application/x-www-form-urlencoded')}")
+                .append("function appLogin(){api('POST','/appmgr/login',enc({password:q('#appPwd').value}),function(d){if(d&&d.ok){token=d.token;saveAuthToken(token);q('#appPwd').value='';msg('appAuth','已登录');authState()}else msg('appAuth',d&&d.err?d.err:'登录失败')},'application/x-www-form-urlencoded')}")
+                .append("function appSetup(){api('POST','/appmgr/setup',enc({password:q('#appPwd').value,oldPassword:q('#appOldPwd').value}),function(d){if(d&&d.ok){token=d.token;saveAuthToken(token);q('#appPwd').value='';q('#appOldPwd').value='';msg('appAuth','管理密码已保存');authState()}else msg('appAuth',d&&d.err?d.err:'设置失败')},'application/x-www-form-urlencoded')}")
                 .append("function wireAuthKeys(){var p=q('#appPwd'),o=q('#appOldPwd');if(p)p.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();appLogin()}});if(o)o.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();appSetup()}})}")
                 .append("function msg(id,t){var e=q('#'+id);if(e)e.textContent=t||''}")
                 .append("function publicStatus(){api('GET','/status',null,function(d){if(d){chip('ovVad',d.vadEnabled?'开启':'关闭',!!d.vadEnabled,!d.vadEnabled);chip('ovAsr',d.asrUrlSet?'已配置':'未配置',!!d.asrUrlSet,!d.asrUrlSet);chip('ovAsrFinal',d.asrFinalUrlSet?'已配置':'未配置',!!d.asrFinalUrlSet,false);chip('ovLlm',d.apiKeySet?d.apiKeyMask:'未设置',!!d.apiKeySet,!d.apiKeySet);chip('ovTts',d.ttsUrlSet?'已配置':'未配置',!!d.ttsUrlSet,!d.ttsUrlSet);msg('voiceConfigState',d.voiceConfigMessage||'') }});if(!started){api('GET','/frpc/status',null,function(d){if(d)chip('ovFrpc',d.status==='running'?'运行中':(d.status==='error'?'异常':'停止'),d.status==='running',d.status==='error')});api('GET','/adb/status',null,function(d){if(!d)return;var h=d.health||'checking',t=h==='healthy'?'服务正常':(h==='degraded'?'连接积压':(h==='down'?'未监听':'检测中'));chip('ovAdb',t,h==='healthy',h==='degraded'||h==='down')})}}")
@@ -1785,6 +1785,9 @@ public class SettingsWebServer {
                 } else if (k.equals(Prefs.K_ROVER_VIDEO_MODE)) {
                     Prefs.put(app, k, Prefs.ROVER_VIDEO_RTSP.equalsIgnoreCase(v)
                             ? Prefs.ROVER_VIDEO_RTSP : Prefs.ROVER_VIDEO_WEBRTC);
+                    // A web-console choice must bypass the legacy default-mode
+                    // migration on the next read.
+                    Prefs.putB(app, Prefs.K_ROVER_VIDEO_MODE_USER_SET, true);
                 } else if (k.equals(Prefs.K_ROVER_TARGET_HOST)) {
                     Prefs.put(app, k, v == null ? "" : v.trim());
                 } else if (k.equals(Prefs.K_SYSTEM_LOCKSCREEN_ENABLED)) {

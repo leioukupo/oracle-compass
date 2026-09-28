@@ -48,8 +48,22 @@ public class AppManager {
 
     public static boolean authorized(Context ctx, String token) {
         if (!hasPassword(ctx) || token == null || token.isEmpty()) return false;
-        String cur = sessionToken;
+        String cur = currentToken(ctx);
         return !cur.isEmpty() && constEq(cur, token);
+    }
+
+    /** Keep the single-console token valid across an app process restart. */
+    private static String currentToken(Context ctx) {
+        String cur = sessionToken;
+        if (!cur.isEmpty()) return cur;
+        synchronized (AUTH_LOCK) {
+            cur = sessionToken;
+            if (cur.isEmpty()) {
+                cur = Prefs.get(ctx, Prefs.K_WEB_ADMIN_TOKEN, "");
+                if (!cur.isEmpty()) sessionToken = cur;
+            }
+            return cur;
+        }
     }
 
     public static JSONObject state(Context ctx, String token) {
@@ -79,6 +93,7 @@ public class AppManager {
             if (!checkPassword(ctx, password)) return err("密码不正确");
             String token = newToken();
             synchronized (AUTH_LOCK) { sessionToken = token; }
+            Prefs.put(ctx, Prefs.K_WEB_ADMIN_TOKEN, token);
             o.put("ok", true);
             o.put("token", token);
         } catch (Exception e) {
@@ -104,6 +119,7 @@ public class AppManager {
             Prefs.put(ctx, Prefs.K_WEB_ADMIN_HASH, hash(salt, password));
             String token = newToken();
             synchronized (AUTH_LOCK) { sessionToken = token; }
+            Prefs.put(ctx, Prefs.K_WEB_ADMIN_TOKEN, token);
             o.put("ok", true);
             o.put("token", token);
         } catch (Exception e) {

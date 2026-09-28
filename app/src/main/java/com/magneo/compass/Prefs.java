@@ -68,6 +68,8 @@ public class Prefs {
     public static final String K_FRPC_CONFIG = "frpcConfig";
     public static final String K_WEB_ADMIN_SALT = "webAdminSalt";
     public static final String K_WEB_ADMIN_HASH = "webAdminHash";
+    /** Persistent browser-console bearer token; regenerated when the password changes. */
+    public static final String K_WEB_ADMIN_TOKEN = "webAdminToken";
     public static final String K_ADB_TCP_AUTO = "adbTcpAuto";
     public static final String K_ADB_TCP_PORT = "adbTcpPort";
     public static final String K_ADB_TUNNEL_SYNC_BOOT = "adbTunnelSyncBoot";
@@ -676,6 +678,9 @@ public class Prefs {
             if (!dir.exists() && !dir.mkdirs()) return;
             JSONObject o = new JSONObject();
             for (Map.Entry<String, ?> e : sp(c).getAll().entrySet()) {
+                // The web-console bearer token is deliberately not copied to
+                // the portable JSON backup file.
+                if (K_WEB_ADMIN_TOKEN.equals(e.getKey())) continue;
                 Object v = e.getValue();
                 if (v == null) continue;
                 o.put(e.getKey(), v);
