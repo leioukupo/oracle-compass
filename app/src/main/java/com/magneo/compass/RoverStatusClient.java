@@ -7,6 +7,7 @@ import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 
 /** Optional read-only K230 status stream.  UDP control never depends on it. */
 public final class RoverStatusClient {
@@ -95,11 +96,32 @@ public final class RoverStatusClient {
             } else if ("status".equals(t)) {
                 String mode = obj.optString("mode", obj.optString("gimbal_mode", ""));
                 if (mode.length() > 0 && listener != null) listener.onMode(mode);
-                publish("K230 状态在线");
+                publish(formatGimbalStatus(obj));
             }
         } catch (Exception ignored) {
             // The K230 may interleave diagnostic lines; ignore malformed frames.
         }
+    }
+
+    private String formatGimbalStatus(JSONObject obj) {
+        StringBuilder out = new StringBuilder("K230 状态在线");
+        if (obj.has("gimbal_tilt_feedback_deg")) {
+            double tilt = obj.optDouble("gimbal_tilt_feedback_deg", Double.NaN);
+            if (!Double.isNaN(tilt)) {
+                out.append(String.format(Locale.US, " · 俯仰 %.1f°", tilt));
+            }
+        }
+        if (obj.optInt("gimbal_feedback_ready", 0) == 0) {
+            out.append(" · 云台反馈未就绪");
+        } else if (obj.optInt("gimbal_pan_locked", 0) != 0) {
+            out.append(" · 水平互锁(俯仰≤下限)");
+        } else {
+            int rotation = obj.optInt("gimbal_pan_rotation", 0);
+            if (rotation == 1) out.append(" · 水平旋转A");
+            else if (rotation == 2) out.append(" · 水平旋转B");
+            else out.append(" · 水平待机");
+        }
+        return out.toString();
     }
 
     private void publish(final String value) {
