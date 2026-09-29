@@ -113,6 +113,12 @@ public final class RoverStatusClient {
         }
         if (obj.optInt("gimbal_feedback_ready", 0) == 0) {
             out.append(" · 云台反馈未就绪");
+            if (obj.has("gimbal_pan_feedback_stat") ||
+                    obj.has("gimbal_tilt_feedback_stat")) {
+                out.append(String.format(Locale.US, "(P:%02X T:%02X)",
+                        obj.optInt("gimbal_pan_feedback_stat", 0),
+                        obj.optInt("gimbal_tilt_feedback_stat", 0)));
+            }
         } else if (obj.optInt("gimbal_pan_locked", 0) != 0) {
             out.append(" · 水平互锁(俯仰≤下限)");
         } else {
