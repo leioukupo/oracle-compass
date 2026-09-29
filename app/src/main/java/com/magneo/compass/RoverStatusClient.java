@@ -22,6 +22,10 @@ public final class RoverStatusClient {
     /** Prevents an interrupted worker from becoming live again after restart. */
     private volatile int lifecycleGeneration;
     private volatile String host = "";
+    // K230 uses t=status both for the small STM32 heartbeat frame and for the
+    // 500 ms diagnostic snapshot.  Keep the last rich gimbal status so the
+    // heartbeat frame cannot overwrite it with the optInt(..., 0) fallback.
+    private String lastDetailedStatus = "K230 状态在线";
     private Thread thread;
     private volatile Socket socket;
 
@@ -96,11 +100,26 @@ public final class RoverStatusClient {
             } else if ("status".equals(t)) {
                 String mode = obj.optString("mode", obj.optString("gimbal_mode", ""));
                 if (mode.length() > 0 && listener != null) listener.onMode(mode);
-                publish(formatGimbalStatus(obj));
+                if (hasGimbalDiagnostics(obj)) {
+                    lastDetailedStatus = formatGimbalStatus(obj);
+                    publish(lastDetailedStatus);
+                } else {
+                    // This is normally the compact STM32 status frame.  It
+                    // does not contain a feedback-ready bit, so it must not
+                    // be interpreted as feedback_ready=0.
+                    publish(lastDetailedStatus);
+                }
             }
         } catch (Exception ignored) {
             // The K230 may interleave diagnostic lines; ignore malformed frames.
         }
+    }
+
+    private boolean hasGimbalDiagnostics(JSONObject obj) {
+        return obj.has("gimbal_feedback_ready") ||
+                obj.has("gimbal_tilt_feedback_deg") ||
+                obj.has("gimbal_pan_feedback_stat") ||
+                obj.has("gimbal_tilt_feedback_stat");
     }
 
     private String formatGimbalStatus(JSONObject obj) {
